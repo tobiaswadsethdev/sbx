@@ -1,9 +1,11 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
 
 mod doctor;
+mod ops;
 mod seed;
 mod session;
 mod store;
+mod tui;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -11,7 +13,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use openshell_client::{CliClient, CreateOpts, Error as OsError, OpenShell};
 
-use session::{SELECTOR_MANAGED, Session, State};
+use session::{Session, State};
 use store::Store;
 
 #[derive(Parser)]
@@ -26,7 +28,7 @@ struct Cli {
     gateway: Option<String>,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -83,23 +85,25 @@ fn main() -> ExitCode {
     }
 
     let result = match cli.command {
-        Command::Doctor => {
+        // No subcommand: the TUI is the point of the tool.
+        None => tui::run(client),
+        Some(Command::Doctor) => {
             let checks = doctor::run(&client);
             return match doctor::report(&checks) {
                 0 => ExitCode::SUCCESS,
                 _ => ExitCode::FAILURE,
             };
         }
-        Command::New {
+        Some(Command::New {
             repo,
             name,
             task,
             base,
             policy,
             providers,
-        } => cmd_new(&client, repo, name, task, base, policy, providers),
-        Command::Ls => cmd_ls(&client),
-        Command::Rm { names } => cmd_rm(&client, names),
+        }) => cmd_new(&client, repo, name, task, base, policy, providers),
+        Some(Command::Ls) => cmd_ls(&client),
+        Some(Command::Rm { names }) => cmd_rm(&client, names),
     };
 
     match result {
@@ -195,28 +199,16 @@ fn cmd_new(
 }
 
 fn cmd_ls(client: &dyn OpenShell) -> Fallible {
-    let mut store = Store::load()?;
-    let live = client.list(Some(SELECTOR_MANAGED))?;
-    let mut rec = store::reconcile(store.list().into_iter().cloned().collect(), &live);
+    let refreshed = ops::refresh(client)?;
 
-    // Adopt sandboxes the gateway knows about but the cache does not: the
-    // metadata lives in the sandbox precisely so this can work.
-    for orphan in &rec.orphans {
-        let sandbox = format!("sbx-{orphan}");
-        match seed::read_meta(client, &sandbox) {
-            Ok(s) => {
-                println!("adopted `{}` from {}", s.name, sandbox);
-                rec.sessions.push(s);
-            }
-            Err(e) => eprintln!("sbx: could not adopt {sandbox}: {e}"),
-        }
+    for name in &refreshed.adopted {
+        println!("adopted `{name}`");
+    }
+    for warning in &refreshed.warnings {
+        eprintln!("sbx: {warning}");
     }
 
-    rec.sessions.sort_by(|a, b| a.name.cmp(&b.name));
-    store.replace_all(rec.sessions.clone());
-    store.save()?;
-
-    if rec.sessions.is_empty() {
+    if refreshed.sessions.is_empty() {
         println!("no sessions. create one with: sbx new --repo <url> --task <what to do>");
         return Ok(());
     }
@@ -226,7 +218,7 @@ fn cmd_ls(client: &dyn OpenShell) -> Fallible {
         "{:<20} {:<10} {:>5}  {:<24} REPO",
         "NAME", "STATE", "AGE", "BRANCH"
     );
-    for s in &rec.sessions {
+    for s in &refreshed.sessions {
         println!(
             "{:<20} {:<10} {:>5}  {:<24} {}",
             s.name,

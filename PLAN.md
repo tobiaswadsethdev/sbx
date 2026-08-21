@@ -84,8 +84,10 @@ Each increment ends in something runnable and is committed separately.
   adoption of live sandboxes after total cache loss. The sandbox rather than
   the cache is the source of truth: labels cannot hold a URL or a branch, so
   the record lives in `/sandbox/.sbx/meta.json`.
-- **3. TUI shell** — ratatui list pane + preview pane, vim keys, live refresh,
-  no attach yet.
+- **3. TUI shell** — DONE. ratatui list + preview panes, vim keys, 3s
+  background refresh, colour-coded states. All gateway I/O runs on a worker
+  thread; the render thread never blocks on a subprocess. Bare `sbx` launches
+  it. Verified by driving it inside tmux and capturing the rendered panes.
 - **4. Attach** — tmux session per sandbox, Enter attaches, detach returns
   cleanly (suspend/restore the TUI's terminal state).
 - **5. Diff pane** — `git diff` from inside the sandbox, syntax-highlighted,
