@@ -1,0 +1,32 @@
+# Subscription-backed auth for Claude Code inside a sandbox.
+#
+# The builtin `claude-code` profile only accepts an Anthropic API key, which
+# bills per token. This profile instead carries the long-lived OAuth token
+# minted by `claude setup-token` on the host, which is backed by the Claude
+# subscription. The gateway injects it at runtime, so it never lands on the
+# sandbox filesystem.
+id: claude-code-oauth
+display_name: Claude Code (subscription OAuth)
+description: Claude Code CLI authenticated with a long-lived subscription OAuth token
+category: agent
+credentials:
+  - name: oauth_token
+    description: Long-lived OAuth token from `claude setup-token`
+    env_vars:
+      - CLAUDE_CODE_OAUTH_TOKEN
+    required: true
+    auth_style: header
+    header_name: authorization
+    query_param: ''
+endpoints:
+  - { host: api.anthropic.com,     port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: statsig.anthropic.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: sentry.io,             port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: platform.claude.com,   port: 443, protocol: rest, access: read-write, enforcement: enforce }
+binaries:
+  - /usr/bin/claude
+  - /usr/local/bin/claude
+inference_capable: true
+discovery:
+  credentials:
+    - oauth_token

@@ -1,0 +1,5 @@
+/target/
+*.tar.gz
+# never commit credentials or minted tokens
+*.token
+.env
