@@ -79,9 +79,11 @@ Each increment ends in something runnable and is committed separately.
   `OpenShell` trait over the CLI with typed errors, unit tests over captured
   0.0.110 JSON, `#[ignore]`d live integration tests (create/exec/delete
   roundtrip, 1.8s), and `sbx doctor`. Clippy and rustfmt clean.
-- **2. Session store** — create/list/delete sessions headlessly
-  (`sbx new`, `sbx ls`, `sbx rm`), JSON persistence, labels as the source of
-  truth so a crashed TUI can re-adopt live sandboxes.
+- **2. Session store** — DONE. `sbx new` / `ls` / `rm`, seeding (clone, work
+  branch, host git identity), pure reconciliation against the gateway, and
+  adoption of live sandboxes after total cache loss. The sandbox rather than
+  the cache is the source of truth: labels cannot hold a URL or a branch, so
+  the record lives in `/sandbox/.sbx/meta.json`.
 - **3. TUI shell** — ratatui list pane + preview pane, vim keys, live refresh,
   no attach yet.
 - **4. Attach** — tmux session per sandbox, Enter attaches, detach returns

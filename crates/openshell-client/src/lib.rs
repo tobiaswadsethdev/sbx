@@ -48,26 +48,37 @@ pub enum Error {
 }
 
 /// Sandbox lifecycle phase as reported by the gateway.
+///
+/// Taken from the `SANDBOX_PHASE_*` enum in the gateway binary rather than
+/// guessed: the JSON carries the TitleCase form of each.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Phase {
-    Pending,
+    Provisioning,
+    Starting,
     Ready,
+    Stopping,
+    /// Compute released, workspace retained.
     Stopped,
-    Failed,
-    Terminating,
-    /// Forward compatibility: a phase this build does not know about.
-    Unknown(String),
+    Deleting,
+    Error,
+    /// The gateway's own "no idea" phase.
+    Unknown,
+    /// A phase this build does not know about, kept verbatim.
+    Other(String),
 }
 
 impl From<&str> for Phase {
     fn from(s: &str) -> Self {
         match s {
-            "Pending" => Phase::Pending,
+            "Provisioning" => Phase::Provisioning,
+            "Starting" => Phase::Starting,
             "Ready" => Phase::Ready,
+            "Stopping" => Phase::Stopping,
             "Stopped" => Phase::Stopped,
-            "Failed" => Phase::Failed,
-            "Terminating" => Phase::Terminating,
-            other => Phase::Unknown(other.to_string()),
+            "Deleting" => Phase::Deleting,
+            "Error" => Phase::Error,
+            "Unknown" => Phase::Unknown,
+            other => Phase::Other(other.to_string()),
         }
     }
 }
@@ -75,12 +86,15 @@ impl From<&str> for Phase {
 impl std::fmt::Display for Phase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Phase::Pending => f.write_str("Pending"),
+            Phase::Provisioning => f.write_str("Provisioning"),
+            Phase::Starting => f.write_str("Starting"),
             Phase::Ready => f.write_str("Ready"),
+            Phase::Stopping => f.write_str("Stopping"),
             Phase::Stopped => f.write_str("Stopped"),
-            Phase::Failed => f.write_str("Failed"),
-            Phase::Terminating => f.write_str("Terminating"),
-            Phase::Unknown(s) => f.write_str(s),
+            Phase::Deleting => f.write_str("Deleting"),
+            Phase::Error => f.write_str("Error"),
+            Phase::Unknown => f.write_str("Unknown"),
+            Phase::Other(s) => f.write_str(s),
         }
     }
 }
@@ -423,6 +437,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_every_known_phase() {
+        for (text, want) in [
+            ("Provisioning", Phase::Provisioning),
+            ("Starting", Phase::Starting),
+            ("Ready", Phase::Ready),
+            ("Stopping", Phase::Stopping),
+            ("Stopped", Phase::Stopped),
+            ("Deleting", Phase::Deleting),
+            ("Error", Phase::Error),
+            ("Unknown", Phase::Unknown),
+        ] {
+            assert_eq!(Phase::from(text), want);
+            assert_eq!(want.to_string(), text, "Display must round-trip");
+        }
+    }
+
+    #[test]
     fn parses_gateway_status() {
         let st: GatewayStatus = serde_json::from_str(STATUS_JSON).unwrap();
         assert!(st.is_connected());
@@ -430,14 +461,14 @@ mod tests {
         assert_eq!(st.authentication.status, "authenticated");
     }
 
-    /// Unknown fields must not break parsing: the gateway adds them between
-    /// patch releases and a hard failure would take the whole TUI down.
+    /// Unknown fields and phases must not break parsing: the gateway adds them
+    /// between patch releases and a hard failure would take the whole TUI down.
     #[test]
     fn tolerates_unknown_fields_and_phases() {
         let json = r#"{"id":"x","name":"y","phase":"Rebooting","future_field":true}"#;
         let raw: RawSandbox = serde_json::from_str(json).unwrap();
         let s = Sandbox::from(raw);
-        assert_eq!(s.phase, Phase::Unknown("Rebooting".into()));
+        assert_eq!(s.phase, Phase::Other("Rebooting".into()));
         assert!(s.labels.is_empty());
     }
 

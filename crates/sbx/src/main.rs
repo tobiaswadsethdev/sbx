@@ -1,9 +1,18 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
 
 mod doctor;
+mod seed;
+mod session;
+mod store;
+
+use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use openshell_client::CliClient;
+use openshell_client::{CliClient, CreateOpts, Error as OsError, OpenShell};
+
+use session::{SELECTOR_MANAGED, Session, State};
+use store::Store;
 
 #[derive(Parser)]
 #[command(
@@ -24,9 +33,48 @@ struct Cli {
 enum Command {
     /// Check that everything sbx depends on is present and working.
     Doctor,
+
+    /// Start a session: create a sandbox, clone the repo, cut a work branch.
+    New {
+        /// Repository to clone inside the sandbox.
+        #[arg(long)]
+        repo: String,
+
+        /// Session name. Derived from the task when omitted.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// What the agent should do. Stored in the sandbox for later reference.
+        #[arg(long, default_value = "")]
+        task: String,
+
+        /// Branch to clone from. Defaults to the remote's default branch.
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Policy YAML applied to the sandbox.
+        #[arg(long)]
+        policy: Option<PathBuf>,
+
+        /// Credential provider to attach. Repeatable.
+        #[arg(long = "provider")]
+        providers: Vec<String>,
+    },
+
+    /// List sessions, reconciled against the gateway.
+    #[command(alias = "list")]
+    Ls,
+
+    /// Delete sessions and their sandboxes.
+    #[command(alias = "delete")]
+    Rm {
+        /// Session names to remove.
+        #[arg(required = true)]
+        names: Vec<String>,
+    },
 }
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
 
     let mut client = CliClient::new();
@@ -34,12 +82,191 @@ fn main() {
         client = client.with_gateway(g);
     }
 
-    let code = match cli.command {
+    let result = match cli.command {
         Command::Doctor => {
             let checks = doctor::run(&client);
-            doctor::report(&checks)
+            return match doctor::report(&checks) {
+                0 => ExitCode::SUCCESS,
+                _ => ExitCode::FAILURE,
+            };
         }
+        Command::New {
+            repo,
+            name,
+            task,
+            base,
+            policy,
+            providers,
+        } => cmd_new(&client, repo, name, task, base, policy, providers),
+        Command::Ls => cmd_ls(&client),
+        Command::Rm { names } => cmd_rm(&client, names),
     };
 
-    std::process::exit(code);
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("sbx: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+type Fallible = Result<(), Box<dyn std::error::Error>>;
+
+fn cmd_new(
+    client: &dyn OpenShell,
+    repo: String,
+    name: Option<String>,
+    task: String,
+    base: Option<String>,
+    policy: Option<PathBuf>,
+    providers: Vec<String>,
+) -> Fallible {
+    // A name from --name, else the task, else the repo's last path segment.
+    let name = match name {
+        Some(n) => n,
+        None => session::slugify(&task)
+            .or_else(|| {
+                repo.trim_end_matches('/')
+                    .rsplit('/')
+                    .next()
+                    .map(|s| s.trim_end_matches(".git"))
+                    .and_then(session::slugify)
+            })
+            .ok_or("could not derive a session name; pass --name")?,
+    };
+    session::validate_name(&name)?;
+
+    let mut store = Store::load()?;
+    if store.contains(&name) {
+        return Err(format!("session `{name}` already exists").into());
+    }
+
+    let mut s = Session::new(name, repo, task);
+    s.base_branch = base;
+    s.policy = policy.as_ref().map(|p| p.display().to_string());
+    s.providers = providers.clone();
+
+    println!("creating sandbox {} ...", s.sandbox);
+    let opts = CreateOpts {
+        name: s.sandbox.clone(),
+        labels: s.labels(),
+        policy,
+        providers,
+        // Keep the sandbox alive after the create command exits.
+        command: vec!["true".into()],
+        ..Default::default()
+    };
+
+    if let Err(e) = client.create(&opts) {
+        s.state = State::Failed;
+        store.upsert(s);
+        store.save()?;
+        return Err(e.into());
+    }
+
+    s.state = State::Seeding;
+    store.upsert(s.clone());
+    store.save()?;
+
+    println!("cloning {} ...", s.repo);
+    if let Err(e) = seed::seed(client, &s) {
+        s.state = State::Failed;
+        store.upsert(s);
+        store.save()?;
+        return Err(e.into());
+    }
+
+    s.state = State::Ready;
+    store.upsert(s.clone());
+    store.save()?;
+    // Keep the in-sandbox record current: it is what adoption reads back, and
+    // a stale one leaves recovered sessions frozen mid-lifecycle.
+    if let Err(e) = seed::write_meta(client, &s) {
+        eprintln!("sbx: warning: could not refresh sandbox metadata: {e}");
+    }
+
+    println!();
+    println!("session  {}", s.name);
+    println!("sandbox  {}", s.sandbox);
+    println!("branch   {}", s.work_branch);
+    println!("workdir  {}", session::REPO_PATH);
+    Ok(())
+}
+
+fn cmd_ls(client: &dyn OpenShell) -> Fallible {
+    let mut store = Store::load()?;
+    let live = client.list(Some(SELECTOR_MANAGED))?;
+    let mut rec = store::reconcile(store.list().into_iter().cloned().collect(), &live);
+
+    // Adopt sandboxes the gateway knows about but the cache does not: the
+    // metadata lives in the sandbox precisely so this can work.
+    for orphan in &rec.orphans {
+        let sandbox = format!("sbx-{orphan}");
+        match seed::read_meta(client, &sandbox) {
+            Ok(s) => {
+                println!("adopted `{}` from {}", s.name, sandbox);
+                rec.sessions.push(s);
+            }
+            Err(e) => eprintln!("sbx: could not adopt {sandbox}: {e}"),
+        }
+    }
+
+    rec.sessions.sort_by(|a, b| a.name.cmp(&b.name));
+    store.replace_all(rec.sessions.clone());
+    store.save()?;
+
+    if rec.sessions.is_empty() {
+        println!("no sessions. create one with: sbx new --repo <url> --task <what to do>");
+        return Ok(());
+    }
+
+    let now = session::now_epoch();
+    println!(
+        "{:<20} {:<10} {:>5}  {:<24} REPO",
+        "NAME", "STATE", "AGE", "BRANCH"
+    );
+    for s in &rec.sessions {
+        println!(
+            "{:<20} {:<10} {:>5}  {:<24} {}",
+            s.name,
+            s.state.to_string(),
+            session::humanize_age(s.created_at, now),
+            s.work_branch,
+            s.repo,
+        );
+    }
+    Ok(())
+}
+
+fn cmd_rm(client: &dyn OpenShell, names: Vec<String>) -> Fallible {
+    let mut store = Store::load()?;
+    let mut failures = 0;
+
+    for name in names {
+        // Fall back to the naming convention so a sandbox can still be removed
+        // when the cache has lost the session.
+        let sandbox = store
+            .get(&name)
+            .map(|s| s.sandbox.clone())
+            .unwrap_or_else(|| format!("sbx-{name}"));
+
+        match client.delete(&sandbox) {
+            Ok(()) => println!("deleted {sandbox}"),
+            // Already gone is the desired end state, not a failure.
+            Err(OsError::NotFound(_)) => println!("{sandbox} was already gone"),
+            Err(e) => {
+                eprintln!("sbx: could not delete {sandbox}: {e}");
+                failures += 1;
+                continue;
+            }
+        }
+        store.remove(&name);
+    }
+
+    store.save()?;
+    if failures > 0 {
+        return Err(format!("{failures} session(s) could not be removed").into());
+    }
+    Ok(())
 }

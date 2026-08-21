@@ -170,3 +170,36 @@ The token is injected as an environment variable and is **not** written to the
 sandbox filesystem (no `/sandbox/.claude/.credentials.json`). The agent can
 reach Anthropic; nothing else in the sandbox can, so there is no trivial path
 to exfiltrate the credential it was given.
+
+## Gateway constraints worth knowing (measured on 0.0.110)
+
+None of these are in the docs; each was found by hitting it.
+
+| Constraint | Value |
+| --- | --- |
+| Sandbox name length | **19 characters max** |
+| Label value length | 63 characters max |
+| Label value charset | `[A-Za-z0-9._-]` only -- no `/`, so branch names and repo URLs cannot be labels |
+| Sandbox phases | `Provisioning`, `Starting`, `Ready`, `Stopping`, `Stopped`, `Deleting`, `Error`, `Unknown` |
+
+The 19-character sandbox-name cap is the tightest constraint in the system. With
+an `sbx-` prefix it leaves 15 characters for a session name, which is why names
+are slugified by dropping whole trailing words rather than truncating.
+
+The phase list came from `SANDBOX_PHASE_*` strings in the gateway binary. It
+matters that `Deleting` is in it: deletion is asynchronous, so a removed sandbox
+stays listed in `Deleting` for a while, and treating that as alive makes a
+deleted session keep reporting whatever state it last had.
+
+## Session model
+
+The **sandbox is the source of truth**, not the local cache:
+
+* `/sandbox/.sbx/meta.json` inside each sandbox holds the full session record,
+  rewritten on every state change
+* labels (`sbx.managed=true`, `sbx.session=<name>`) carry identity only, since
+  label values cannot hold a URL or a branch
+* `~/.config/sbx/sessions.json` is a cache and can be deleted at any time
+
+Verified: deleting the cache and running `sbx ls` re-adopts every live session
+by reading the record back out of each sandbox.
