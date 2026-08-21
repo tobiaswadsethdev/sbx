@@ -1,0 +1,13 @@
+[package]
+name = "sbx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "sbx"
+path = "src/main.rs"
+
+[dependencies]
+openshell-client = { path = "../openshell-client" }
+clap = { version = "4", features = ["derive"] }

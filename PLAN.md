@@ -74,9 +74,10 @@ Each increment ends in something runnable and is committed separately.
   host-tmux attach via `sandbox connect`, capture-pane and send-keys. Written
   up in `docs/manual-loop.md`. Outstanding: agent auth (below), and a real
   `git push` (needs a token + a scratch repo).
-- **1. Skeleton + client** — cargo workspace, `openshell` client trait over the
-  CLI (`create`/`list`/`get`/`exec`/`delete`), typed errors, `sbx doctor`
-  verifying gateway + docker + tmux.
+- **1. Skeleton + client** — DONE. Cargo workspace (`openshell-client`, `sbx`),
+  `OpenShell` trait over the CLI with typed errors, unit tests over captured
+  0.0.110 JSON, `#[ignore]`d live integration tests (create/exec/delete
+  roundtrip, 1.8s), and `sbx doctor`. Clippy and rustfmt clean.
 - **2. Session store** — create/list/delete sessions headlessly
   (`sbx new`, `sbx ls`, `sbx rm`), JSON persistence, labels as the source of
   truth so a crashed TUI can re-adopt live sandboxes.
