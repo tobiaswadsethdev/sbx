@@ -146,16 +146,19 @@ fn check_linger() -> Check {
     }
 }
 
-/// A cached base image is the difference between a ~1s and a ~minute session.
-fn check_base_image() -> Check {
-    const IMAGE: &str = "ghcr.io/nvidia/openshell-community/sandboxes/base:latest";
-    match probe(&["docker", "image", "inspect", IMAGE, "--format", "{{.Id}}"]) {
-        Some(_) => Check::ok("base image", "cached"),
-        None => Check::warn(
-            "base image",
-            "not cached: first session will pull",
-            format!("docker pull {IMAGE}"),
-        ),
+/// A built image is the difference between a ~1s and a ~minute session.
+fn check_image() -> Check {
+    if crate::image::exists() {
+        Check::ok("image", format!("{} built", crate::session::IMAGE))
+    } else {
+        Check::warn(
+            "image",
+            format!(
+                "{} missing: it will be built on first use",
+                crate::session::IMAGE
+            ),
+            "sbx image build",
+        )
     }
 }
 
@@ -166,7 +169,7 @@ pub fn run(client: &dyn OpenShell) -> Vec<Check> {
         check_docker(),
         check_tmux(),
         check_linger(),
-        check_base_image(),
+        check_image(),
     ]
 }
 

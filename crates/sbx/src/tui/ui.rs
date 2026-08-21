@@ -6,7 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, List, ListItem, Paragraph, Wrap};
 
-use crate::session::{self, Session, State};
+use crate::session::{self, State};
 use crate::tui::App;
 
 /// One colour per state, so the list is scannable without reading it.
@@ -128,7 +128,7 @@ fn field<'a>(label: &'a str, value: &'a str) -> Line<'a> {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let keys = "j/k move  g/G top/bottom  r refresh  q quit";
+    let keys = "enter attach  j/k move  g/G top/bottom  r refresh  q quit";
     let line = match &app.status {
         Some(msg) if app.status_is_error => Line::from(vec![
             Span::styled(" error ", Style::default().bg(Color::Red).fg(Color::Black)),
@@ -154,9 +154,6 @@ fn truncate(s: &str, width: usize) -> String {
     let keep = width.saturating_sub(1);
     s.chars().take(keep).collect::<String>() + "…"
 }
-
-/// Session is re-exported for the widget signatures above.
-pub type _Session = Session;
 
 #[cfg(test)]
 mod tests {

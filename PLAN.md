@@ -14,7 +14,7 @@ Working binary name: `sbx` (changeable).
 | --- | --- | --- |
 | Stack | Rust + ratatui | Matches OpenShell's own implementation language; single static binary; can link their crates later |
 | Working copy | Clone inside the sandbox, publish a branch | Strongest isolation; host never hands the agent a live worktree |
-| Attach | Host tmux session per task, pane runs `openshell sandbox connect` | Attach/detach, scrollback, resize and `capture-pane` previews for free; no PTY emulation in v0 |
+| Attach | tmux **inside** the sandbox, attached via `exec --tty` | Revised in increment 4. The agent survives losing its connection, `capture-pane` works without anything host-side, and a layer disappears. `sandbox connect` cannot be used: it takes no remote command |
 | OpenShell interface | CLI subprocess (`openshell ... --output json` where available) | Python SDK is broken in 0.0.45 and thinner than the CLI; no Rust SDK published. Isolated behind one trait so it can be swapped for gRPC later |
 | Bind mounts | Opt-in only, never default | NVIDIA docs: bind mounts can negate workspace isolation and filesystem policy |
 
@@ -88,13 +88,17 @@ Each increment ends in something runnable and is committed separately.
   background refresh, colour-coded states. All gateway I/O runs on a worker
   thread; the render thread never blocks on a subprocess. Bare `sbx` launches
   it. Verified by driving it inside tmux and capturing the rendered panes.
-- **4. Attach** — tmux session per sandbox, Enter attaches, detach returns
-  cleanly (suspend/restore the TUI's terminal state).
+- **4. Attach** — DONE. Custom image (`sbx-base`, community base plus tmux,
+  Dockerfile embedded in the binary), the agent started under an in-sandbox
+  tmux session with the task as its opening prompt, Enter attaches from the
+  TUI, `Ctrl-b d` returns. Also `sbx attach` and `sbx image build`.
 - **5. Diff pane** — `git diff` from inside the sandbox, syntax-highlighted,
   Tab switches preview/diff, `git diff --stat` in the list.
 - **6. Status detection** — agent hook writing a status file inside the
   sandbox, polled over exec; `capture-pane` heuristic fallback. Drives the
-  colored state column and a "needs input" indicator.
+  colored state column and a "needs input" indicator. The in-sandbox tmux from
+  increment 4 already makes `capture-pane` available, and a permission prompt
+  ("Do you want to make this edit?") is the exact state to detect.
 - **7. Policy layer** — named templates (`readonly-explore`, `feature-work`,
   `net-open`), a keybinding to hot-reload network rules mid-run, and a pane
   streaming policy allow/deny events. **This is the feature claude-squad

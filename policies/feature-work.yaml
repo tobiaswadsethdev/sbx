@@ -19,6 +19,15 @@ filesystem_policy:
     - /sandbox
     - /tmp
     - /dev/null
+    # Pseudo-terminals, needed to run the agent under an in-sandbox tmux.
+    # Landlock governs /dev too: without this, openpty reports "out of pty
+    # devices" and tmux dies with "create window failed: fork failed", even
+    # though /dev/pts/ptmx is mode crw-rw-rw-.
+    #
+    # Grant the directory only. Adding /dev/ptmx as well makes the supervisor
+    # crash-loop at startup -- it is a symlink to pts/ptmx, and granting the
+    # directory already covers the real device.
+    - /dev/pts
 
 landlock:
   compatibility: best_effort

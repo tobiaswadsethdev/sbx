@@ -203,3 +203,52 @@ The **sandbox is the source of truth**, not the local cache:
 
 Verified: deleting the cache and running `sbx ls` re-adopts every live session
 by reading the record back out of each sandbox.
+
+## Running the agent inside the sandbox
+
+The agent runs under a tmux session **inside** the sandbox (`agent`), not in a
+tmux session on the host. That was a change from the original plan, and it is
+better on every axis: the agent survives losing its connection, its output can
+be scraped with `capture-pane` without anything host-side, and it removes a
+whole layer. Attach is then just:
+
+```sh
+openshell sandbox exec -n <sandbox> --tty -- \
+  sh -c 'tmux -f /etc/tmux.conf attach -d -t agent'
+```
+
+`openshell sandbox connect` cannot be used for this: it takes no remote command.
+
+Three things had to be solved to make it work.
+
+### Landlock blocks pseudo-terminals by default
+
+tmux dies with `create window failed: fork failed: Permission denied` and
+`openpty` reports `out of pty devices`, even though `/dev/pts/ptmx` is mode
+`crw-rw-rw-`. fork, setsid and the devpts mount are all fine -- Landlock simply
+governs `/dev` too, and the default policy grants only `/dev/null`.
+
+Add **`/dev/pts`** to `filesystem_policy.read_write`. Do **not** also add
+`/dev/ptmx`: it is a symlink to `pts/ptmx`, granting the directory already
+covers the real device, and adding the symlink makes the supervisor crash-loop
+at startup with nothing useful in the logs.
+
+### Killing an attach abruptly wedges exec for that sandbox
+
+If the `exec --tty` process is killed rather than detached from, every
+subsequent `exec` against that sandbox hangs forever, including `echo hi`. The
+sandbox still reports `Ready`, the tmux server and the agent keep running, and
+an orphaned `tmux: client` is left behind. Other sandboxes are unaffected, so
+the blast radius is one session.
+
+A clean detach (`Ctrl-b d`) never triggers it: the exec exits 0 and the next
+exec works immediately. So `sbx` never kills the attach child -- it waits for
+the user to detach -- and attaches with `-d` so a client stranded by an earlier
+crash is evicted rather than shared.
+
+### Claude Code's first-run onboarding
+
+A fresh sandbox is a fresh `HOME`, so the agent opens on the theme picker and
+then the trust prompt and never reaches its task. The image pre-seeds
+`/sandbox/.claude.json` with `hasCompletedOnboarding`, the baked-in
+`lastOnboardingVersion`, and `hasTrustDialogAccepted` for `/sandbox/repo`.

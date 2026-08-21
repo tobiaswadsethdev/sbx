@@ -1,5 +1,6 @@
 //! The terminal UI.
 
+mod attach;
 mod ui;
 mod worker;
 
@@ -12,6 +13,7 @@ use ratatui::widgets::ListState;
 
 use crate::ops;
 use crate::session::Session;
+use crate::tui::attach::attach;
 use worker::{Request, Update, Worker};
 
 /// How often the session list is reconciled against the gateway.
@@ -34,6 +36,9 @@ pub struct App {
     refreshing: bool,
     last_refresh: Instant,
     should_quit: bool,
+    /// Set by the key handler; acted on by the event loop, which is the only
+    /// place with access to the terminal.
+    attach_request: Option<Session>,
 }
 
 impl App {
@@ -50,6 +55,7 @@ impl App {
             // Force an immediate first refresh.
             last_refresh: Instant::now() - REFRESH_EVERY,
             should_quit: false,
+            attach_request: None,
         }
     }
 
@@ -92,6 +98,9 @@ impl App {
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.move_by(-1),
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.move_by(isize::MIN / 2),
             (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.move_by(isize::MAX / 2),
+            (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
+                self.attach_request = self.selected().cloned();
+            }
             (KeyCode::Char('r'), _) => {
                 // Make the next tick refresh immediately.
                 self.last_refresh = Instant::now() - REFRESH_EVERY;
@@ -153,13 +162,16 @@ impl App {
 }
 
 pub fn run(client: CliClient) -> Result<(), Box<dyn std::error::Error>> {
+    // The worker owns its client; attaching needs a second handle because it
+    // runs on this thread with the terminal handed over.
+    let attach_client = client.clone();
     let worker = Worker::spawn(client);
     let mut app = App::new();
 
     // Installs a panic hook that restores the terminal, so a crash cannot
     // leave the user in raw mode with no echo.
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &worker);
+    let result = event_loop(&mut terminal, &mut app, &worker, &attach_client);
     ratatui::restore();
     result
 }
@@ -168,6 +180,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     worker: &Worker,
+    attach_client: &CliClient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -178,6 +191,18 @@ fn event_loop(
             && key.kind == KeyEventKind::Press
         {
             app.on_key(key);
+        }
+
+        if let Some(session) = app.attach_request.take() {
+            match attach(terminal, attach_client, &session) {
+                Ok(()) => {
+                    // The repository almost certainly moved while attached.
+                    app.previews.remove(&session.name);
+                    app.note(format!("detached from {}", session.name));
+                }
+                Err(e) => app.fail(format!("attach failed: {e}")),
+            }
+            continue;
         }
 
         while let Ok(update) = worker.rx.try_recv() {
@@ -315,6 +340,24 @@ mod tests {
             !app.previews.contains_key("b"),
             "stale preview must be dropped"
         );
+    }
+
+    #[test]
+    fn enter_requests_an_attach_to_the_selected_session() {
+        let mut app = app_with(&["a", "b"]);
+        app.move_by(1);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.attach_request.as_ref().map(|s| s.name.as_str()),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn enter_on_an_empty_list_requests_nothing() {
+        let mut app = app_with(&[]);
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.attach_request.is_none());
     }
 
     #[test]

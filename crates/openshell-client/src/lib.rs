@@ -306,6 +306,27 @@ impl CliClient {
     }
 }
 
+impl CliClient {
+    /// Build a command for an interactive exec that inherits this process's
+    /// terminal.
+    ///
+    /// Unlike [`OpenShell::exec`], nothing is captured: the child owns the tty
+    /// until it exits. Returned rather than run so the caller can tear down its
+    /// own terminal handling first.
+    pub fn interactive_exec(&self, sandbox: &str, argv: &[&str]) -> Command {
+        let mut cmd = Command::new(&self.bin);
+        if let Some(g) = &self.gateway {
+            cmd.arg("--gateway").arg(g);
+        }
+        if let Some(w) = &self.workspace {
+            cmd.arg("--workspace").arg(w);
+        }
+        cmd.args(["sandbox", "exec", "-n", sandbox, "--tty", "--"]);
+        cmd.args(argv);
+        cmd
+    }
+}
+
 impl OpenShell for CliClient {
     fn status(&self) -> Result<GatewayStatus> {
         let display = "status --output json";

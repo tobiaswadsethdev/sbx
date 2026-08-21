@@ -5,7 +5,7 @@ use std::process::Command;
 
 use openshell_client::OpenShell;
 
-use crate::session::{META_PATH, REPO_PATH, Session};
+use crate::session::{META_PATH, REPO_PATH, Session, TASK_PATH};
 
 /// Quote a value for safe interpolation into a `sh -c` script.
 ///
@@ -106,6 +106,56 @@ pub fn seed(client: &dyn OpenShell, session: &Session) -> Result<(), SeedError> 
     Ok(())
 }
 
+/// Script that starts the agent inside the sandbox, under tmux.
+///
+/// Idempotent: if the session already exists the agent is left alone, so
+/// re-running this never restarts work in progress.
+///
+/// The tmux session runs a plain shell and the agent is typed into it, rather
+/// than being the session's command. When the agent exits the pane survives,
+/// which is what makes it possible to attach afterwards and see what happened.
+pub fn start_agent_script(session: &Session) -> String {
+    let launch = if session.task.trim().is_empty() {
+        session.agent.clone()
+    } else {
+        // The task is read from a file at run time so it never has to survive
+        // a second round of quoting inside send-keys.
+        format!("{} \"$(cat {})\"", session.agent, TASK_PATH)
+    };
+
+    format!(
+        r#"set -eu
+if tmux -f /etc/tmux.conf has-session -t {tmux} 2>/dev/null; then
+  exit 0
+fi
+mkdir -p /sandbox/.sbx
+printf '%s' {task} > {task_path}
+tmux -f /etc/tmux.conf new-session -d -s {tmux} -c {repo}
+tmux -f /etc/tmux.conf send-keys -t {tmux} {launch} Enter
+"#,
+        tmux = sh_quote(&session.tmux),
+        task = sh_quote(&session.task),
+        task_path = sh_quote(TASK_PATH),
+        repo = sh_quote(REPO_PATH),
+        launch = sh_quote(&launch),
+    )
+}
+
+/// Start the agent. Safe to call on an already-running session.
+pub fn start_agent(client: &dyn OpenShell, session: &Session) -> Result<(), SeedError> {
+    let out = client.exec(
+        &session.sandbox,
+        &["sh", "-c", &start_agent_script(session)],
+    )?;
+    if !out.ok() {
+        return Err(SeedError::Script {
+            code: out.exit_code,
+            stderr: out.stderr.trim().to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Refresh the metadata record inside the sandbox.
 ///
 /// The record is what adoption reads after the local cache is lost, so it has
@@ -197,6 +247,36 @@ mod tests {
         let cmd = meta_write_command(r#"{"a":"it's"}"#);
         assert!(cmd.starts_with("mkdir -p /sandbox/.sbx &&"));
         assert!(cmd.contains(r"it'\''s"), "JSON must be shell-quoted: {cmd}");
+    }
+
+    #[test]
+    fn agent_start_is_idempotent() {
+        let s = Session::new("x".into(), "url".into(), "do the thing".into());
+        let script = start_agent_script(&s);
+        // Re-running must not restart an agent that is already working.
+        assert!(script.contains("has-session -t 'agent'"));
+        assert!(script.contains("exit 0"));
+    }
+
+    #[test]
+    fn agent_command_reads_the_task_from_a_file() {
+        // A task containing quotes must not need escaping twice, once for the
+        // outer sh -c and again inside tmux send-keys.
+        let s = Session::new(
+            "x".into(),
+            "url".into(),
+            r#"add a "greeting" & quit"#.into(),
+        );
+        let script = start_agent_script(&s);
+        assert!(script.contains("/sandbox/.sbx/task.txt"));
+        assert!(!script.contains(r#"send-keys -t 'agent' 'claude "add a "greeting""#));
+    }
+
+    #[test]
+    fn agent_starts_bare_when_there_is_no_task() {
+        let s = Session::new("x".into(), "url".into(), "   ".into());
+        let script = start_agent_script(&s);
+        assert!(script.contains("send-keys -t 'agent' 'claude' Enter"));
     }
 
     #[test]

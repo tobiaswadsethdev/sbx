@@ -1,6 +1,7 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
 
 mod doctor;
+mod image;
 mod ops;
 mod seed;
 mod session;
@@ -37,35 +38,23 @@ enum Command {
     Doctor,
 
     /// Start a session: create a sandbox, clone the repo, cut a work branch.
-    New {
-        /// Repository to clone inside the sandbox.
-        #[arg(long)]
-        repo: String,
-
-        /// Session name. Derived from the task when omitted.
-        #[arg(long)]
-        name: Option<String>,
-
-        /// What the agent should do. Stored in the sandbox for later reference.
-        #[arg(long, default_value = "")]
-        task: String,
-
-        /// Branch to clone from. Defaults to the remote's default branch.
-        #[arg(long)]
-        base: Option<String>,
-
-        /// Policy YAML applied to the sandbox.
-        #[arg(long)]
-        policy: Option<PathBuf>,
-
-        /// Credential provider to attach. Repeatable.
-        #[arg(long = "provider")]
-        providers: Vec<String>,
-    },
+    New(NewArgs),
 
     /// List sessions, reconciled against the gateway.
     #[command(alias = "list")]
     Ls,
+
+    /// Attach to a session's agent. Detach with Ctrl-b d.
+    Attach {
+        /// Session name.
+        name: String,
+    },
+
+    /// Manage the sandbox image.
+    Image {
+        #[command(subcommand)]
+        action: ImageAction,
+    },
 
     /// Delete sessions and their sandboxes.
     #[command(alias = "delete")]
@@ -74,6 +63,43 @@ enum Command {
         #[arg(required = true)]
         names: Vec<String>,
     },
+}
+
+#[derive(clap::Args)]
+struct NewArgs {
+    /// Repository to clone inside the sandbox.
+    #[arg(long)]
+    repo: String,
+
+    /// Session name. Derived from the task when omitted.
+    #[arg(long)]
+    name: Option<String>,
+
+    /// What the agent should do. Becomes the agent's opening prompt.
+    #[arg(long, default_value = "")]
+    task: String,
+
+    /// Branch to clone from. Defaults to the remote's default branch.
+    #[arg(long)]
+    base: Option<String>,
+
+    /// Policy YAML applied to the sandbox.
+    #[arg(long)]
+    policy: Option<PathBuf>,
+
+    /// Credential provider to attach. Repeatable.
+    #[arg(long = "provider")]
+    providers: Vec<String>,
+
+    /// Create the sandbox and clone, but do not start the agent.
+    #[arg(long)]
+    no_start: bool,
+}
+
+#[derive(Subcommand)]
+enum ImageAction {
+    /// Build the sandbox image (community base plus tmux).
+    Build,
 }
 
 fn main() -> ExitCode {
@@ -94,15 +120,12 @@ fn main() -> ExitCode {
                 _ => ExitCode::FAILURE,
             };
         }
-        Some(Command::New {
-            repo,
-            name,
-            task,
-            base,
-            policy,
-            providers,
-        }) => cmd_new(&client, repo, name, task, base, policy, providers),
+        Some(Command::New(args)) => cmd_new(&client, args),
         Some(Command::Ls) => cmd_ls(&client),
+        Some(Command::Attach { name }) => cmd_attach(&client, &name),
+        Some(Command::Image { action }) => match action {
+            ImageAction::Build => image::build().map_err(Into::into),
+        },
         Some(Command::Rm { names }) => cmd_rm(&client, names),
     };
 
@@ -117,21 +140,14 @@ fn main() -> ExitCode {
 
 type Fallible = Result<(), Box<dyn std::error::Error>>;
 
-fn cmd_new(
-    client: &dyn OpenShell,
-    repo: String,
-    name: Option<String>,
-    task: String,
-    base: Option<String>,
-    policy: Option<PathBuf>,
-    providers: Vec<String>,
-) -> Fallible {
+fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
     // A name from --name, else the task, else the repo's last path segment.
-    let name = match name {
+    let name = match args.name {
         Some(n) => n,
-        None => session::slugify(&task)
+        None => session::slugify(&args.task)
             .or_else(|| {
-                repo.trim_end_matches('/')
+                args.repo
+                    .trim_end_matches('/')
                     .rsplit('/')
                     .next()
                     .map(|s| s.trim_end_matches(".git"))
@@ -146,17 +162,20 @@ fn cmd_new(
         return Err(format!("session `{name}` already exists").into());
     }
 
-    let mut s = Session::new(name, repo, task);
-    s.base_branch = base;
-    s.policy = policy.as_ref().map(|p| p.display().to_string());
-    s.providers = providers.clone();
+    let mut s = Session::new(name, args.repo, args.task);
+    s.base_branch = args.base;
+    s.policy = args.policy.as_ref().map(|p| p.display().to_string());
+    s.providers = args.providers.clone();
+
+    image::ensure()?;
 
     println!("creating sandbox {} ...", s.sandbox);
     let opts = CreateOpts {
         name: s.sandbox.clone(),
         labels: s.labels(),
-        policy,
-        providers,
+        policy: args.policy,
+        providers: args.providers,
+        from: Some(session::IMAGE.to_string()),
         // Keep the sandbox alive after the create command exits.
         command: vec!["true".into()],
         ..Default::default()
@@ -188,6 +207,20 @@ fn cmd_new(
     // a stale one leaves recovered sessions frozen mid-lifecycle.
     if let Err(e) = seed::write_meta(client, &s) {
         eprintln!("sbx: warning: could not refresh sandbox metadata: {e}");
+    }
+
+    if args.no_start {
+        println!(
+            "agent not started (--no-start); attach with: sbx attach {}",
+            s.name
+        );
+    } else {
+        println!("starting {} ...", s.agent);
+        if let Err(e) = seed::start_agent(client, &s) {
+            // The session is usable even if the agent did not come up, so this
+            // is reported rather than treated as a failed create.
+            eprintln!("sbx: warning: could not start the agent: {e}");
+        }
     }
 
     println!();
@@ -227,6 +260,30 @@ fn cmd_ls(client: &dyn OpenShell) -> Fallible {
             s.work_branch,
             s.repo,
         );
+    }
+    Ok(())
+}
+
+fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
+    let store = Store::load()?;
+    let session = store
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("no session `{name}`; see sbx ls"))?;
+
+    let script = format!(
+        "tmux -f /etc/tmux.conf attach -d -t {tmux} 2>/dev/null \
+         || tmux -f /etc/tmux.conf new-session -s {tmux} -c {repo}",
+        tmux = seed::sh_quote(&session.tmux),
+        repo = seed::sh_quote(session::REPO_PATH),
+    );
+    println!("attaching to {name} - detach with Ctrl-b d");
+
+    let status = client
+        .interactive_exec(&session.sandbox, &["sh", "-c", &script])
+        .status()?;
+    if !status.success() {
+        return Err(format!("attach exited with {status}").into());
     }
     Ok(())
 }

@@ -22,6 +22,17 @@ pub const SELECTOR_MANAGED: &str = "sbx.managed=true";
 pub const META_PATH: &str = "/sandbox/.sbx/meta.json";
 /// Where the repository is cloned inside the sandbox.
 pub const REPO_PATH: &str = "/sandbox/repo";
+/// The task prompt, written as a plain file so the shell can read it without
+/// any nested quoting.
+pub const TASK_PATH: &str = "/sandbox/.sbx/task.txt";
+/// Name of the tmux session **inside** the sandbox that the agent runs in.
+///
+/// tmux runs in the sandbox rather than on the host so the agent survives
+/// losing its connection, and so its output can be scraped with capture-pane
+/// without depending on anything host-side.
+pub const TMUX_SESSION: &str = "agent";
+/// Container image sbx runs sandboxes from: the community base plus tmux.
+pub const IMAGE: &str = "sbx-base:latest";
 
 /// Gateway limit on a label value.
 const MAX_LABEL_VALUE: usize = 63;
@@ -147,6 +158,8 @@ impl std::fmt::Display for State {
 pub struct Session {
     pub name: String,
     pub sandbox: String,
+    /// Name of the tmux session inside the sandbox. Stored rather than assumed
+    /// so an older session keeps working if the default ever changes.
     pub tmux: String,
     pub repo: String,
     /// Branch cloned from; `None` means the remote's default.
@@ -193,7 +206,7 @@ impl Session {
     pub fn new(name: String, repo: String, task: String) -> Self {
         Session {
             sandbox: format!("{PREFIX}{name}"),
-            tmux: format!("{PREFIX}{name}"),
+            tmux: TMUX_SESSION.to_string(),
             work_branch: format!("sbx/{name}"),
             name,
             repo,
@@ -252,7 +265,7 @@ mod tests {
             "task".into(),
         );
         assert_eq!(s.sandbox, "sbx-add-auth");
-        assert_eq!(s.tmux, "sbx-add-auth");
+        assert_eq!(s.tmux, TMUX_SESSION);
         assert_eq!(s.work_branch, "sbx/add-auth");
         let l = s.labels();
         assert_eq!(l.get(LABEL_SESSION).map(String::as_str), Some("add-auth"));

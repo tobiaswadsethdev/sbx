@@ -18,12 +18,17 @@ curl https://github.com                                 -> DENIED
 ## Usage
 
 ```sh
-sbx doctor                                    # check gateway, docker, tmux
-sbx new --repo <url> --task "what to do"      # sandbox + clone + work branch
+sbx doctor                                    # check gateway, docker, tmux, image
+sbx image build                               # build the sandbox image (automatic on first use)
+sbx new --repo <url> --task "what to do"      # sandbox + clone + branch + agent
 sbx ls                                        # sessions, reconciled with the gateway
+sbx attach <name>                             # attach to the agent; Ctrl-b d to detach
 sbx rm <name>                                 # delete session and sandbox
 sbx                                           # the TUI
 ```
+
+Each agent runs under a tmux session *inside* its own sandbox, so it keeps
+working whether or not anything is attached to it.
 
 ```
 ┌ sessions (2) ─────────────────┐┌ preview - readme-fix ──────────────────────────┐
@@ -36,7 +41,7 @@ sbx                                           # the TUI
 │                               ││status    1 file(s) changed                     │
 │                               ││ M README                                       │
 └───────────────────────────────┘└────────────────────────────────────────────────┘
- j/k move  g/G top/bottom  r refresh  q quit
+ enter attach  j/k move  g/G top/bottom  r refresh  q quit
 ```
 
 The local cache is disposable: each session's record lives inside its own
