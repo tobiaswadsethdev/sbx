@@ -18,11 +18,12 @@ credentials:
     auth_style: header
     header_name: authorization
     query_param: ''
+# Telemetry endpoints (statsig, sentry) are deliberately omitted: a credentialed
+# endpoint must be L7-inspectable, and there is no reason to spend inspection on
+# agent telemetry when denying it outright works.
 endpoints:
-  - { host: api.anthropic.com,     port: 443, protocol: rest, access: read-write, enforcement: enforce }
-  - { host: statsig.anthropic.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
-  - { host: sentry.io,             port: 443, protocol: rest, access: read-write, enforcement: enforce }
-  - { host: platform.claude.com,   port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: api.anthropic.com,   port: 443, protocol: rest, access: read-write, enforcement: enforce }
+  - { host: platform.claude.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
 binaries:
   - /usr/bin/claude
   - /usr/local/bin/claude

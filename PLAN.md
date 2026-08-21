@@ -72,7 +72,8 @@ Each increment ends in something runnable and is committed separately.
   systemd user service, mTLS-authenticated. Verified by hand: sandbox create
   (~1s warm), policy application, per-binary network enforcement, git clone,
   host-tmux attach via `sandbox connect`, capture-pane and send-keys. Written
-  up in `docs/manual-loop.md`. Outstanding: agent auth (below), and a real
+  up in `docs/manual-loop.md`. Agent auth resolved via a subscription OAuth
+  token in a custom provider profile, verified end to end. Outstanding: a real
   `git push` (needs a token + a scratch repo).
 - **1. Skeleton + client** — DONE. Cargo workspace (`openshell-client`, `sbx`),
   `OpenShell` trait over the CLI with typed errors, unit tests over captured
@@ -113,22 +114,14 @@ Each increment ends in something runnable and is committed separately.
 
 ## Open decisions
 
-### Agent authentication
+### Agent authentication - RESOLVED
 
-The builtin `claude-code` provider profile accepts an API key only
-(`ANTHROPIC_API_KEY` / `CLAUDE_API_KEY`, `x-api-key` header). This host uses
-subscription OAuth (`~/.claude/.credentials.json`). Three ways forward:
+`claude setup-token` mints a long-lived OAuth token backed by the subscription,
+carried by the custom `claude-code-oauth` provider profile and injected by the
+gateway at runtime. No API-key billing, no interactive login per sandbox, and
+the token never lands on the sandbox filesystem. Details and the L7-inspection
+constraint are in `docs/manual-loop.md`.
 
-1. **API key provider** — cleanest fit for OpenShell's model: the key is
-   injected at runtime and never lands on the sandbox filesystem. Costs
-   API-metered billing instead of the subscription.
-2. **OAuth login inside the sandbox** — attach once and run the login flow; the
-   code-paste flow works fine over SSH. Credentials persist in `/sandbox`
-   across stop/start. Best isolation story, one manual step per sandbox, and
-   the login endpoints need to be in the policy.
-3. **Upload host credentials** — pragmatic, but puts a live OAuth token on the
-   sandbox filesystem, which is the exact thing this project exists to avoid.
-   Also has to handle refresh.
-
-`sbx` should ultimately support 1 and 2 as an `--auth` mode, since this problem
-recurs for every subscription-authed agent, not just Claude Code.
+Still worth building later: an `--auth` mode selecting between provider-injected
+tokens and an in-sandbox login, since subscription-authed agents other than
+Claude Code will not all support a setup-token equivalent.
