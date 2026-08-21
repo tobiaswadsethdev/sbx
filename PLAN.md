@@ -66,6 +66,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
+Increments 0-4 are done; 5 onward are specified but not started.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -92,20 +93,100 @@ Each increment ends in something runnable and is committed separately.
   Dockerfile embedded in the binary), the agent started under an in-sandbox
   tmux session with the task as its opening prompt, Enter attaches from the
   TUI, `Ctrl-b d` returns. Also `sbx attach` and `sbx image build`.
-- **5. Diff pane** — `git diff` from inside the sandbox, syntax-highlighted,
-  Tab switches preview/diff, `git diff --stat` in the list.
-- **6. Status detection** — agent hook writing a status file inside the
-  sandbox, polled over exec; `capture-pane` heuristic fallback. Drives the
-  colored state column and a "needs input" indicator. The in-sandbox tmux from
-  increment 4 already makes `capture-pane` available, and a permission prompt
-  ("Do you want to make this edit?") is the exact state to detect.
-- **7. Policy layer** — named templates (`readonly-explore`, `feature-work`,
-  `net-open`), a keybinding to hot-reload network rules mid-run, and a pane
-  streaming policy allow/deny events. **This is the feature claude-squad
-  cannot have.**
-- **8. Publish** — push branch / open PR via `gh` inside the sandbox, or
-  export a patch to the host. Then warm sandbox pool, port-forward for dev
-  servers, config file, README.
+### 5. Diff pane
+
+The main way this loses to claude-squad when the code lives remote, so it is
+worth more care than its size suggests.
+
+- `Tab` cycles the right pane between **preview** and **diff**; remember the
+  choice per session so switching sessions does not reset it.
+- Diff source: one exec running `git --no-pager diff <base>...HEAD` plus
+  `git diff` for uncommitted work, against the merge-base so unrelated commits
+  on the base branch never appear. `--no-pager` matters: `less` is in the image
+  now and git will otherwise try to page under a pty.
+- Add `git diff --shortstat` to the list pane as a `+12/-3` column. The dropped
+  `ops::repo_summary` from increment 2 is the starting point (`git log` shows
+  it).
+- Syntax highlighting: `syntect` is the obvious choice but pulls in a large
+  dependency and a syntax set. Start with diff-only colouring (green add, red
+  remove, cyan hunk header) and judge whether real highlighting earns its
+  weight afterwards.
+- Scrolling is required here -- a diff will not fit. `Paragraph::scroll` plus
+  `j/k`/`PgUp`/`PgDn` while the diff pane has focus, which also means the pane
+  needs a focus concept the TUI does not have yet.
+- Diffs can be enormous. Cap the fetch (`--stat` only above N lines, or
+  head -2000) and say so in the pane rather than truncating silently.
+
+### 6. Status detection
+
+Turns the state column from "the sandbox is up" into "the agent needs you",
+which is the reason to run several sessions at once.
+
+- Primary: a Claude Code hook writing `/sandbox/.sbx/status.json` on turn
+  start/stop. Baked into the image's settings so it needs no per-session setup.
+  One exec per session per tick reads it.
+- Fallback for agents without hooks: `tmux capture-pane -p -t agent | tail`
+  matched against known prompt shapes. Increment 4 produced a real specimen to
+  match against -- `Do you want to make this edit to README?` with a numbered
+  option list.
+- Wire the results to the existing `State::{Running, Waiting, Idle}` variants,
+  which are already defined, serialised and colour-mapped but never set.
+- A "waiting" session should be visually loud -- this is the notification the
+  whole tool exists to deliver.
+- Watch the cost: one exec per session per tick is fine for five sessions and
+  not for fifty. Consider polling only the selected session frequently and the
+  rest slowly.
+
+### 7. Policy layer
+
+The capability claude-squad structurally cannot have, so it deserves to be
+visible rather than buried in a YAML file.
+
+- Named templates shipped with the binary: `readonly-explore` (no egress at
+  all), `feature-work` (what exists today), `net-open` (npm, pypi, crates.io
+  added). `sbx new --policy` should accept a template name as well as a path.
+- Policy pane showing the effective rules per binary. The data is already
+  available: `sandbox get --output json` returns the full effective policy,
+  unlike `policy get` which returns only metadata.
+- A keybinding to widen or tighten network rules mid-run. Network and inference
+  sections hot-reload; filesystem and process sections are locked at creation,
+  so the UI must not offer to change those.
+- Live allow/deny feed. `openshell logs <sandbox>` emits OCSF lines
+  (`OCSF NET:OPEN`, `SSH:OPEN ALLOWED`, `CONFIG:APPLYING`) that can be tailed
+  into a pane. "The agent tried to reach pastebin.com and was denied" as a
+  live event is the demo that sells the tool.
+- Deprecation to fix while here: the gateway warns that `tls: terminate` is
+  deprecated and TLS termination is now automatic; `tls: skip` disables it.
+
+### 8. Publish
+
+- `git push` the work branch, then `gh pr create`, both from inside the
+  sandbox. Needs a GitHub token provider and `github_git` /`github_rest_api`
+  in the policy -- both already written, neither yet exercised against a repo
+  the account can write to. This is the one part of the loop never proven end
+  to end.
+- Alternative for repos with no remote: `git format-patch` and download the
+  patch to the host, which keeps the isolation story intact.
+- Mark the session `Published` (the state exists and is unused).
+
+### Later, unscheduled
+
+- **Warm pool** — less urgent than expected: sandbox creation is ~1s with the
+  image cached, and cloning dominates. Prewarming the *clone* would help more
+  than prewarming the sandbox.
+- **Port forwarding** — `openshell forward` and `openshell service` for dev
+  servers an agent starts.
+- **Config file** — default policy, default provider, default repo, refresh
+  interval. Everything is flags today.
+- **Recovering a wedged sandbox** — after an abruptly killed attach, exec hangs
+  forever for that sandbox. `sbx doctor <session>` could detect it (exec with a
+  short timeout) and offer `sandbox stop && sandbox start` as a repair before
+  falling back to recreating.
+- **Multiple agents** — the `agent` field is already stored per session and
+  hardcoded to `claude`. codex, opencode and copilot are all in the community
+  policy, so most of the work is policy templates plus a launch command.
+- **`sbx new` from the TUI** — creating a session still means dropping to the
+  shell.
 
 ## Risks
 
@@ -133,3 +214,35 @@ constraint are in `docs/manual-loop.md`.
 Still worth building later: an `--auth` mode selecting between provider-injected
 tokens and an in-sandbox login, since subscription-authed agents other than
 Claude Code will not all support a setup-token equivalent.
+
+## Picking this up again
+
+Current state: increments 0-4 done, `main` at a clean tree, 41 tests, clippy
+and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
+`systemctl --user status openshell-gateway`.
+
+The loop that works today:
+
+```sh
+sbx new --repo <url> --task "..." --policy policies/feature-work.yaml \
+        --provider claude-oauth
+sbx            # Enter to attach, Ctrl-b d to detach, q to quit
+sbx rm <name>
+```
+
+Things a future session should know that are not obvious from the code:
+
+* OpenShell is v0.0.x and moves fast. All CLI knowledge lives in
+  `crates/openshell-client`. Constraints found the hard way -- sandbox names
+  capped at 19 characters, label values 63 characters of `[A-Za-z0-9._-]`, the
+  real phase vocabulary, Landlock blocking `/dev/pts`, `/dev/ptmx` crash-looping
+  the supervisor, credentialed endpoints needing L7 inspection -- are all
+  recorded in `docs/manual-loop.md`.
+* Never kill an attach; wait for the user to detach. Killing it wedges exec for
+  that sandbox permanently.
+* The local cache is disposable by design. To test that, delete
+  `~/.config/sbx/sessions.json` and run `sbx ls`.
+* Live tests need a gateway and are behind `#[ignore]`:
+  `cargo test -p openshell-client -- --ignored`.
+* The TUI is testable without a human: run it under tmux and use
+  `capture-pane` / `send-keys`. Every TUI claim so far was verified that way.
