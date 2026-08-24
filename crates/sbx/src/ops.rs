@@ -3,8 +3,13 @@
 use openshell_client::OpenShell;
 
 use crate::seed;
-use crate::session::{REPO_PATH, SELECTOR_MANAGED, Session};
+use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session};
+use crate::status;
 use crate::store::{self, Store};
+
+/// How much of the agent's pane to capture. Every marker status detection looks
+/// for sits in the last few lines; the rest is transcript.
+const PANE_LINES: usize = 40;
 
 #[derive(Debug, Default)]
 pub struct Refreshed {
@@ -197,15 +202,44 @@ if [ -z "$any" ]; then printf 'no changes yet\n'; fi
     }
 }
 
-/// Added/removed line counts for the list column.
+/// Everything one round trip per session is worth spending an exec on.
 ///
-/// A single `diff --numstat` against the merge-base tree covers committed and
-/// uncommitted work at once, so this stays one cheap exec: it is run for every
-/// session, not just the selected one. Untracked files are counted rather than
-/// read, which keeps the cost independent of what is in them.
-pub fn repo_stat(client: &dyn OpenShell, session: &Session) -> Option<DiffStat> {
-    let script = format!(
-        r#"cd {repo} 2>/dev/null || exit 0
+/// Kept together deliberately. Exec on a sandbox is serialised gateway-side, so
+/// two separate polls would not just double the traffic -- they would queue
+/// behind each other. One script, one round trip, both answers.
+#[derive(Debug, Clone, Default)]
+pub struct Poll {
+    pub stat: Option<DiffStat>,
+    pub status: Option<status::Report>,
+}
+
+/// Read a session's diff stat and agent state in a single exec.
+///
+/// Output is three sections, separated by markers rather than parsed
+/// positionally: a pane capture is arbitrary text and can contain anything,
+/// including something that looks like a stat line.
+pub fn poll(client: &dyn OpenShell, session: &Session) -> Poll {
+    let script = poll_script(session);
+
+    // A poll is decoration on a column: an unreachable sandbox or a
+    // half-seeded repository leaves it blank rather than shouting.
+    let Ok(out) = client.exec(&session.sandbox, &["sh", "-c", &script]) else {
+        return Poll::default();
+    };
+    if !out.ok() {
+        return Poll::default();
+    }
+    parse_poll(&out.stdout, session::now_epoch())
+}
+
+/// The script [`poll`] runs. Separate so its shape can be asserted on.
+///
+/// The repository work is confined to a subshell: a session whose clone has not
+/// finished, or failed, still has an agent worth asking about, and a bare `cd`
+/// failure would otherwise take the rest of the script with it.
+fn poll_script(session: &Session) -> String {
+    format!(
+        r#"( cd {repo} 2>/dev/null || exit 0
 {resolve_base}
 mb=''
 if [ -n "$base" ]; then mb=$(git merge-base "$base" HEAD 2>/dev/null); fi
@@ -213,17 +247,45 @@ if [ -z "$mb" ]; then mb=HEAD; fi
 tracked=$(git --no-pager diff --numstat "$mb" 2>/dev/null |
   awk '{{a+=$1; d+=$2}} END {{printf "%d %d", a+0, d+0}}')
 untracked=$(git ls-files --others --exclude-standard --directory 2>/dev/null | wc -l)
-printf '%s %s\n' "$tracked" "$untracked"
+printf '%s %s
+' "$tracked" "$untracked" )
+printf '%s
+' {status_marker}
+cat {status_path} 2>/dev/null
+printf '
+%s
+' {pane_marker}
+tmux -f /etc/tmux.conf capture-pane -p -t {tmux} 2>/dev/null | tail -n {pane_lines}
 "#,
         repo = seed::sh_quote(REPO_PATH),
         resolve_base = resolve_base(session),
-    );
+        status_marker = seed::sh_quote(status::STATUS_MARKER),
+        status_path = seed::sh_quote(STATUS_PATH),
+        pane_marker = seed::sh_quote(status::PANE_MARKER),
+        tmux = seed::sh_quote(&session.tmux),
+        pane_lines = PANE_LINES,
+    )
+}
 
-    match client.exec(&session.sandbox, &["sh", "-c", &script]) {
-        // A stat is decoration on a column: an unreachable sandbox or a
-        // half-seeded repository leaves the column blank rather than shouting.
-        Ok(out) if out.ok() => DiffStat::parse(out.trimmed()),
-        _ => None,
+/// Split the poll script's output and interpret each part.
+///
+/// Separate from [`poll`] so it can be tested against captured output without a
+/// gateway.
+fn parse_poll(stdout: &str, now: u64) -> Poll {
+    let (stat_part, rest) = match stdout.split_once(status::STATUS_MARKER) {
+        Some(split) => split,
+        // An older sandbox, or a script that failed before the first marker.
+        None => (stdout, ""),
+    };
+    let (hook_part, pane_part) = rest.split_once(status::PANE_MARKER).unwrap_or((rest, ""));
+
+    Poll {
+        stat: DiffStat::parse(stat_part.trim()),
+        status: status::combine(
+            status::parse_hook(hook_part).as_ref(),
+            status::scrape_pane(pane_part),
+            now,
+        ),
     }
 }
 
@@ -303,6 +365,87 @@ mod tests {
         assert!(
             !script.contains("rm -rf /;\n") && script.contains(r"'\''"),
             "the branch name must stay inside one quoted word: {script}"
+        );
+    }
+
+    /// The pane half of the poll output is arbitrary terminal text. If the
+    /// sections were split positionally instead of by marker, a transcript
+    /// containing something stat-shaped would be read as the stat.
+    #[test]
+    fn poll_output_is_split_by_marker_not_by_position() {
+        let stdout = format!(
+            "12 3 1\n{}\n{{\"state\":\"running\",\"at\":1000,\"detail\":\"Bash\"}}\n{}\n             99 99 99\n  esc to interrupt\n",
+            status::STATUS_MARKER,
+            status::PANE_MARKER,
+        );
+        let p = parse_poll(&stdout, 1010);
+
+        assert_eq!(
+            p.stat,
+            Some(DiffStat {
+                added: 12,
+                removed: 3,
+                untracked: 1
+            }),
+            "the stat-shaped line inside the pane must not win"
+        );
+        let status = p.status.expect("a status");
+        assert_eq!(status.state, crate::session::State::Running);
+        assert_eq!(status.detail.as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn a_poll_survives_every_part_being_missing() {
+        // A sandbox with no repository, no status file and no agent.
+        let empty = format!("{}\n\n{}\n", status::STATUS_MARKER, status::PANE_MARKER);
+        let p = parse_poll(&empty, 1000);
+        assert_eq!(p.stat, None);
+        assert!(p.status.is_none());
+
+        // Output that stopped before the first marker, e.g. an older sandbox.
+        let p = parse_poll("5 0 0\n", 1000);
+        assert_eq!(p.stat.map(|s| s.added), Some(5));
+        assert!(p.status.is_none());
+
+        assert_eq!(parse_poll("", 1000).stat, None);
+    }
+
+    /// The whole point of increment 6: a permission prompt on screen reports
+    /// waiting even though the hook file says the agent is running.
+    #[test]
+    fn a_prompt_on_screen_reports_waiting() {
+        let stdout = format!(
+            "1 0 0\n{}\n{{\"state\":\"running\",\"at\":1000,\"detail\":\"Bash\"}}\n{}\n             Do you want to proceed?\n ❯ 1. Yes\n   2. No\n\n Esc to cancel\n",
+            status::STATUS_MARKER,
+            status::PANE_MARKER,
+        );
+        let status = parse_poll(&stdout, 1005).status.expect("a status");
+        assert_eq!(status.state, crate::session::State::Waiting);
+        assert_eq!(status.source, status::Source::Pane);
+    }
+
+    /// The poll script has to read the status file and the pane even when the
+    /// repository is missing, or a half-seeded session never reports anything.
+    #[test]
+    fn the_poll_script_reads_status_outside_the_repository_subshell() {
+        let script_has = |needle: &str| {
+            let s = Session::new("t".into(), "url".into(), "task".into());
+            // Rebuilt here rather than exposed, since only its shape matters.
+            let script = poll_script(&s);
+            assert!(script.contains(needle), "missing {needle} in:\n{script}");
+        };
+        script_has(STATUS_PATH);
+        script_has("capture-pane");
+        script_has(status::STATUS_MARKER);
+        script_has(status::PANE_MARKER);
+        // `cd` failing must not skip the status read, so it is confined to a
+        // subshell rather than exiting the script.
+        let s = Session::new("t".into(), "url".into(), "task".into());
+        let script = poll_script(&s);
+        let cd_line = script.lines().find(|l| l.contains("cd ")).unwrap();
+        assert!(
+            cd_line.trim_start().starts_with('('),
+            "the cd must be inside a subshell: {cd_line}"
         );
     }
 

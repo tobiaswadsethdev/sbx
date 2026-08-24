@@ -32,9 +32,9 @@ Each agent runs under a tmux session *inside* its own sandbox, so it keeps
 working whether or not anything is attached to it.
 
 ```
-┌ sessions (2) ───────────────────────────┐┏ diff - readme-fix [22/61] ━━━━━━━━━━━━━━━━━━┓
-│  add-tests    ready    clean       48s  │┃── committed, vs origin/main                 ┃
-│> readme-fix   ready    +12/-3 ?    52s  │┃diff --git a/README b/README                 ┃
+┌ sessions (2, 1 waiting) ────────────────┐┏ diff - readme-fix [22/61] ━━━━━━━━━━━━━━━━━━┓
+│  add-tests    waiting  clean       48s  │┃── committed, vs origin/main                 ┃
+│> readme-fix   running  +12/-3 ?    52s  │┃diff --git a/README b/README                 ┃
 │                                         │┃@@ -1,4 +1,4 @@                              ┃
 │                                         │┃-Hello Wrold!                                ┃
 │                                         │┃+Hello World!                                ┃
@@ -45,6 +45,14 @@ working whether or not anything is attached to it.
 └─────────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
  j/k scroll  pgup/pgdn page  h pane  tab preview/diff  enter attach  q quit
 ```
+
+The state column is what the *agent* is doing, not just whether the sandbox is
+up. A session blocked on a permission prompt shows `waiting` as a filled badge
+and is counted in the title, so you can see it without scrolling to it -- that
+notification is the reason to run several sessions at once. It comes from
+scraping the agent's screen as well as from hooks baked into the image, because
+Claude Code fires no hook for a permission prompt or an interrupt; the preview
+pane says which source decided.
 
 `Tab` cycles the right pane between the preview and the diff, remembered per
 session. `h`/`l` move focus between the panes, and the movement keys follow it:

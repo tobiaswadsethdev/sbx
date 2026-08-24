@@ -1,0 +1,24 @@
+
+● Update(README.md)
+  ⎿  Added 2 lines
+       7  After forking this repository, you can make some changes to the
+           project, and submit [a Pull Request](https://github.com/octoca
+          t/Spoon-Knife/pulls) as practice.
+       8
+       9  For some more information on how to fork a repository, [check o
+          ut our guide, "Forking Projects""](http://guides.github.com/ove
+          rviews/forking/). Thanks! :sparkling_heart:
+      10 +
+      11 +Reviewed by sbx
+
+● Done. Added "Reviewed by sbx" as a new line at the end of README.md.
+
+✻ Churned for 6s
+
+────────────────────────────────────────────────────────────────────────────────
+❯ commit this
+────────────────────────────────────────────────────────────────────────────────
+  ? for shortcuts
+
+
+

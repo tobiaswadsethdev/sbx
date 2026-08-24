@@ -5,6 +5,7 @@ mod image;
 mod ops;
 mod seed;
 mod session;
+mod status;
 mod store;
 mod tui;
 
@@ -259,10 +260,20 @@ fn cmd_ls(client: &dyn OpenShell) -> Fallible {
         "NAME", "STATE", "AGE", "BRANCH"
     );
     for s in &refreshed.sessions {
+        // One poll per session. Fine for a command that prints once and exits,
+        // unlike the TUI, which has to keep this bounded as sessions are added.
+        let state = match s.state {
+            State::Ready => ops::poll(client, s)
+                .status
+                .map_or(s.state, |report| report.state),
+            // Anything else is a fact about the sandbox, which outranks
+            // anything the agent inside it has to say.
+            other => other,
+        };
         println!(
             "{:<20} {:<10} {:>5}  {:<24} {}",
             s.name,
-            s.state.to_string(),
+            state.to_string(),
             session::humanize_age(s.created_at, now),
             s.work_branch,
             s.repo,
@@ -278,7 +289,7 @@ fn cmd_diff(client: &dyn OpenShell, name: &str) -> Fallible {
         .cloned()
         .ok_or_else(|| format!("no session `{name}`; see sbx ls"))?;
 
-    if let Some(stat) = ops::repo_stat(client, &session) {
+    if let Some(stat) = ops::poll(client, &session).stat {
         println!(
             "+{} -{}  {} untracked",
             stat.added, stat.removed, stat.untracked

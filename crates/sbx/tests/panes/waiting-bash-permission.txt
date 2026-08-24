@@ -1,0 +1,24 @@
+✻ Churned for 6s
+
+❯ Count slowly from 1 to 30, writing each number on its own line in a file
+  called count.txt, using a separate Bash command for each number.
+
+● I'll write each number with its own Bash command, one at a time to keep the
+  order correct.
+
+● Bash(echo "1" > /sandbox/repo/count.txt)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   echo "1" > /sandbox/repo/count.txt
+   Write 1 to count.txt
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to repo/ from this project
+   3. No
+
+ Esc to cancel · Tab to amend
+

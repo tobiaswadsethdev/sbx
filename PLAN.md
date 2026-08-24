@@ -66,7 +66,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-5 are done; 6 onward are specified but not started.
+Increments 0-6 are done; 7 onward are specified but not started.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -113,28 +113,42 @@ Increments 0-5 are done; 6 onward are specified but not started.
   pane is clipped; wrapping a diff is worse, and the fix is a `<`/`>` binding
   when it starts to hurt.
 
-### 6. Status detection
+- **6. Status detection** — DONE. The state column now says what the *agent* is
+  doing, not just that the sandbox is up. Two sources, combined in
+  `crates/sbx/src/status.rs`: Claude Code hooks baked into the image write
+  `/sandbox/.sbx/status.json` via a `sbx-status` script on PATH, and
+  `tmux capture-pane` is matched against markers taken from real specimens
+  committed under `crates/sbx/tests/panes/`. A waiting session is a filled
+  magenta badge plus a count in the list title, so it is legible even scrolled
+  out of view; the preview pane names the tool in play and which source decided.
+  Shares increment 5's exec budget rather than opening a second one -- the stat
+  and the status come back from one `ops::poll`. Also reported by `sbx ls`, and
+  `sbx doctor` warns when the image predates the hooks, since an old image looks
+  entirely healthy while silently never reporting.
 
-Turns the state column from "the sandbox is up" into "the agent needs you",
-which is the reason to run several sessions at once.
+  **The plan had this backwards, and only running it showed why.** The hooks
+  were meant to be primary with the pane as a fallback for agents without them.
+  Measured against Claude Code 2.1.143, the hooks cannot see two of the three
+  states:
 
-- Primary: a Claude Code hook writing `/sandbox/.sbx/status.json` on turn
-  start/stop. Baked into the image's settings so it needs no per-session setup.
-  One exec per session per tick reads it.
-- Fallback for agents without hooks: `tmux capture-pane -p -t agent | tail`
-  matched against known prompt shapes. Increment 4 produced a real specimen to
-  match against -- `Do you want to make this edit to README?` with a numbered
-  option list.
-- Wire the results to the existing `State::{Running, Waiting, Idle}` variants,
-  which are already defined, serialised and colour-mapped but never set.
-- A "waiting" session should be visually loud -- this is the notification the
-  whole tool exists to deliver.
-- Watch the cost: one exec per session per tick is fine for five sessions and
-  not for fifty. Increment 5 already established the pattern to follow -- the
-  right pane polls only the selected session, and the stat column round-robins
-  the rest behind a minimum gap, so the total is bounded by the intervals rather
-  than by the session count. Status detection should share that budget rather
-  than open a second one, especially given that execs on one sandbox serialise.
+  * No `Notification` fires for a permission prompt. A sandbox sitting on "Do
+    you want to proceed?" reports `running`/`Bash` from `PreToolUse` and stays
+    there indefinitely -- so the hooks structurally cannot report the one state
+    the whole tool exists to surface.
+  * No `Stop` fires for an interrupt. Escape returns the agent to its input box
+    without ending a turn, so the file keeps saying `running`. This one was
+    caught only because the TUI showed `running` against a plainly idle screen.
+
+  Both are the same failure: hooks report *events*, and there is no event for
+  every state. So the pane decides, and the file contributes the tool name plus
+  an answer for a sandbox with no agent pane at all. The two disagreeing is the
+  normal case, which is why the preview pane shows which one won.
+
+  Also learned: the idle input box draws the same `❯` glyph as an open menu
+  (`❯ commit this`), so that glyph alone reports every idle session as needing
+  attention. Only a cursor on a *numbered* option means a prompt. And the
+  question wording varies by tool -- "make this edit to README.md?" versus
+  "proceed?" -- so the menu is matched structurally rather than by text.
 
 ### 7. Policy layer
 
@@ -191,6 +205,11 @@ visible rather than buried in a YAML file.
 
 - **OpenShell is v0.0.x and moves fast** (65 releases in ~3 months). Pin the
   version, keep all CLI knowledge in one module, snapshot-test the parsers.
+- **Claude Code's TUI is not an API.** Status detection matches on rendered
+  strings (`Esc to cancel`, `esc to interrupt`, `? for shortcuts`), which a
+  redesign would break. Mitigation: the markers live in one module, the
+  specimens under `crates/sbx/tests/panes/` are real captures, and the tests
+  fail loudly rather than degrading quietly.
 - **Sandbox boot latency** vs an instant tmux session. Mitigation: prebaked
   image with the agent CLI + toolchain, warm pool of idle sandboxes.
 - **Diff review UX** is the main way this loses to claude-squad when code
@@ -217,7 +236,7 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-5 done, `main` at a clean tree, 63 tests, clippy
+Current state: increments 0-6 done, `main` at a clean tree, 88 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
@@ -256,3 +275,13 @@ Things a future session should know that are not obvious from the code:
 * A `Display` impl that calls `f.write_str` silently ignores the formatter's
   width, so `{:<9}` does nothing and columns collide. `State` now uses `f.pad`.
   Worth remembering before adding another padded column.
+* **The image build needs a real context, and heredocs are a trap.** `COPY <<EOF`
+  requires BuildKit; the installed docker (29.6.0, no `buildx`) uses the legacy
+  builder, which ignores the `# syntax=` directive and fails with "no source
+  files were specified" -- a message that never mentions the builder. The build
+  now writes its embedded files to a temp directory and passes that as the
+  context, which works on both. Watch for `docker build ... | tail` hiding a
+  failed build behind `tail`'s exit code.
+* Agent status comes from the *screen*, not the hooks. See increment 6 above:
+  Claude Code fires no hook for a permission prompt or an interrupt. If a future
+  version adds one, `status::combine` is the single place to revisit.

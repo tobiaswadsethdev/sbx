@@ -50,6 +50,25 @@ RUN CLAUDE_VERSION="$(claude --version 2>/dev/null | awk '{print $1}')" \
        }' > /sandbox/.claude.json \
     && chown sandbox:sandbox /sandbox/.claude.json
 
+# Status reporting, so the list view can say "this agent needs you" rather than
+# only "this sandbox is up".
+#
+# The reporter is a script on PATH rather than seven copies of a shell one-liner
+# inlined into settings.json: the payload handling lives in one place, and both
+# files can be linted and tested outside the image.
+#
+# `Notification` is the signal the whole tool exists to deliver -- Claude Code
+# fires it when it needs permission for a tool, or when it has been waiting on
+# input. `Stop` ends a turn, so it means idle rather than finished for good.
+# PreToolUse and PostToolUse mostly keep the timestamp fresh, which is what
+# distinguishes an agent still working from a stale file left by a crashed one.
+COPY sbx-status /usr/local/bin/sbx-status
+COPY claude-settings.json /sandbox/.claude/settings.json
+
+RUN chmod 0755 /usr/local/bin/sbx-status \
+    && chmod 0644 /sandbox/.claude/settings.json \
+    && chown -R sandbox:sandbox /sandbox/.claude
+
 USER sandbox
 
 # Inherited from the base image, restated so a future base change is visible

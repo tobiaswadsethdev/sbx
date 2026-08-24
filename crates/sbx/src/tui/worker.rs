@@ -16,7 +16,7 @@ pub enum Request {
     Refresh,
     Preview(Box<Session>),
     Diff(Box<Session>),
-    Stat(Box<Session>),
+    Poll(Box<Session>),
     Shutdown,
 }
 
@@ -30,9 +30,9 @@ pub enum Update {
         session: String,
         body: String,
     },
-    Stat {
+    Polled {
         session: String,
-        stat: Option<ops::DiffStat>,
+        poll: Box<ops::Poll>,
     },
     Failed(String),
 }
@@ -64,8 +64,8 @@ impl Worker {
                         body: ops::repo_diff(&client, &session),
                         session: session.name,
                     },
-                    Request::Stat(session) => Update::Stat {
-                        stat: ops::repo_stat(&client, &session),
+                    Request::Poll(session) => Update::Polled {
+                        poll: Box::new(ops::poll(&client, &session)),
                         session: session.name,
                     },
                 };

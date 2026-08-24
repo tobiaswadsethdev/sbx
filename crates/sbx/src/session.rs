@@ -25,6 +25,9 @@ pub const REPO_PATH: &str = "/sandbox/repo";
 /// The task prompt, written as a plain file so the shell can read it without
 /// any nested quoting.
 pub const TASK_PATH: &str = "/sandbox/.sbx/task.txt";
+/// Where the agent's hooks record what it is doing. Written by `sbx-status`,
+/// which the image bakes in; see `images/sbx-base/sbx-status`.
+pub const STATUS_PATH: &str = "/sandbox/.sbx/status.json";
 /// Name of the tmux session **inside** the sandbox that the agent runs in.
 ///
 /// tmux runs in the sandbox rather than on the host so the agent survives

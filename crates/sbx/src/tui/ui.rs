@@ -13,6 +13,7 @@ use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph, Wrap};
 
 use crate::ops;
 use crate::session::{self, Session, State};
+use crate::status::Source;
 use crate::tui::{App, Focus, RightView};
 
 /// Width of the session-name column. Names are capped at 15 characters by the
@@ -22,11 +23,22 @@ const NAME_W: usize = 15;
 const STAT_W: usize = 11;
 
 /// One colour per state, so the list is scannable without reading it.
+///
+/// `Waiting` is deliberately the odd one out: a filled badge rather than
+/// coloured text. Noticing that an agent is blocked on you, in a list you are
+/// not currently looking at, is the entire reason to run several sessions at
+/// once, so it gets to be louder than everything else.
 fn state_style(state: State) -> Style {
+    if state == State::Waiting {
+        return Style::default()
+            .bg(Color::Magenta)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD);
+    }
     let colour = match state {
         State::Ready => Color::Green,
         State::Running => Color::Cyan,
-        State::Waiting => Color::Magenta,
+        State::Waiting => unreachable!("handled above"),
         State::Creating | State::Seeding => Color::Yellow,
         State::Idle => Color::Blue,
         State::Published => Color::LightGreen,
@@ -68,11 +80,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .iter()
         .map(|s| {
             let age = session::humanize_age(s.created_at, now);
+            let state = app.effective_state(s);
             let mut spans = vec![
                 Span::raw(format!("{:<w$}", truncate(&s.name, NAME_W), w = NAME_W)),
-                Span::styled(format!("{:<9}", s.state), state_style(s.state)),
+                Span::styled(format!("{state:<9}"), state_style(state)),
+                // A plain gap, so the badge's background stops at the word.
+                Span::raw(" "),
             ];
-            spans.extend(stat_spans(app.stats.get(&s.name).and_then(|c| c.value)));
+            spans.extend(stat_spans(app.poll(&s.name).and_then(|p| p.stat)));
             spans.push(Span::styled(
                 format!("{age:>4}"),
                 Style::default().fg(Color::DarkGray),
@@ -81,11 +96,18 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title = if app.refreshing {
-        format!(" sessions ({}) - refreshing ", app.sessions.len())
+    let waiting = app.waiting_count();
+    let mut title = format!(" sessions ({}", app.sessions.len());
+    if waiting > 0 {
+        // In the title as well as the rows, so it is legible when the waiting
+        // session is scrolled out of view.
+        title.push_str(&format!(", {waiting} waiting"));
+    }
+    if app.refreshing {
+        title.push_str(") - refreshing ");
     } else {
-        format!(" sessions ({}) ", app.sessions.len())
-    };
+        title.push_str(") ");
+    }
 
     if items.is_empty() {
         let hint = Paragraph::new(vec![
@@ -258,6 +280,7 @@ fn preview_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
     if !providers.is_empty() {
         lines.push(field("providers", &providers));
     }
+    lines.push(status_line(app, session));
     lines.push(Line::from(""));
 
     match app.previews.get(&session.name) {
@@ -360,6 +383,40 @@ fn is_file_header(line: &str) -> bool {
     line == "--- /dev/null"
         || line == "+++ /dev/null"
         || PREFIXES.iter().any(|p| line.starts_with(p))
+}
+
+/// What the agent is doing, and which source said so.
+///
+/// The source is shown because the two disagree by design: the pane sees a
+/// permission prompt that the hooks cannot, so `waiting (screen)` against
+/// `running (hooks)` is the expected reading, not a contradiction to debug.
+fn status_line(app: &App, session: &Session) -> Line<'static> {
+    let Some(report) = app.agent_status(session) else {
+        return Line::from(vec![
+            Span::styled("agent at ", Style::default().fg(Color::DarkGray)),
+            Span::styled("(not reporting)", Style::default().fg(Color::DarkGray)),
+        ]);
+    };
+
+    let source = match report.source {
+        Source::Hook => "hooks",
+        Source::Pane => "screen",
+    };
+    let mut spans = vec![
+        Span::styled(
+            format!("{:<10}", "agent at"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(report.state.to_string(), state_style(report.state)),
+    ];
+    if let Some(detail) = &report.detail {
+        spans.push(Span::raw(format!(" {detail}")));
+    }
+    spans.push(Span::styled(
+        format!("  ({source})"),
+        Style::default().fg(Color::DarkGray),
+    ));
+    Line::from(spans)
 }
 
 fn field(label: &str, value: &str) -> Line<'static> {
@@ -506,6 +563,25 @@ diff --git a/b b/b
                 .contains("showing 2000 of 3018 lines")
         );
         assert!(!notice.spans[0].content.starts_with("!!!"));
+    }
+
+    /// The badge style must not bleed into the gap or the stat column, which is
+    /// what a background colour applied to a padded span would do.
+    #[test]
+    fn only_waiting_gets_a_filled_badge() {
+        assert_eq!(state_style(State::Waiting).bg, Some(Color::Magenta));
+        for state in [
+            State::Ready,
+            State::Running,
+            State::Idle,
+            State::Creating,
+            State::Seeding,
+            State::Published,
+            State::Failed,
+            State::Dead,
+        ] {
+            assert_eq!(state_style(state).bg, None, "{state} must not be filled");
+        }
     }
 
     #[test]

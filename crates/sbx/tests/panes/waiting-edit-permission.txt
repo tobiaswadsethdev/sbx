@@ -1,0 +1,24 @@
+
+● Update(README.md)
+
+────────────────────────────────────────────────────────────────────────────────
+ Edit file
+ README.md
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  7  After forking this repository, you can make some changes to the project, an
+     d submit [a Pull Request](https://github.com/octocat/Spoon-Knife/pulls) as
+     practice.
+  8
+  9  For some more information on how to fork a repository, [check out our guide
+     , "Forking Projects""](http://guides.github.com/overviews/forking/). Thanks
+     ! :sparkling_heart:
+ 10 +
+ 11 +Reviewed by sbx
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to make this edit to README.md?
+ ❯ 1. Yes
+   2. Yes, allow all edits during this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend
+

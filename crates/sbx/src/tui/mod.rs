@@ -12,7 +12,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::widgets::ListState;
 
 use crate::ops;
-use crate::session::Session;
+use crate::session::{Session, State};
+use crate::status;
 use crate::tui::attach::attach;
 use worker::{Request, Update, Worker};
 
@@ -28,13 +29,17 @@ const TICK: Duration = Duration::from_millis(100);
 /// reading has to keep up. Only the *selected* session is refetched, so this is
 /// one exec per interval no matter how many sessions exist.
 const PANE_TTL: Duration = Duration::from_secs(4);
-/// How long a diff stat is trusted. Longer than [`PANE_TTL`] because the column
-/// is a rough magnitude and every session pays for it, not just the selected
-/// one.
-const STAT_TTL: Duration = Duration::from_secs(15);
-/// Floor on the gap between stat fetches, so a long session list cannot turn
-/// into a continuous stream of execs.
-const STAT_MIN_GAP: Duration = Duration::from_secs(1);
+/// How long a poll -- diff stat plus agent state -- is trusted.
+///
+/// Shorter than a stat alone would need, because the same exec now carries the
+/// "this agent needs you" signal and that is worth being prompt about. Every
+/// session pays for it, not just the selected one, so it is bounded below by
+/// [`POLL_MIN_GAP`].
+const POLL_TTL: Duration = Duration::from_secs(6);
+/// Floor on the gap between polls, so a long session list cannot turn into a
+/// continuous stream of execs. With N sessions a full round trip takes at worst
+/// N times this, and the exec rate never exceeds one per interval.
+const POLL_MIN_GAP: Duration = Duration::from_secs(1);
 
 /// What the right-hand pane is showing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -109,15 +114,15 @@ pub struct App {
     list_state: ListState,
     previews: HashMap<String, Cached<String>>,
     diffs: HashMap<String, Cached<String>>,
-    /// `None` when the sandbox could not be read; the column stays blank.
-    stats: HashMap<String, Cached<Option<ops::DiffStat>>>,
+    /// Diff stat and agent state per session, from one exec each.
+    polls: HashMap<String, Cached<ops::Poll>>,
     /// Sessions whose content is currently being fetched, so the same request
     /// is not queued repeatedly while the worker is busy. One per kind, so a
     /// slow diff does not stall the stat column.
     preview_in_flight: Option<String>,
     diff_in_flight: Option<String>,
-    stat_in_flight: Option<String>,
-    last_stat_request: Instant,
+    poll_in_flight: Option<String>,
+    last_poll_request: Instant,
     /// Right-pane choice per session: switching sessions must not reset it.
     views: HashMap<String, RightView>,
     scroll: HashMap<String, Scroll>,
@@ -144,12 +149,12 @@ impl App {
             list_state: ListState::default(),
             previews: HashMap::new(),
             diffs: HashMap::new(),
-            stats: HashMap::new(),
+            polls: HashMap::new(),
             preview_in_flight: None,
             diff_in_flight: None,
-            stat_in_flight: None,
-            // Force an immediate first stat fetch.
-            last_stat_request: Instant::now() - STAT_MIN_GAP,
+            poll_in_flight: None,
+            // Force an immediate first poll.
+            last_poll_request: Instant::now() - POLL_MIN_GAP,
             views: HashMap::new(),
             scroll: HashMap::new(),
             focus: Focus::default(),
@@ -250,12 +255,46 @@ impl App {
         self.right_height.saturating_sub(1).max(1) as isize
     }
 
+    /// The last poll for a session, if one has come back.
+    pub fn poll(&self, name: &str) -> Option<&ops::Poll> {
+        self.polls.get(name).map(|c| &c.value)
+    }
+
+    /// What to show in the state column.
+    ///
+    /// The gateway only knows whether the sandbox is up; what the *agent* is
+    /// doing comes from polling it. The agent's answer wins when there is one,
+    /// but only over `Ready` -- `Dead`, `Failed` and the in-flight states are
+    /// facts about the sandbox that a stale poll must not paper over.
+    pub fn effective_state(&self, session: &Session) -> State {
+        if session.state != State::Ready {
+            return session.state;
+        }
+        self.poll(&session.name)
+            .and_then(|p| p.status.as_ref())
+            .map_or(session.state, |r| r.state)
+    }
+
+    /// What the agent is doing, for the preview pane.
+    pub fn agent_status(&self, session: &Session) -> Option<&status::Report> {
+        self.poll(&session.name).and_then(|p| p.status.as_ref())
+    }
+
+    /// How many sessions need attention. Drives the count in the list title, so
+    /// a waiting session is visible even when it is scrolled out of view.
+    pub fn waiting_count(&self) -> usize {
+        self.sessions
+            .iter()
+            .filter(|s| self.effective_state(s) == State::Waiting)
+            .count()
+    }
+
     /// Forget everything fetched for a session. Called when the repository is
     /// known to have moved underneath us, e.g. after an attach.
     fn invalidate(&mut self, name: &str) {
         self.previews.remove(name);
         self.diffs.remove(name);
-        self.stats.remove(name);
+        self.polls.remove(name);
     }
 
     fn on_key(&mut self, key: KeyEvent) {
@@ -278,7 +317,7 @@ impl App {
                 self.last_refresh = Instant::now() - REFRESH_EVERY;
                 self.previews.clear();
                 self.diffs.clear();
-                self.stats.clear();
+                self.polls.clear();
                 self.note("refreshing");
             }
             // The movement keys act on whichever pane has focus.
@@ -319,11 +358,11 @@ impl App {
                 }
                 self.diffs.insert(session, Cached::new(body));
             }
-            Update::Stat { session, stat } => {
-                if self.stat_in_flight.as_deref() == Some(session.as_str()) {
-                    self.stat_in_flight = None;
+            Update::Polled { session, poll } => {
+                if self.poll_in_flight.as_deref() == Some(session.as_str()) {
+                    self.poll_in_flight = None;
                 }
-                self.stats.insert(session, Cached::new(stat));
+                self.polls.insert(session, Cached::new(*poll));
             }
             Update::Failed(e) => {
                 self.refreshing = false;
@@ -348,7 +387,7 @@ impl App {
         let live: Vec<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
         self.previews.retain(|name, _| live.contains(name));
         self.diffs.retain(|name, _| live.contains(name));
-        self.stats.retain(|name, _| live.contains(name));
+        self.polls.retain(|name, _| live.contains(name));
         self.views.retain(|name, _| live.contains(name));
         self.scroll.retain(|name, _| live.contains(name));
 
@@ -474,23 +513,23 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
         }
     }
 
-    if app.stat_in_flight.is_some() || app.last_stat_request.elapsed() < STAT_MIN_GAP {
+    if app.poll_in_flight.is_some() || app.last_poll_request.elapsed() < POLL_MIN_GAP {
         return;
     }
-    if let Some(session) = next_stat_target(app) {
-        app.last_stat_request = Instant::now();
-        app.stat_in_flight = Some(session.name.clone());
-        worker.send(Request::Stat(Box::new(session)));
+    if let Some(session) = next_poll_target(app) {
+        app.last_poll_request = Instant::now();
+        app.poll_in_flight = Some(session.name.clone());
+        worker.send(Request::Poll(Box::new(session)));
     }
 }
 
-/// The session whose stat is most worth fetching: the selected one first, since
-/// that is the number being read, then whichever has been stale longest.
-fn next_stat_target(app: &App) -> Option<Session> {
+/// The session most worth polling: the selected one first, since that is what
+/// is being read, then whichever has been stale longest.
+fn next_poll_target(app: &App) -> Option<Session> {
     let due = |s: &Session| {
-        app.stats
+        app.polls
             .get(&s.name)
-            .is_none_or(|c| c.stale_after(STAT_TTL))
+            .is_none_or(|c| c.stale_after(POLL_TTL))
     };
 
     if let Some(s) = app.selected().filter(|s| due(s)) {
@@ -499,9 +538,9 @@ fn next_stat_target(app: &App) -> Option<Session> {
     app.sessions
         .iter()
         .filter(|s| due(s))
-        // Never fetched sorts before any fetched one, so no session starves.
+        // Never polled sorts before any polled one, so no session starves.
         .max_by_key(|s| {
-            app.stats
+            app.polls
                 .get(&s.name)
                 .map_or(Duration::MAX, |c| c.at.elapsed())
         })
@@ -511,7 +550,6 @@ fn next_stat_target(app: &App) -> Option<Session> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::State;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -767,67 +805,141 @@ mod tests {
         assert_eq!(app.right_scroll(), 5);
     }
 
-    /// The stat column is the one read that scales with the number of sessions,
-    /// so the selected session is served first and no other session starves.
+    fn poll_with(state: Option<State>) -> ops::Poll {
+        ops::Poll {
+            stat: None,
+            status: state.map(|state| status::Report {
+                state,
+                detail: None,
+                source: status::Source::Hook,
+            }),
+        }
+    }
+
+    /// The poll is the one read that scales with the number of sessions, so the
+    /// selected session is served first and no other session starves.
     #[test]
-    fn stats_prefer_the_selected_session_then_the_stalest() {
+    fn polls_prefer_the_selected_session_then_the_stalest() {
         let mut app = app_with(&["a", "b", "c"]);
         app.move_by(1); // on "b"
 
         assert_eq!(
-            next_stat_target(&app).map(|s| s.name),
+            next_poll_target(&app).map(|s| s.name),
             Some("b".to_string()),
-            "the number being looked at comes first"
+            "what is being looked at comes first"
         );
 
-        // With "b" measured, the others are picked up.
-        app.stats.insert("b".into(), Cached::new(None));
-        let next = next_stat_target(&app).map(|s| s.name).unwrap();
+        // With "b" polled, the others are picked up.
+        app.polls
+            .insert("b".into(), Cached::new(ops::Poll::default()));
+        let next = next_poll_target(&app).map(|s| s.name).unwrap();
         assert!(next == "a" || next == "c", "got {next}");
 
         // Once everything is fresh there is nothing to do.
-        app.stats.insert("a".into(), Cached::new(None));
-        app.stats.insert("c".into(), Cached::new(None));
-        assert!(next_stat_target(&app).is_none());
+        app.polls
+            .insert("a".into(), Cached::new(ops::Poll::default()));
+        app.polls
+            .insert("c".into(), Cached::new(ops::Poll::default()));
+        assert!(next_poll_target(&app).is_none());
 
         // A stale entry becomes a candidate again.
-        app.stats.insert(
+        app.polls.insert(
             "c".into(),
             Cached {
-                value: None,
-                at: Instant::now() - STAT_TTL - Duration::from_secs(1),
+                value: ops::Poll::default(),
+                at: Instant::now() - POLL_TTL - Duration::from_secs(1),
             },
         );
         assert_eq!(
-            next_stat_target(&app).map(|s| s.name),
+            next_poll_target(&app).map(|s| s.name),
             Some("c".to_string())
         );
     }
 
     #[test]
-    fn stats_pick_the_never_fetched_session_over_a_merely_stale_one() {
+    fn polls_pick_the_never_polled_session_over_a_merely_stale_one() {
         let mut app = app_with(&["a", "b"]);
         app.list_state.select(None); // nothing selected, so no preference
-        app.stats.insert(
+        app.polls.insert(
             "a".into(),
             Cached {
-                value: None,
-                at: Instant::now() - STAT_TTL - Duration::from_secs(1),
+                value: ops::Poll::default(),
+                at: Instant::now() - POLL_TTL - Duration::from_secs(1),
             },
         );
-        // "b" has never been fetched, which must outrank "a" being stale.
+        // "b" has never been polled, which must outrank "a" being stale.
         assert_eq!(
-            next_stat_target(&app).map(|s| s.name),
+            next_poll_target(&app).map(|s| s.name),
             Some("b".to_string())
         );
     }
 
+    /// The gateway says whether the sandbox is up; polling says what the agent
+    /// is doing. The agent's answer is the one worth showing.
     #[test]
-    fn refresh_drops_diffs_stats_views_and_scroll_for_vanished_sessions() {
+    fn the_agent_state_replaces_ready_in_the_column() {
+        let mut app = app_with(&["a"]);
+        app.sessions[0].state = State::Ready;
+        assert_eq!(app.effective_state(&app.sessions[0]), State::Ready);
+
+        app.polls
+            .insert("a".into(), Cached::new(poll_with(Some(State::Waiting))));
+        assert_eq!(app.effective_state(&app.sessions[0]), State::Waiting);
+    }
+
+    /// A poll that arrived before the sandbox died must not keep claiming the
+    /// agent is busy, and an in-flight session must not be overwritten by a
+    /// poll of the previous sandbox.
+    #[test]
+    fn sandbox_facts_outrank_a_poll() {
+        let mut app = app_with(&["a"]);
+        app.polls
+            .insert("a".into(), Cached::new(poll_with(Some(State::Running))));
+
+        for fact in [
+            State::Dead,
+            State::Failed,
+            State::Creating,
+            State::Seeding,
+            State::Published,
+        ] {
+            app.sessions[0].state = fact;
+            assert_eq!(
+                app.effective_state(&app.sessions[0]),
+                fact,
+                "a poll must not paper over {fact}"
+            );
+        }
+    }
+
+    #[test]
+    fn waiting_sessions_are_counted_for_the_title() {
+        let mut app = app_with(&["a", "b", "c"]);
+        for s in &mut app.sessions {
+            s.state = State::Ready;
+        }
+        assert_eq!(app.waiting_count(), 0);
+
+        app.polls
+            .insert("a".into(), Cached::new(poll_with(Some(State::Waiting))));
+        app.polls
+            .insert("b".into(), Cached::new(poll_with(Some(State::Running))));
+        app.polls
+            .insert("c".into(), Cached::new(poll_with(Some(State::Waiting))));
+        assert_eq!(app.waiting_count(), 2);
+
+        // A dead sandbox is not waiting on anyone, whatever its last poll said.
+        app.sessions[0].state = State::Dead;
+        assert_eq!(app.waiting_count(), 1);
+    }
+
+    #[test]
+    fn refresh_drops_diffs_polls_views_and_scroll_for_vanished_sessions() {
         let mut app = app_with(&["a", "b"]);
         for name in ["a", "b"] {
             app.diffs.insert(name.into(), Cached::new("d".into()));
-            app.stats.insert(name.into(), Cached::new(None));
+            app.polls
+                .insert(name.into(), Cached::new(ops::Poll::default()));
             app.views.insert(name.into(), RightView::Diff);
             app.scroll.insert(name.into(), Scroll::default());
         }
@@ -841,7 +953,7 @@ mod tests {
         assert!(app.diffs.contains_key("a"));
         for map_is_empty in [
             !app.diffs.contains_key("b"),
-            !app.stats.contains_key("b"),
+            !app.polls.contains_key("b"),
             !app.views.contains_key("b"),
             !app.scroll.contains_key("b"),
         ] {
@@ -856,13 +968,14 @@ mod tests {
         let mut app = app_with(&["a"]);
         app.previews.insert("a".into(), Cached::new("p".into()));
         app.diffs.insert("a".into(), Cached::new("d".into()));
-        app.stats.insert("a".into(), Cached::new(None));
+        app.polls
+            .insert("a".into(), Cached::new(ops::Poll::default()));
 
         app.invalidate("a");
 
         assert!(app.previews.is_empty());
         assert!(app.diffs.is_empty());
-        assert!(app.stats.is_empty());
+        assert!(app.polls.is_empty());
     }
 
     #[test]

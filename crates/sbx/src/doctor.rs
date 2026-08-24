@@ -149,6 +149,18 @@ fn check_linger() -> Check {
 /// A built image is the difference between a ~1s and a ~minute session.
 fn check_image() -> Check {
     if crate::image::exists() {
+        // An image from an older sbx works, but reports no agent status, and
+        // nothing else about it looks wrong.
+        if !crate::image::reports_status() {
+            return Check::warn(
+                "image",
+                format!(
+                    "{} predates status reporting: the state column will stay `ready`",
+                    crate::session::IMAGE
+                ),
+                "sbx image build",
+            );
+        }
         Check::ok("image", format!("{} built", crate::session::IMAGE))
     } else {
         Check::warn(

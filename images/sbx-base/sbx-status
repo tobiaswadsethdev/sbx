@@ -1,0 +1,39 @@
+#!/bin/sh
+# sbx-status <state> -- record the agent's state where sbx can read it.
+#
+# Invoked from the Claude Code hooks in settings.json. The hook payload arrives
+# as JSON on stdin and is read only to pull out a human-readable detail.
+#
+# Nothing here is allowed to fail loudly. A hook that exits non-zero interferes
+# with the agent -- a failing PostToolUse hook is reported back to the model as
+# an error -- so every path ends in `exit 0`, and a sandbox where this script
+# breaks simply shows no status rather than a broken agent.
+#
+# The JSON shape written here is a contract with `status::parse_report` on the
+# Rust side; sbx has a test asserting the two agree.
+state=${1:-idle}
+detail=''
+
+# Hooks always supply a payload. The `-t 0` guard is for a human running
+# `sbx-status running` by hand to check a sandbox, which would otherwise block
+# forever waiting for stdin that never comes.
+if [ ! -t 0 ]; then
+    detail=$(timeout 2 cat 2>/dev/null |
+        jq -r '(.message // .tool_name // "") | tostring' 2>/dev/null |
+        head -c 160)
+fi
+
+dir=/sandbox/.sbx
+mkdir -p "$dir" 2>/dev/null
+
+# Write then rename, so a reader polling this file never sees it half-written.
+tmp="$dir/status.json.$$"
+printf '{"state":"%s","at":%s,"detail":%s}\n' \
+    "$state" \
+    "$(date +%s)" \
+    "$(printf '%s' "$detail" | jq -Rs . 2>/dev/null || printf '""')" \
+    >"$tmp" 2>/dev/null &&
+    mv "$tmp" "$dir/status.json" 2>/dev/null
+rm -f "$tmp" 2>/dev/null
+
+exit 0

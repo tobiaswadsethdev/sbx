@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "sbx-status idle" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "sbx-status running" }] }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "sbx-status running" }]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [{ "type": "command", "command": "sbx-status running" }]
+      }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "sbx-status waiting" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "sbx-status idle" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "sbx-status idle" }] }
+    ]
+  }
+}
