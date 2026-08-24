@@ -28,6 +28,7 @@ pub enum Request {
         update: Box<PolicyUpdate>,
         label: String,
     },
+    Publish(Box<Session>),
     Shutdown,
 }
 
@@ -60,6 +61,10 @@ pub enum Update {
         session: String,
         label: String,
         result: Box<Result<PolicyRevision, String>>,
+    },
+    Published {
+        session: String,
+        result: Box<Result<crate::publish::Outcome, String>>,
     },
     Failed(String),
 }
@@ -101,6 +106,14 @@ impl Worker {
                     },
                     Request::Events(session) => Update::Events {
                         result: Box::new(ops::events(&client, &session)),
+                        session: session.name,
+                    },
+                    Request::Publish(session) => Update::Published {
+                        result: Box::new(ops::publish(
+                            &client,
+                            &session,
+                            &crate::publish::Options::default(),
+                        )),
                         session: session.name,
                     },
                     Request::Repolicy {

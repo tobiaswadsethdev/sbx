@@ -67,7 +67,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-7 are done; 8 onward are specified but not started.
+Increments 0-8 are done. What is left is the unscheduled list below.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -224,16 +224,72 @@ Increments 0-7 are done; 8 onward are specified but not started.
   discovery step. Proving it needs a token and a writable repo, which is
   increment 8.
 
-### 8. Publish
+- **8. Publish** — DONE, and Azure DevOps rather than GitHub first, because
+  that is the forge actually in use. `sbx publish` pushes the work branch and
+  opens a pull request from inside the sandbox; `P` in the TUI does the same
+  behind a y/n confirmation, since a push is outward-facing and not undone by
+  pressing something else. The session is marked `Published` in one place
+  (`ops::publish`) so the CLI and the TUI cannot disagree. Forge is derived
+  from the repo URL (`crates/sbx/src/forge.rs`), never configured.
 
-- `git push` the work branch, then `gh pr create`, both from inside the
-  sandbox. Needs a GitHub token provider and `github_git` /`github_rest_api`
-  in the policy -- both already written, neither yet exercised against a repo
-  the account can write to. This is the one part of the loop never proven end
-  to end.
-- Alternative for repos with no remote: `git format-patch` and download the
-  patch to the host, which keeps the isolation story intact.
-- Mark the session `Published` (the state exists and is unused).
+  Verified end to end against a real private Azure DevOps repository: clone,
+  commit, push, pull request created, a second publish recognising the already
+  open pull request, and `readonly-explore` refusing the push at L7 -- which
+  closes the gap increment 7 left open.
+
+  **The credential model is not what the plan assumed, and this is the finding
+  that mattered.** "The gateway injects the credential at runtime" is true but
+  misleading. The env var the provider sets holds a *placeholder*
+  (`openshell:resolve:env:v<id>_<NAME>`), and the gateway substitutes the real
+  secret into an outgoing header that contains it -- including inside the base64
+  of a Basic credential. Three consequences:
+
+  * The gateway never *adds* a header. It rewrites one. A plain
+    `curl https://dev.azure.com/...` sends nothing to substitute and gets a 302
+    to an Entra sign-in page. Every request has to carry the placeholder
+    itself, via `http.extraHeader` for git and `-H` for curl.
+  * The placeholder is safe to persist. Seeding writes it into the clone's
+    `http.extraHeader`, so a later push needs no special casing, and the value
+    is meaningless outside that sandbox.
+  * **This was never a publish-only problem.** Cloning a *private* repository
+    needs the header too, so `sbx new` previously only worked against public
+    repos -- for GitHub as much as Azure DevOps. Seeding is now forge-aware,
+    and degrades to a plain `git` when no credential is present so a public
+    repo still clones with no provider attached.
+
+  Other things only running it showed:
+
+  * Azure DevOps PATs are HTTP **Basic** with the token as the password
+    (`base64(":" + pat)`), not bearer. Sent as a bearer token the API answers
+    302 to a sign-in page rather than 401, so the failure does not look like an
+    auth failure at all. `auth_style: basic` in the profile does the right
+    thing, including substituting inside the base64.
+  * A PAT is scoped to one organisation. The work-org token returned 401 for a
+    personal org, which is a feature: one provider per organisation, attached
+    per session with `--provider`, beats one broad token.
+  * `dev.azure.com` serves git *and* the REST API, where GitHub splits
+    github.com from api.github.com. So `_apis` is the only thing separating
+    "can fetch" from "can open a pull request", which is exactly how
+    `readonly-explore` is kept read-only.
+  * The URL the Clone button gives you has the organisation in the userinfo
+    position. Left there, git demands a password for that username *before*
+    sending anything and fails with "could not read Username" while the gateway
+    waits to authenticate a request git never makes. The userinfo is stripped
+    for the clone and kept in the session record.
+  * No `az` CLI. A pull request is one REST POST, and the Azure CLI plus its
+    devops extension would put a Python runtime in the image for it; curl and
+    jq are already there. `jq -n --arg` builds the body so a task string
+    containing a quote cannot inject into the API call.
+  * A denied push reaches git as `RPC failed; HTTP 403`, never as the proxy's
+    tidier wording. An earlier matcher looked for "403 Forbidden" and let the
+    denial through as an untranslated script error; it now keys off the status
+    code and names both causes, since a 403 does not say which.
+
+  Deferred, deliberately: `git format-patch` for repos with no writable remote
+  is still unwritten -- the isolation argument for it stands, but nothing has
+  wanted it yet. The TUI publish uses default options; title, body, target and
+  `--draft` are CLI-only, because entering text in the TUI needs input handling
+  that does not exist until `sbx new` moves there too.
 
 ### Later, unscheduled
 
@@ -294,18 +350,26 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-7 done, `main` at a clean tree, 133 tests, clippy
+Current state: increments 0-8 done, `main` at a clean tree, 171 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
-The loop that works today:
+The loop that works today, end to end:
 
 ```sh
-sbx new --repo <url> --task "..." --policy feature-work --provider claude-oauth
+sbx new --repo <url> --task "..." --policy feature-work \
+        --provider claude-oauth --provider azure-pat
 sbx            # Enter to attach, Ctrl-b d to detach, q to quit
                # Tab cycles preview/diff/policy/events; w/t widen/tighten egress
+               # P publishes (asks first)
+sbx publish <name>
 sbx rm <name>
 ```
+
+Providers are per organisation, not per forge: an Azure DevOps PAT only covers
+the org it was minted for, so a work repo and a personal one need one each.
+`openshell provider list` shows what exists; the profiles are checked in under
+`providers/` and registered with `openshell provider profile import --file`.
 
 Things a future session should know that are not obvious from the code:
 
@@ -353,6 +417,17 @@ Things a future session should know that are not obvious from the code:
   intersection.** `rules:` alone is default-deny; adding an access class next to
   it re-allows everything in that class. A policy can therefore read far
   stricter than it is. See increment 7.
+* **A provider does not hand the sandbox a secret; it hands it a placeholder.**
+  The env var contains `openshell:resolve:env:v<id>_<NAME>`, and the gateway
+  swaps the real value into an outgoing header that already contains it --
+  including inside the base64 of a Basic credential. It never adds a header on
+  its own, so a request that sends no `Authorization` is simply unauthenticated.
+  This is why git needs `http.extraHeader` and why that config is safe to
+  persist. See increment 8.
+* Azure DevOps PATs are Basic-with-the-token-as-password, and a wrong auth
+  style answers 302-to-a-sign-in-page rather than 401. If a forge ever looks
+  like it is "silently ignoring" credentials, check the auth style before
+  anything else.
 * Anything that reads the sandbox costs an exec, and an exec is itself five
   OCSF log events. That is fine until something *reads the log* -- see the
   filter in `crates/sbx/src/events.rs`, and expect the same problem in any

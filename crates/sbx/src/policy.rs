@@ -29,17 +29,17 @@ pub struct Template {
 pub const TEMPLATES: [Template; 3] = [
     Template {
         name: "readonly-explore",
-        summary: "clone and read; no egress for the agent at all",
+        summary: "clone and read; no push, no model API",
         yaml: include_str!("../../../policies/readonly-explore.yaml"),
     },
     Template {
         name: "feature-work",
-        summary: "clone, agent, push; nothing else reachable",
+        summary: "clone, agent, push (github + azure devops)",
         yaml: include_str!("../../../policies/feature-work.yaml"),
     },
     Template {
         name: "net-open",
-        summary: "feature-work plus the npm and PyPI registries",
+        summary: "feature-work plus npm and PyPI",
         yaml: include_str!("../../../policies/net-open.yaml"),
     },
 ];
@@ -518,6 +518,44 @@ mod tests {
         // npm is a `#!` script, so the exe the gateway matches is the
         // interpreter. Listing only /usr/bin/npm denies every install.
         assert!(open.contains("/usr/bin/node"));
+    }
+
+    /// Both forges in every template. They coexist rather than being separate
+    /// per-host templates because an endpoint is useless without the matching
+    /// provider attached: the credential is a per-session placeholder, so
+    /// listing dev.azure.com in a GitHub session grants reachability to a host
+    /// it holds no token for. Six near-identical files would cost more than
+    /// that is worth. To narrow it, copy the file and delete a block --
+    /// `--policy <path>` takes it directly.
+    #[test]
+    fn every_template_covers_both_forges() {
+        for t in &TEMPLATES {
+            let y = directives(t.yaml);
+            assert!(y.contains("github.com"), "{} lost github", t.name);
+            assert!(y.contains("dev.azure.com"), "{} lost azure devops", t.name);
+            // Azure DevOps has the extra project level, but the git paths are
+            // tail-anchored and identical -- verified against a real clone of
+            // /inetse/inet/_git/Inet.DotFiles.
+            assert!(y.contains("/**/info/refs*"), "{}", t.name);
+        }
+    }
+
+    /// dev.azure.com serves git *and* the REST API, so `_apis` is the only
+    /// thing separating "can fetch" from "can open a pull request". The
+    /// read-only template must not have it.
+    #[test]
+    fn only_the_publishing_templates_reach_the_azure_rest_api() {
+        let ro = directives(find("readonly-explore").unwrap().yaml);
+        assert!(!ro.contains("_apis"), "readonly-explore must not open PRs");
+        assert!(!ro.contains("git-receive-pack"), "and must not push");
+        assert!(!ro.contains("/usr/bin/curl"), "and needs no REST binary");
+
+        for name in ["feature-work", "net-open"] {
+            let y = directives(find(name).unwrap().yaml);
+            assert!(y.contains("_apis"), "{name} cannot open a PR");
+            assert!(y.contains("git-receive-pack"), "{name} cannot push");
+            assert!(y.contains("/usr/bin/curl"), "{name} has no REST binary");
+        }
     }
 
     #[test]

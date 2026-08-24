@@ -72,6 +72,37 @@ network_policies:
       - { path: /usr/lib/git-core/git-remote-http }
       - { path: /usr/lib/git-core/git-remote-https }
 
+  # Azure DevOps. One host does both jobs, unlike GitHub: dev.azure.com serves
+  # the git smart-HTTP endpoints (/{org}/{project}/_git/{repo}/...) and the REST
+  # API (/{org}/{project}/_apis/...), where GitHub splits those across
+  # github.com and api.github.com. So one endpoint, with rules covering both.
+  #
+  # The paths are the same shapes as GitHub's despite the extra project level,
+  # because the patterns are anchored on the tail: verified against
+  # /inetse/inet/_git/Inet.DotFiles/info/refs.
+  #
+  # curl is a binary here because a pull request is created with a plain REST
+  # POST. The alternative is the Azure CLI plus its devops extension -- a Python
+  # runtime added to the image for one call -- and there is no `gh` equivalent.
+  azure_git:
+    name: azure-git
+    endpoints:
+      - host: dev.azure.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/**/info/refs*" }
+          - allow: { method: POST, path: "/**/git-upload-pack" }
+          - allow: { method: POST, path: "/**/git-receive-pack" }
+          - allow: { method: GET,  path: "/**/_apis/**" }
+          - allow: { method: POST, path: "/**/_apis/**" }
+    binaries:
+      - { path: /usr/bin/git }
+      - { path: /usr/lib/git-core/git-remote-http }
+      - { path: /usr/lib/git-core/git-remote-https }
+      - { path: /usr/bin/curl }
+
   github_rest_api:
     name: github-rest-api
     endpoints:

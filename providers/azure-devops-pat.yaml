@@ -1,0 +1,57 @@
+# Azure DevOps access for a sandboxed agent, via a personal access token.
+#
+# OpenShell 0.0.110 ships a builtin `github` source-control profile but nothing
+# for Azure DevOps, so this is a custom profile -- the same route the
+# claude-code-oauth profile takes. The gateway injects the token at runtime, so
+# it never lands on the sandbox filesystem and the agent never sees it.
+#
+# One host does both jobs, unlike GitHub. `dev.azure.com` serves the git smart
+# HTTP endpoints (`/{org}/{project}/_git/{repo}/...`) *and* the REST API
+# (`/{org}/{project}/_apis/...`), where GitHub splits them across github.com and
+# api.github.com. So there is a single endpoint here covering both.
+#
+# `auth_style: basic` because an Azure DevOps PAT authenticates as HTTP Basic
+# with the token as the password -- `Authorization: Basic base64(":" + PAT)`,
+# username empty. It is *not* a bearer token; sending it as one returns 203
+# with a sign-in page rather than a 401, which is a confusing way to fail.
+#
+# If the gateway's Basic composition turns out not to match what Azure DevOps
+# wants, the fallback is `auth_style: header` with the credential stored as the
+# complete literal header value (`Basic <base64>`), which is what
+# claude-code-oauth does for its bearer token. See PLAN.md increment 8.
+id: azure-devops-pat
+display_name: Azure DevOps (PAT)
+description: Azure DevOps Repos and REST API authenticated with a personal access token
+category: source_control
+credentials:
+  - name: pat
+    description: Azure DevOps personal access token (Code read/write, Pull Request contribute)
+    env_vars:
+      # AZURE_DEVOPS_EXT_PAT is what the az CLI's devops extension reads, and
+      # SYSTEM_ACCESSTOKEN is the name a Pipelines job gets it under; both are
+      # accepted so an existing token in the environment is found without
+      # being renamed.
+      - AZURE_DEVOPS_PAT
+      - AZURE_DEVOPS_EXT_PAT
+      - SYSTEM_ACCESSTOKEN
+    required: true
+    auth_style: basic
+    header_name: authorization
+    query_param: ''
+endpoints:
+  - { host: dev.azure.com, port: 443, protocol: rest, access: read-write, enforcement: enforce }
+binaries:
+  # git reaches the remote through the helper, not directly, and the kernel
+  # resolves git-remote-https to git-remote-http -- both are listed because the
+  # gateway matches the resolved path and the resolution is not obvious.
+  - /usr/bin/git
+  - /usr/lib/git-core/git-remote-http
+  - /usr/lib/git-core/git-remote-https
+  # Pull requests are created with a plain REST POST rather than the az CLI,
+  # which would mean adding Python plus the azure-devops extension to the image
+  # for one call. curl and jq are already there.
+  - /usr/bin/curl
+inference_capable: false
+discovery:
+  credentials:
+    - pat

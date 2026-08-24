@@ -27,6 +27,7 @@ sbx diff <name>                               # what the agent has changed so fa
 sbx policy <name>                             # the policy the gateway is enforcing
 sbx events <name>                             # recent allow/deny decisions
 sbx policies                                  # the policy templates shipped in the binary
+sbx publish <name>                            # push the branch and open a pull request
 sbx rm <name>                                 # delete session and sandbox
 sbx                                           # the TUI
 ```
@@ -36,9 +37,39 @@ in the binary, and `feature-work` is the default:
 
 | Template | Egress |
 | --- | --- |
-| `readonly-explore` | clone and read; no model API, no push |
-| `feature-work` | clone, agent, push; nothing else reachable |
+| `readonly-explore` | clone and read; no model API, no push, no PRs |
+| `feature-work` | clone, agent, push, open PRs; nothing else reachable |
 | `net-open` | `feature-work` plus the npm and PyPI registries |
+
+## Git hosts
+
+GitHub and Azure DevOps, detected from the repo URL rather than configured.
+`sbx publish` pushes the work branch and opens a pull request from *inside* the
+sandbox, so the host never holds the credential:
+
+```sh
+sbx new --repo 'https://dev.azure.com/org/project/_git/repo' \
+        --task "..." --provider azure-pat --provider claude-oauth
+sbx publish <name>          # -> https://dev.azure.com/org/project/_git/repo/pullrequest/10
+```
+
+Credentials come from OpenShell providers, and the sandbox never sees them: the
+provider sets an environment variable holding a *placeholder*, and the gateway
+substitutes the real token into the outgoing request. An Azure DevOps PAT is
+scoped to one organisation, so mint one per org and attach the right one per
+session:
+
+```sh
+export AZURE_DEVOPS_PAT='...'   # Code (Read & Write)
+openshell provider profile import --file providers/azure-devops-pat.yaml
+openshell provider create --name azure-pat --type azure-devops-pat \
+        --credential AZURE_DEVOPS_PAT     # env lookup; the token stays out of your shell history
+```
+
+Pull requests on Azure DevOps are created with a plain REST call rather than the
+Azure CLI, so the image stays as it is. `readonly-explore` reaches neither
+`git-receive-pack` nor `_apis`, so a session under it can read a repository and
+provably cannot publish to it.
 
 Each agent runs under a tmux session *inside* its own sandbox, so it keeps
 working whether or not anything is attached to it.

@@ -3,6 +3,7 @@
 use openshell_client::{OpenShell, PolicyRevision, PolicyUpdate};
 
 use crate::events;
+use crate::publish;
 use crate::seed;
 use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session};
 use crate::status;
@@ -240,6 +241,32 @@ pub fn repolicy(
         .policy_update(&session.sandbox, update)
         .map_err(|e| format!("policy update failed: {e}"))?;
     policy(client, session)
+}
+
+/// Publish a session and record that it happened.
+///
+/// The store update lives here rather than in [`crate::publish`] so the CLI and
+/// the TUI cannot disagree about it -- the TUI reads the state back on its next
+/// refresh, and a publish that updated only one of the two paths would show as
+/// unpublished in whichever was missed.
+pub fn publish(
+    client: &dyn OpenShell,
+    session: &Session,
+    opts: &publish::Options,
+) -> Result<publish::Outcome, String> {
+    let outcome = publish::publish(client, session, opts).map_err(|e| e.to_string())?;
+    if outcome.pushed {
+        // Published is a fact about the branch, not the sandbox, so it is
+        // recorded even when the pull request could not be opened: the work has
+        // left the sandbox either way, which is what the state means.
+        let mut store = Store::load().map_err(|e| e.to_string())?;
+        if let Some(mut s) = store.get(&session.name).cloned() {
+            s.state = session::State::Published;
+            store.upsert(s);
+            store.save().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(outcome)
 }
 
 /// Everything one round trip per session is worth spending an exec on.

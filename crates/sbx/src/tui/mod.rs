@@ -176,6 +176,22 @@ pub struct App {
     attach_request: Option<Session>,
     /// Set by the key handler; sent by the event loop, which owns the worker.
     repolicy_request: Option<(Session, Box<PolicyUpdate>, String)>,
+    /// An action waiting on a y/n answer, and the question to show.
+    ///
+    /// Publishing pushes a branch and opens a pull request -- it is visible to
+    /// other people and not undone by pressing something else. A single
+    /// keystroke is the wrong interface for that, so it asks first. Widening a
+    /// policy does not ask: it is reversible with `t`, and its effect is
+    /// confined to the sandbox.
+    confirm: Option<(String, Confirm)>,
+    publish_request: Option<Session>,
+    publishing: Option<String>,
+}
+
+/// An action held pending confirmation.
+#[derive(Debug, Clone)]
+enum Confirm {
+    Publish(Box<Session>),
 }
 
 impl App {
@@ -210,6 +226,9 @@ impl App {
             should_quit: false,
             attach_request: None,
             repolicy_request: None,
+            confirm: None,
+            publish_request: None,
+            publishing: None,
         }
     }
 
@@ -421,7 +440,72 @@ impl App {
         self.events.remove(name);
     }
 
+    /// Whether a question is on screen, and what it says.
+    pub fn pending_question(&self) -> Option<&str> {
+        self.confirm.as_ref().map(|(q, _)| q.as_str())
+    }
+
+    /// The session a publish is running for, so the pane can say so.
+    pub fn publishing(&self) -> Option<&str> {
+        self.publishing.as_deref()
+    }
+
+    /// Ask before publishing. Returns the question to show.
+    fn ask_publish(&mut self) {
+        let Some(session) = self.selected().cloned() else {
+            return;
+        };
+        if self.publishing.is_some() {
+            self.fail("a publish is already running");
+            return;
+        }
+        // Parsed here rather than at confirm time so an unpublishable remote is
+        // refused before the user is asked a pointless question.
+        let target = match crate::forge::Remote::parse(&session.repo) {
+            Ok(r) => r.slug(),
+            Err(e) => {
+                self.fail(format!("cannot publish: {e}"));
+                return;
+            }
+        };
+        self.confirm = Some((
+            format!(
+                "push {} to {} and open a pull request?  y/n",
+                session.work_branch, target
+            ),
+            Confirm::Publish(Box::new(session)),
+        ));
+    }
+
+    /// Resolve a pending question. Anything but `y` cancels, so a stray key
+    /// cannot publish.
+    fn answer(&mut self, yes: bool) {
+        let Some((_, action)) = self.confirm.take() else {
+            return;
+        };
+        if !yes {
+            self.note("cancelled");
+            return;
+        }
+        match action {
+            Confirm::Publish(session) => {
+                self.publishing = Some(session.name.clone());
+                self.note(format!("publishing {} ...", session.work_branch));
+                self.publish_request = Some(*session);
+            }
+        }
+    }
+
     fn on_key(&mut self, key: KeyEvent) {
+        // A pending question owns the keyboard: nothing else may act while it
+        // is up, or the answer could be consumed as a movement key.
+        if self.confirm.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.answer(true),
+                _ => self.answer(false),
+            }
+            return;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
                 self.should_quit = true;
@@ -447,6 +531,9 @@ impl App {
             (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
                 self.attach_request = self.selected().cloned();
             }
+            // Shift-P, not p: publishing is outward-facing, so it should not
+            // share a neighbourhood with the movement keys.
+            (KeyCode::Char('P'), _) => self.ask_publish(),
             (KeyCode::Char('r'), _) => {
                 // Make the next tick refresh immediately.
                 self.last_refresh = Instant::now() - REFRESH_EVERY;
@@ -528,6 +615,27 @@ impl App {
                 // the pane shows the pre-change rules until the next TTL.
                 self.policies.insert(session, Cached::new(*result));
             }
+            Update::Published { session, result } => {
+                if self.publishing.as_deref() == Some(session.as_str()) {
+                    self.publishing = None;
+                }
+                match &*result {
+                    Ok(o) => {
+                        let mut msg = match &o.pull_request {
+                            Some(url) => format!("published: {url}"),
+                            None => "pushed (no pull request)".to_string(),
+                        };
+                        if let Some(w) = o.warnings.first() {
+                            msg.push_str(&format!("  -- {w}"));
+                        }
+                        self.note(msg);
+                        // The state comes back on the next refresh, which reads
+                        // it from the store the worker just wrote.
+                        self.last_refresh = Instant::now() - REFRESH_EVERY;
+                    }
+                    Err(e) => self.fail(e.clone()),
+                }
+            }
             Update::Failed(e) => {
                 self.refreshing = false;
                 self.fail(e);
@@ -603,6 +711,10 @@ fn event_loop(
             && key.kind == KeyEventKind::Press
         {
             app.on_key(key);
+        }
+
+        if let Some(session) = app.publish_request.take() {
+            worker.send(Request::Publish(Box::new(session)));
         }
 
         if let Some((session, update, label)) = app.repolicy_request.take() {
@@ -1179,6 +1291,123 @@ mod tests {
         assert!(app.status_is_error);
         assert!(app.status.as_deref().unwrap().contains("exit 1"));
         assert!(app.repolicy_in_flight.is_none());
+    }
+
+    fn app_with_repo(repo: &str) -> App {
+        let mut app = App::new();
+        app.sessions = vec![Session::new("a".into(), repo.into(), "t".into())];
+        app.list_state.select(Some(0));
+        app
+    }
+
+    const ADO: &str = "https://dev.azure.com/org/proj/_git/repo";
+
+    /// Publishing pushes a branch and opens a pull request: other people see
+    /// it, and pressing something else does not undo it. So it asks, and only
+    /// `y` proceeds.
+    #[test]
+    fn publishing_asks_before_doing_anything() {
+        let mut app = app_with_repo(ADO);
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+
+        let q = app.pending_question().expect("a question");
+        assert!(q.contains("sbx/a"), "{q}");
+        assert!(q.contains("org/proj/repo"), "{q}");
+        assert!(app.publish_request.is_none(), "nothing sent yet");
+    }
+
+    #[test]
+    fn only_y_confirms_and_anything_else_cancels() {
+        for (key, expected) in [('y', true), ('Y', true), ('n', false), ('x', false)] {
+            let mut app = app_with_repo(ADO);
+            app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+            app.on_key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+            assert_eq!(
+                app.publish_request.is_some(),
+                expected,
+                "{key} should {} publish",
+                if expected { "" } else { "not" }
+            );
+            assert!(app.pending_question().is_none(), "the question must clear");
+        }
+        // Enter is not a confirmation either -- it is the attach key, and
+        // treating it as yes would publish on a keystroke people press often.
+        let mut app = app_with_repo(ADO);
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.publish_request.is_none());
+        assert!(app.attach_request.is_none(), "and must not attach either");
+    }
+
+    /// While a question is up it owns the keyboard, or the answer gets consumed
+    /// as a movement key and the question stays on screen.
+    #[test]
+    fn a_pending_question_swallows_every_other_key() {
+        let mut app = App::new();
+        app.sessions = ["a", "b"]
+            .iter()
+            .map(|n| Session::new((*n).to_string(), ADO.into(), "t".into()))
+            .collect();
+        app.list_state.select(Some(0));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+        // `j` would normally move the cursor; here it cancels and moves nothing.
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list_state.selected(), Some(0), "must not have moved");
+        assert!(app.pending_question().is_none());
+        assert!(app.publish_request.is_none());
+    }
+
+    /// A remote that cannot be published to is refused before the user is asked
+    /// a question whose answer could not be honoured.
+    #[test]
+    fn an_unpublishable_remote_is_refused_without_asking() {
+        for repo in ["git@github.com:o/r.git", "https://gitlab.com/o/r"] {
+            let mut app = app_with_repo(repo);
+            app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+            assert!(app.pending_question().is_none(), "{repo}");
+            assert!(app.publish_request.is_none(), "{repo}");
+            assert!(app.status_is_error, "{repo}");
+        }
+    }
+
+    #[test]
+    fn a_second_publish_is_refused_while_one_runs() {
+        let mut app = app_with_repo(ADO);
+        app.publishing = Some("a".into());
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+        assert!(app.pending_question().is_none());
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn a_completed_publish_reports_the_pull_request() {
+        let mut app = app_with_repo(ADO);
+        app.publishing = Some("a".into());
+        app.on_update(Update::Published {
+            session: "a".into(),
+            result: Box::new(Ok(crate::publish::Outcome {
+                pushed: true,
+                pull_request: Some("https://dev.azure.com/o/p/_git/r/pullrequest/7".into()),
+                warnings: vec![],
+            })),
+        });
+        assert!(app.publishing().is_none());
+        assert!(!app.status_is_error);
+        assert!(app.status.as_deref().unwrap().contains("pullrequest/7"));
+    }
+
+    #[test]
+    fn a_failed_publish_surfaces_the_reason() {
+        let mut app = app_with_repo(ADO);
+        app.publishing = Some("a".into());
+        app.on_update(Update::Published {
+            session: "a".into(),
+            result: Box::new(Err("the push was refused with 403".into())),
+        });
+        assert!(app.publishing().is_none());
+        assert!(app.status_is_error);
+        assert!(app.status.as_deref().unwrap().contains("403"));
     }
 
     fn poll_with(state: Option<State>) -> ops::Poll {

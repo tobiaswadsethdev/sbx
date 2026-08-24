@@ -55,3 +55,22 @@ network_policies:
       - { path: /usr/bin/git }
       - { path: /usr/lib/git-core/git-remote-http }
       - { path: /usr/lib/git-core/git-remote-https }
+
+  # Azure DevOps, fetch only. As with github_git above, the receive-pack rule is
+  # deliberately absent, and so is the _apis surface: no push, and no opening a
+  # pull request. dev.azure.com serves git and the REST API from one host, so
+  # leaving _apis out is the only thing separating them.
+  azure_git:
+    name: azure-git
+    endpoints:
+      - host: dev.azure.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/**/info/refs*" }
+          - allow: { method: POST, path: "/**/git-upload-pack" }
+    binaries:
+      - { path: /usr/bin/git }
+      - { path: /usr/lib/git-core/git-remote-http }
+      - { path: /usr/lib/git-core/git-remote-https }

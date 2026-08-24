@@ -2,10 +2,12 @@
 
 mod doctor;
 mod events;
+mod forge;
 mod image;
 mod ops;
 mod pane;
 mod policy;
+mod publish;
 mod seed;
 mod session;
 mod status;
@@ -73,6 +75,32 @@ enum Command {
 
     /// List the policy templates shipped with this binary.
     Policies,
+
+    /// Push a session's branch and open a pull request.
+    Publish {
+        /// Session name.
+        name: String,
+
+        /// Pull request title. Defaults to the session's task.
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Pull request description.
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Branch to merge into. Defaults to the remote's default branch.
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Push the branch but do not open a pull request.
+        #[arg(long)]
+        no_pr: bool,
+
+        /// Open the pull request as a draft.
+        #[arg(long)]
+        draft: bool,
+    },
 
     /// Manage the sandbox image.
     Image {
@@ -157,6 +185,24 @@ fn main() -> ExitCode {
             println!("{}", policy::help());
             return ExitCode::SUCCESS;
         }
+        Some(Command::Publish {
+            name,
+            title,
+            body,
+            target,
+            no_pr,
+            draft,
+        }) => cmd_publish(
+            &client,
+            &name,
+            publish::Options {
+                title,
+                body,
+                target,
+                no_pr,
+                draft,
+            },
+        ),
         Some(Command::Image { action }) => match action {
             ImageAction::Build => image::build().map_err(Into::into),
         },
@@ -190,6 +236,15 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
             .ok_or("could not derive a session name; pass --name")?,
     };
     session::validate_name(&name)?;
+
+    // Checked here so an unusable remote fails before a sandbox exists. An
+    // unknown *host* is only a warning: a public repository on any host still
+    // clones, and only publishing needs to know the forge.
+    match forge::Remote::parse(&args.repo) {
+        Ok(_) => {}
+        Err(e @ (forge::Error::Ssh(_) | forge::Error::Incomplete { .. })) => return Err(e.into()),
+        Err(e) => eprintln!("sbx: warning: {e}; publishing will not be available"),
+    }
 
     let mut store = Store::load()?;
     if store.contains(&name) {
@@ -374,6 +429,34 @@ fn cmd_events(client: &dyn OpenShell, name: &str) -> Fallible {
             println!("                                   {reason}");
         }
     }
+    Ok(())
+}
+
+fn cmd_publish(client: &dyn OpenShell, name: &str, opts: publish::Options) -> Fallible {
+    let session = require_session(name)?;
+    let remote = forge::Remote::parse(&session.repo)?;
+    println!(
+        "publishing {} to {} ...",
+        session.work_branch,
+        remote.slug()
+    );
+
+    // ops::publish, not publish::publish: the state change belongs with the
+    // action, so the CLI and the TUI cannot disagree about whether a session
+    // has been published.
+    let outcome = ops::publish(client, &session, &opts)?;
+    for w in &outcome.warnings {
+        eprintln!("sbx: {w}");
+    }
+    if outcome.pushed {
+        println!("pushed   {}", session.work_branch);
+    }
+    match &outcome.pull_request {
+        Some(url) => println!("pr       {url}"),
+        None if opts.no_pr => {}
+        None => println!("pr       (not opened)"),
+    }
+
     Ok(())
 }
 

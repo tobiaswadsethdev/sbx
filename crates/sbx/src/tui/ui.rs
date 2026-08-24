@@ -292,6 +292,20 @@ fn preview_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
         lines.push(field("providers", &providers));
     }
     lines.push(status_line(app, session));
+    // A publish takes a push plus a REST call, so there is a visible gap where
+    // nothing appears to be happening.
+    if app.publishing() == Some(session.name.as_str()) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:<10}", "publish"),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "pushing and opening a pull request ...",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
     lines.push(Line::from(""));
 
     match app.previews.get(&session.name) {
@@ -570,9 +584,26 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     // does rather than by what it cycles between.
     let keys = match (app.focus, app.right_view()) {
         (_, RightView::Policy) => "w widen  t tighten  tab pane  enter attach  q quit",
-        (Focus::List, _) => "j/k move  l pane  tab view  enter attach  r refresh  q quit",
+        (Focus::List, _) => "j/k move  tab view  enter attach  P publish  r refresh  q quit",
         (Focus::Right, _) => "j/k scroll  pgup/pgdn page  h pane  tab view  enter attach  q quit",
     };
+    // A pending question outranks both the hints and any status message: it is
+    // the only thing the keyboard will respond to.
+    if let Some(question) = app.pending_question() {
+        let line = Line::from(vec![
+            Span::styled(
+                " confirm ",
+                Style::default()
+                    .bg(Color::Yellow)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(" {question}")),
+        ]);
+        frame.render_widget(Paragraph::new(line), area);
+        return;
+    }
+
     let line = match &app.status {
         Some(msg) if app.status_is_error => Line::from(vec![
             Span::styled(" error ", Style::default().bg(Color::Red).fg(Color::Black)),

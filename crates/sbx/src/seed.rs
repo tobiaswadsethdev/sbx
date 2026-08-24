@@ -5,6 +5,7 @@ use std::process::Command;
 
 use openshell_client::OpenShell;
 
+use crate::forge;
 use crate::session::{META_PATH, REPO_PATH, Session, TASK_PATH};
 
 /// Quote a value for safe interpolation into a `sh -c` script.
@@ -52,21 +53,43 @@ pub fn seed_script(session: &Session) -> String {
         None => String::new(),
     };
 
+    // A recognised forge contributes two things: the URL with any userinfo
+    // stripped, and a credential header. An unrecognised host is not an error
+    // -- a public repository on any host still clones -- so both fall back to
+    // the URL exactly as given and no header at all.
+    let remote = forge::Remote::parse(&session.repo).ok();
+    let url = remote
+        .as_ref()
+        .map_or(session.repo.clone(), |r| r.clone_url.clone());
+    let prelude = remote.as_ref().map_or_else(
+        // Still has to define everything the script below references, or
+        // `set -eu` aborts on the first unset variable.
+        || String::from("git_auth=''\nauth_header=''\ngitc() { git \"$@\"; }\n"),
+        |r| forge::git_auth_prelude(r.forge),
+    );
+
     format!(
         r#"set -eu
 mkdir -p /sandbox/.sbx
-if [ ! -d {repo}/.git ]; then
-  git clone --quiet {base}-- {url} {repo}
+{prelude}if [ ! -d {repo}/.git ]; then
+  gitc clone --quiet {base}-- {url} {repo}
 fi
 cd {repo}
 git config user.name {gname}
 git config user.email {gemail}
+# Persist the credential header in the clone, so a later push or fetch needs no
+# special casing. Safe: the value is the gateway's placeholder, not the secret,
+# and it is meaningless outside this sandbox.
+if [ -n "$git_auth" ]; then
+  git config "http.extraHeader" "$auth_header"
+fi
 git switch --quiet -c {branch} 2>/dev/null || git switch --quiet {branch}
 {write_meta}
 "#,
+        prelude = prelude,
         repo = sh_quote(REPO_PATH),
         base = base_branch_arg,
-        url = sh_quote(&session.repo),
+        url = sh_quote(&url),
         gname = sh_quote(&name),
         gemail = sh_quote(&email),
         branch = sh_quote(&session.work_branch),
@@ -239,7 +262,78 @@ mod tests {
         let s = Session::new("x".into(), "url".into(), "t".into());
         let script = seed_script(&s);
         assert!(!script.contains("--branch"));
-        assert!(script.contains("git clone --quiet -- 'url'"));
+        assert!(script.contains("gitc clone --quiet -- 'url'"));
+    }
+
+    /// A host sbx does not recognise is not an error: a public repository on
+    /// any host still has to clone. But everything the script references must
+    /// be defined anyway, or `set -eu` aborts on the first unset variable.
+    #[test]
+    fn an_unrecognised_host_still_seeds() {
+        let s = Session::new("x".into(), "https://gitlab.com/o/r.git".into(), "t".into());
+        let script = seed_script(&s);
+        assert!(script.contains("gitc clone"), "{script}");
+        assert!(script.contains("git_auth=''"), "must be defined: {script}");
+        assert!(
+            script.contains("auth_header=''"),
+            "must be defined: {script}"
+        );
+        assert!(
+            !script.contains("extraHeader=Authorization"),
+            "no credential to send: {script}"
+        );
+        // The URL is passed through untouched, since nothing is known about it.
+        assert!(script.contains("'https://gitlab.com/o/r.git'"), "{script}");
+    }
+
+    /// The whole point of the forge work: a private Azure DevOps repo needs a
+    /// credential header on the *clone*, not just on the push.
+    #[test]
+    fn seeding_an_azure_repo_sends_the_credential() {
+        let s = Session::new(
+            "x".into(),
+            "https://inetse@dev.azure.com/inetse/proj/_git/repo".into(),
+            "t".into(),
+        );
+        let script = seed_script(&s);
+        assert!(script.contains("AZURE_DEVOPS_PAT"), "{script}");
+        assert!(
+            script.contains("Basic"),
+            "PAT is basic, not bearer: {script}"
+        );
+        // Userinfo stripped from the *clone*, or git demands a password before
+        // it sends anything. The metadata record below keeps the URL exactly as
+        // the user gave it, userinfo and all, so this is checked on the one
+        // line that matters rather than on the whole script.
+        let clone_line = script
+            .lines()
+            .find(|l| l.contains("gitc clone"))
+            .expect("a clone");
+        assert_eq!(
+            clone_line.trim(),
+            "gitc clone --quiet -- 'https://dev.azure.com/inetse/proj/_git/repo' '/sandbox/repo'"
+        );
+        assert!(!clone_line.contains('@'), "{clone_line}");
+        // And the header is persisted so a later push needs no special casing.
+        assert!(
+            script.contains(r#"git config "http.extraHeader""#),
+            "{script}"
+        );
+    }
+
+    #[test]
+    fn seeding_a_github_repo_sends_a_bearer_token() {
+        let s = Session::new(
+            "x".into(),
+            "https://github.com/octocat/Hello-World.git".into(),
+            "t".into(),
+        );
+        let script = seed_script(&s);
+        assert!(script.contains("Bearer $GITHUB_TOKEN"), "{script}");
+        assert!(
+            !script.contains("base64"),
+            "bearer needs no encoding: {script}"
+        );
     }
 
     #[test]
