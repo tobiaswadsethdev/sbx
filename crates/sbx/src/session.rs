@@ -150,7 +150,10 @@ impl std::fmt::Display for State {
             State::Published => "published",
             State::Dead => "dead",
         };
-        f.write_str(s)
+        // `pad`, not `write_str`: a Display impl that writes directly ignores
+        // the formatter's width, so `{:<9}` silently does nothing and the list
+        // columns run into each other.
+        f.pad(s)
     }
 }
 
@@ -278,6 +281,13 @@ mod tests {
                     .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
             );
         }
+    }
+
+    #[test]
+    fn state_display_honours_a_width() {
+        assert_eq!(format!("{:<9}|", State::Ready), "ready    |");
+        assert_eq!(format!("{:<9}|", State::Published), "published|");
+        assert_eq!(format!("{}", State::Waiting), "waiting");
     }
 
     #[test]

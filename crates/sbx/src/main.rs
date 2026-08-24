@@ -50,6 +50,12 @@ enum Command {
         name: String,
     },
 
+    /// Print a session's diff against the branch it started from.
+    Diff {
+        /// Session name.
+        name: String,
+    },
+
     /// Manage the sandbox image.
     Image {
         #[command(subcommand)]
@@ -123,6 +129,7 @@ fn main() -> ExitCode {
         Some(Command::New(args)) => cmd_new(&client, args),
         Some(Command::Ls) => cmd_ls(&client),
         Some(Command::Attach { name }) => cmd_attach(&client, &name),
+        Some(Command::Diff { name }) => cmd_diff(&client, &name),
         Some(Command::Image { action }) => match action {
             ImageAction::Build => image::build().map_err(Into::into),
         },
@@ -261,6 +268,23 @@ fn cmd_ls(client: &dyn OpenShell) -> Fallible {
             s.repo,
         );
     }
+    Ok(())
+}
+
+fn cmd_diff(client: &dyn OpenShell, name: &str) -> Fallible {
+    let store = Store::load()?;
+    let session = store
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("no session `{name}`; see sbx ls"))?;
+
+    if let Some(stat) = ops::repo_stat(client, &session) {
+        println!(
+            "+{} -{}  {} untracked",
+            stat.added, stat.removed, stat.untracked
+        );
+    }
+    println!("{}", ops::repo_diff(client, &session));
     Ok(())
 }
 

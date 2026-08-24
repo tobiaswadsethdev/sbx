@@ -15,12 +15,25 @@ use crate::session::Session;
 pub enum Request {
     Refresh,
     Preview(Box<Session>),
+    Diff(Box<Session>),
+    Stat(Box<Session>),
     Shutdown,
 }
 
 pub enum Update {
     Sessions(Box<ops::Refreshed>),
-    Preview { session: String, body: String },
+    Preview {
+        session: String,
+        body: String,
+    },
+    Diff {
+        session: String,
+        body: String,
+    },
+    Stat {
+        session: String,
+        stat: Option<ops::DiffStat>,
+    },
     Failed(String),
 }
 
@@ -45,6 +58,14 @@ impl Worker {
                     },
                     Request::Preview(session) => Update::Preview {
                         body: ops::repo_preview(&client, &session),
+                        session: session.name,
+                    },
+                    Request::Diff(session) => Update::Diff {
+                        body: ops::repo_diff(&client, &session),
+                        session: session.name,
+                    },
+                    Request::Stat(session) => Update::Stat {
+                        stat: ops::repo_stat(&client, &session),
                         session: session.name,
                     },
                 };

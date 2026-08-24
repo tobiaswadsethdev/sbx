@@ -66,7 +66,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-4 are done; 5 onward are specified but not started.
+Increments 0-5 are done; 6 onward are specified but not started.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -93,29 +93,25 @@ Increments 0-4 are done; 5 onward are specified but not started.
   Dockerfile embedded in the binary), the agent started under an in-sandbox
   tmux session with the task as its opening prompt, Enter attaches from the
   TUI, `Ctrl-b d` returns. Also `sbx attach` and `sbx image build`.
-### 5. Diff pane
+- **5. Diff pane** — DONE. `Tab` cycles the right pane between preview and
+  diff, remembered per session; `h`/`l` move focus and the movement keys follow
+  it, so `j`/`k` walk the list on the left and scroll on the right. One exec
+  fetches three sections -- committed (`diff base...HEAD`, from the merge-base,
+  so commits landing on the base branch afterwards are never credited to the
+  agent), uncommitted (`diff HEAD`, staged and unstaged together) and untracked,
+  which appears in neither and is the most common thing an agent produces.
+  Diff-only colouring, capped at 2000 lines per section with a visible notice.
+  A `+12/-3 ?` column in the list, round-robined across sessions. Both panes
+  refetch on a timer, so a diff stays current while the agent edits underneath
+  it. Also `sbx diff <name>`. Verified against a live sandbox under tmux,
+  including the live-update, truncation, no-changes and hostile-branch-name
+  paths.
 
-The main way this loses to claude-squad when the code lives remote, so it is
-worth more care than its size suggests.
-
-- `Tab` cycles the right pane between **preview** and **diff**; remember the
-  choice per session so switching sessions does not reset it.
-- Diff source: one exec running `git --no-pager diff <base>...HEAD` plus
-  `git diff` for uncommitted work, against the merge-base so unrelated commits
-  on the base branch never appear. `--no-pager` matters: `less` is in the image
-  now and git will otherwise try to page under a pty.
-- Add `git diff --shortstat` to the list pane as a `+12/-3` column. The dropped
-  `ops::repo_summary` from increment 2 is the starting point (`git log` shows
-  it).
-- Syntax highlighting: `syntect` is the obvious choice but pulls in a large
-  dependency and a syntax set. Start with diff-only colouring (green add, red
-  remove, cyan hunk header) and judge whether real highlighting earns its
-  weight afterwards.
-- Scrolling is required here -- a diff will not fit. `Paragraph::scroll` plus
-  `j/k`/`PgUp`/`PgDn` while the diff pane has focus, which also means the pane
-  needs a focus concept the TUI does not have yet.
-- Diffs can be enormous. Cap the fetch (`--stat` only above N lines, or
-  head -2000) and say so in the pane rather than truncating silently.
+  Deferred, deliberately: `syntect` did not earn its weight -- add/remove/hunk
+  colouring is what makes a diff readable, and a syntax set would outweigh the
+  rest of the binary. No horizontal scrolling either, so a line wider than the
+  pane is clipped; wrapping a diff is worse, and the fix is a `<`/`>` binding
+  when it starts to hurt.
 
 ### 6. Status detection
 
@@ -134,8 +130,11 @@ which is the reason to run several sessions at once.
 - A "waiting" session should be visually loud -- this is the notification the
   whole tool exists to deliver.
 - Watch the cost: one exec per session per tick is fine for five sessions and
-  not for fifty. Consider polling only the selected session frequently and the
-  rest slowly.
+  not for fifty. Increment 5 already established the pattern to follow -- the
+  right pane polls only the selected session, and the stat column round-robins
+  the rest behind a minimum gap, so the total is bounded by the intervals rather
+  than by the session count. Status detection should share that budget rather
+  than open a second one, especially given that execs on one sandbox serialise.
 
 ### 7. Policy layer
 
@@ -195,7 +194,8 @@ visible rather than buried in a YAML file.
 - **Sandbox boot latency** vs an instant tmux session. Mitigation: prebaked
   image with the agent CLI + toolchain, warm pool of idle sandboxes.
 - **Diff review UX** is the main way this loses to claude-squad when code
-  lives remote. Prove it in increment 5, not at the end.
+  lives remote. Addressed in increment 5; the remaining gap is clipped long
+  lines, since the pane does not scroll horizontally.
 - **No first-class host mounts** (NVIDIA/OpenShell#500). Watch that issue; it
   would unlock a much better local-dev mode.
 - **Overlap with `openshell term`** — that is a k9s-style resource browser.
@@ -217,7 +217,7 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-4 done, `main` at a clean tree, 41 tests, clippy
+Current state: increments 0-5 done, `main` at a clean tree, 63 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
@@ -246,3 +246,13 @@ Things a future session should know that are not obvious from the code:
   `cargo test -p openshell-client -- --ignored`.
 * The TUI is testable without a human: run it under tmux and use
   `capture-pane` / `send-keys`. Every TUI claim so far was verified that way.
+* **Exec on a single sandbox is serialised gateway-side, and one stuck exec
+  blocks every later one for that sandbox.** Found while testing the diff
+  script: a malformed script left `sh` waiting on input, and from then on every
+  exec against that sandbox hung until the host-side client was killed. Trivial
+  execs still returned, so it looks intermittent. This is why the diff pane
+  spends its exec budget on the selected session only. It is also the concrete
+  case behind "recovering a wedged sandbox" in the backlog.
+* A `Display` impl that calls `f.write_str` silently ignores the formatter's
+  width, so `{:<9}` does nothing and columns collide. `State` now uses `f.pad`.
+  Worth remembering before adding another padded column.
