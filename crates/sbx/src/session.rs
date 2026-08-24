@@ -98,6 +98,34 @@ pub fn slugify(text: &str) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// A session name from the task, falling back to the repository's last path
+/// segment.
+///
+/// Shared by `sbx new` and the TUI's create form, so the name a session gets is
+/// the same however it was started -- and so the form can show the name it is
+/// about to use while the task is still being typed.
+pub fn derive_name(task: &str, repo: &str) -> Option<String> {
+    slugify(task).or_else(|| {
+        repo.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .map(|s| s.trim_end_matches(".git"))
+            .and_then(slugify)
+    })
+}
+
+/// The provider profile type carrying an agent's credential.
+///
+/// Used to preselect a provider in the create form: a session started without
+/// the agent's credential comes up to a login prompt, which is a poor way to
+/// find out. `None` for an agent whose credentials sbx knows nothing about.
+pub fn agent_provider_type(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" => Some("claude-code-oauth"),
+        _ => None,
+    }
+}
+
 /// Validate a session name against both our rules and the gateway's.
 pub fn validate_name(name: &str) -> Result<(), NameError> {
     if name.is_empty() {
@@ -247,6 +275,30 @@ mod tests {
         assert_eq!(slugify("  fix   the BUG  ").as_deref(), Some("fix-the-bug"));
         assert_eq!(slugify("!!!"), None);
         assert_eq!(slugify(""), None);
+    }
+
+    #[test]
+    fn derives_a_name_from_the_task_then_the_repo() {
+        assert_eq!(
+            derive_name("Fix the README typo", "https://github.com/o/r.git").as_deref(),
+            Some("fix-the-readme")
+        );
+        // No task: the repository's own name is the next best thing.
+        assert_eq!(
+            derive_name("", "https://github.com/o/hello-world.git").as_deref(),
+            Some("hello-world")
+        );
+        assert_eq!(
+            derive_name("", "https://dev.azure.com/org/proj/_git/repo").as_deref(),
+            Some("repo")
+        );
+        assert_eq!(derive_name("", "!!!"), None);
+    }
+
+    #[test]
+    fn knows_which_provider_type_carries_the_agent_credential() {
+        assert_eq!(agent_provider_type("claude"), Some("claude-code-oauth"));
+        assert_eq!(agent_provider_type("codex"), None);
     }
 
     #[test]

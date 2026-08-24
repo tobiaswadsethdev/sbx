@@ -1,11 +1,13 @@
 //! Operations shared by the CLI and the TUI.
 
-use openshell_client::{OpenShell, PolicyRevision, PolicyUpdate};
+use openshell_client::{CreateOpts, OpenShell, PolicyRevision, PolicyUpdate};
 
 use crate::events;
+use crate::forge;
+use crate::policy;
 use crate::publish;
 use crate::seed;
-use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session};
+use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session, State};
 use crate::status;
 use crate::store::{self, Store};
 
@@ -51,6 +53,181 @@ pub fn refresh(client: &dyn OpenShell) -> Result<Refreshed, Box<dyn std::error::
     store.replace_all(out.sessions.clone());
     store.save()?;
     Ok(out)
+}
+
+/// Everything needed to start a session, however it was asked for.
+///
+/// The one description of a new session shared by `sbx new` and the TUI's
+/// create form. Both build this and hand it to [`create`], so the two cannot
+/// drift into producing subtly different sessions.
+#[derive(Debug, Clone, Default)]
+pub struct Draft {
+    pub name: String,
+    /// Clone URL. A local checkout is only ever a way of *naming* one: see
+    /// [`crate::repos`].
+    pub repo: String,
+    pub task: String,
+    /// Branch to clone from; `None` means the remote's default.
+    pub base: Option<String>,
+    /// Policy template name, or a path to a YAML file.
+    pub policy: String,
+    pub providers: Vec<String>,
+    /// Whether to start the agent once the clone is done.
+    pub start: bool,
+}
+
+/// A stage of creating a session, reported as it begins.
+///
+/// Creating takes tens of seconds and each stage can fail differently, so the
+/// caller is told what is happening rather than being left with one long wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Sandbox,
+    Clone,
+    Agent,
+}
+
+impl Step {
+    pub fn label(self) -> &'static str {
+        match self {
+            Step::Sandbox => "creating the sandbox",
+            Step::Clone => "cloning the repository",
+            Step::Agent => "starting the agent",
+        }
+    }
+
+    /// The session state this stage corresponds to, so a list showing a
+    /// half-created session says the same thing as the progress message.
+    pub fn state(self) -> State {
+        match self {
+            Step::Sandbox => State::Creating,
+            Step::Clone => State::Seeding,
+            Step::Agent => State::Ready,
+        }
+    }
+}
+
+/// A created session, plus anything that went wrong without stopping it.
+#[derive(Debug, Clone)]
+pub struct Created {
+    pub session: Session,
+    /// Non-fatal problems: an unrecognised host, an agent that did not come up.
+    /// The session exists and is usable in every one of these cases.
+    pub warnings: Vec<String>,
+}
+
+/// Create a sandbox, clone the repository, cut the work branch, start the agent.
+///
+/// The order matters and is the reason this is one function rather than steps a
+/// caller sequences: everything that can be checked without side effects is
+/// checked first, so a bad name or an unknown policy fails while nothing exists
+/// yet, and every failure afterwards leaves a record saying what happened.
+///
+/// The sandbox image is deliberately *not* built here. `image::build` streams
+/// docker's output to the terminal, which would tear a TUI apart; the CLI calls
+/// [`crate::image::ensure`] before this, and the TUI refuses to create until
+/// the image is there. See the doc comment on [`crate::image::ensure`].
+pub fn create(
+    client: &dyn OpenShell,
+    draft: &Draft,
+    progress: &mut dyn FnMut(Step),
+) -> Result<Created, String> {
+    let mut warnings = Vec::new();
+
+    session::validate_name(&draft.name).map_err(|e| e.to_string())?;
+
+    // An unusable remote fails before a sandbox exists. An unknown *host* is
+    // only a warning: a public repository on any host still clones, and only
+    // publishing needs to know the forge.
+    match forge::Remote::parse(&draft.repo) {
+        Ok(_) => {}
+        Err(e @ (forge::Error::Ssh(_) | forge::Error::Incomplete { .. })) => {
+            return Err(e.to_string());
+        }
+        Err(e) => warnings.push(format!("{e}; publishing will not be available")),
+    }
+
+    let mut store = Store::load().map_err(|e| e.to_string())?;
+    if store.contains(&draft.name) {
+        return Err(format!("session `{}` already exists", draft.name));
+    }
+
+    // Resolved before anything is created, so a typo in the policy fails before
+    // a sandbox exists rather than after. The guard owns a temp file when the
+    // policy came from a template, so it has to outlive the create call below.
+    let resolved = policy::resolve(&draft.policy).map_err(|e| e.to_string())?;
+
+    let mut s = Session::new(draft.name.clone(), draft.repo.clone(), draft.task.clone());
+    s.base_branch = draft.base.clone();
+    s.policy = Some(resolved.label.clone());
+    s.providers = draft.providers.clone();
+
+    progress(Step::Sandbox);
+    let opts = CreateOpts {
+        name: s.sandbox.clone(),
+        labels: s.labels(),
+        policy: Some(resolved.path().to_path_buf()),
+        providers: draft.providers.clone(),
+        from: Some(session::IMAGE.to_string()),
+        // Keep the sandbox alive after the create command exits.
+        command: vec!["true".into()],
+        ..Default::default()
+    };
+
+    // Each failure is recorded before being returned. A `Failed` record is the
+    // only trace of a sandbox that may exist at the gateway but was never
+    // seeded, and without it that sandbox is invisible to `sbx rm`.
+    if let Err(e) = client.create(&opts) {
+        s.state = State::Failed;
+        save(&mut store, s, &mut warnings);
+        return Err(e.to_string());
+    }
+
+    s.state = State::Seeding;
+    save(&mut store, s.clone(), &mut warnings);
+
+    progress(Step::Clone);
+    if let Err(e) = seed::seed(client, &s) {
+        s.state = State::Failed;
+        save(&mut store, s, &mut warnings);
+        return Err(e.to_string());
+    }
+
+    s.state = State::Ready;
+    save(&mut store, s.clone(), &mut warnings);
+    // Keep the in-sandbox record current: it is what adoption reads back, and a
+    // stale one leaves recovered sessions frozen mid-lifecycle.
+    if let Err(e) = seed::write_meta(client, &s) {
+        warnings.push(format!("could not refresh sandbox metadata: {e}"));
+    }
+
+    if draft.start {
+        progress(Step::Agent);
+        if let Err(e) = seed::start_agent(client, &s) {
+            // The session is usable even if the agent did not come up, so this
+            // is reported rather than treated as a failed create.
+            warnings.push(format!("could not start the agent: {e}"));
+        }
+    }
+
+    Ok(Created {
+        session: s,
+        warnings,
+    })
+}
+
+/// Write one lifecycle change through to the cache.
+///
+/// Reloaded and saved per step rather than held open, because the TUI refreshes
+/// on a timer on another thread and also writes this file. Worst case the two
+/// interleave and the record is lost, which costs one adoption round trip on
+/// the next refresh -- the sandbox carries its own metadata, which is the whole
+/// reason the cache is allowed to be lossy.
+fn save(store: &mut Store, session: Session, warnings: &mut Vec<String>) {
+    store.upsert(session);
+    if let Err(e) = store.save() {
+        warnings.push(format!("could not update the session cache: {e}"));
+    }
 }
 
 /// A snapshot of the repository inside a session's sandbox, for the preview

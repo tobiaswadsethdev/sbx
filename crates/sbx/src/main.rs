@@ -8,6 +8,7 @@ mod ops;
 mod pane;
 mod policy;
 mod publish;
+mod repos;
 mod seed;
 mod session;
 mod status;
@@ -17,7 +18,7 @@ mod tui;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use openshell_client::{CliClient, CreateOpts, Error as OsError, OpenShell};
+use openshell_client::{CliClient, Error as OsError, OpenShell};
 
 use session::{Session, State};
 use store::Store;
@@ -224,104 +225,50 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
     // A name from --name, else the task, else the repo's last path segment.
     let name = match args.name {
         Some(n) => n,
-        None => session::slugify(&args.task)
-            .or_else(|| {
-                args.repo
-                    .trim_end_matches('/')
-                    .rsplit('/')
-                    .next()
-                    .map(|s| s.trim_end_matches(".git"))
-                    .and_then(session::slugify)
-            })
+        None => session::derive_name(&args.task, &args.repo)
             .ok_or("could not derive a session name; pass --name")?,
     };
-    session::validate_name(&name)?;
 
-    // Checked here so an unusable remote fails before a sandbox exists. An
-    // unknown *host* is only a warning: a public repository on any host still
-    // clones, and only publishing needs to know the forge.
-    match forge::Remote::parse(&args.repo) {
-        Ok(_) => {}
-        Err(e @ (forge::Error::Ssh(_) | forge::Error::Incomplete { .. })) => return Err(e.into()),
-        Err(e) => eprintln!("sbx: warning: {e}; publishing will not be available"),
-    }
-
-    let mut store = Store::load()?;
-    if store.contains(&name) {
-        return Err(format!("session `{name}` already exists").into());
-    }
-
-    // Resolved before anything is created, so a typo in --policy fails before a
-    // sandbox exists rather than after. The guard owns a temp file when the
-    // policy came from a template, so it has to outlive the create call below.
-    let spec = args.policy.as_deref().unwrap_or(policy::DEFAULT_TEMPLATE);
-    let resolved = policy::resolve(spec)?;
-
-    let mut s = Session::new(name, args.repo, args.task);
-    s.base_branch = args.base;
-    s.policy = Some(resolved.label.clone());
-    s.providers = args.providers.clone();
-
-    image::ensure()?;
-
-    println!("creating sandbox {} ...", s.sandbox);
-    let opts = CreateOpts {
-        name: s.sandbox.clone(),
-        labels: s.labels(),
-        policy: Some(resolved.path().to_path_buf()),
+    let draft = ops::Draft {
+        name,
+        repo: args.repo,
+        task: args.task,
+        base: args.base,
+        policy: args
+            .policy
+            .unwrap_or_else(|| policy::DEFAULT_TEMPLATE.to_string()),
         providers: args.providers,
-        from: Some(session::IMAGE.to_string()),
-        // Keep the sandbox alive after the create command exits.
-        command: vec!["true".into()],
-        ..Default::default()
+        start: !args.no_start,
     };
 
-    if let Err(e) = client.create(&opts) {
-        s.state = State::Failed;
-        store.upsert(s);
-        store.save()?;
-        return Err(e.into());
+    // Here rather than inside ops::create, which never builds the image: the
+    // build streams docker's output to the terminal, which only a command-line
+    // caller can afford.
+    image::ensure()?;
+
+    let repo = draft.repo.clone();
+    let created = ops::create(client, &draft, &mut |step| match step {
+        // The URL is worth naming, since this is the slow step and the one that
+        // fails when a credential or a policy is wrong.
+        ops::Step::Clone => println!("cloning {repo} ..."),
+        other => println!("{} ...", other.label()),
+    })?;
+
+    for warning in &created.warnings {
+        eprintln!("sbx: warning: {warning}");
     }
-
-    s.state = State::Seeding;
-    store.upsert(s.clone());
-    store.save()?;
-
-    println!("cloning {} ...", s.repo);
-    if let Err(e) = seed::seed(client, &s) {
-        s.state = State::Failed;
-        store.upsert(s);
-        store.save()?;
-        return Err(e.into());
-    }
-
-    s.state = State::Ready;
-    store.upsert(s.clone());
-    store.save()?;
-    // Keep the in-sandbox record current: it is what adoption reads back, and
-    // a stale one leaves recovered sessions frozen mid-lifecycle.
-    if let Err(e) = seed::write_meta(client, &s) {
-        eprintln!("sbx: warning: could not refresh sandbox metadata: {e}");
-    }
-
-    if args.no_start {
+    let s = created.session;
+    if !draft.start {
         println!(
             "agent not started (--no-start); attach with: sbx attach {}",
             s.name
         );
-    } else {
-        println!("starting {} ...", s.agent);
-        if let Err(e) = seed::start_agent(client, &s) {
-            // The session is usable even if the agent did not come up, so this
-            // is reported rather than treated as a failed create.
-            eprintln!("sbx: warning: could not start the agent: {e}");
-        }
     }
 
     println!();
     println!("session  {}", s.name);
     println!("sandbox  {}", s.sandbox);
-    println!("policy   {}", resolved.label);
+    println!("policy   {}", s.policy.as_deref().unwrap_or("-"));
     println!("branch   {}", s.work_branch);
     println!("workdir  {}", session::REPO_PATH);
     Ok(())

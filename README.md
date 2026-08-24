@@ -86,7 +86,7 @@ sbx doctor
 
 ```sh
 cargo build
-cargo test --workspace               # 171 tests, no gateway needed
+cargo test --workspace               # 234 tests, no gateway needed
 cargo run -- doctor                  # the CLI, from the tree
 cargo run                            # the TUI, from the tree
 ```
@@ -120,7 +120,7 @@ sbx events <name>                             # recent allow/deny decisions
 sbx policies                                  # the policy templates shipped in the binary
 sbx publish <name>                            # push the branch and open a pull request
 sbx rm <name>                                 # delete session and sandbox
-sbx                                           # the TUI
+sbx                                           # the TUI: n starts a session, no shell needed
 ```
 
 `--policy` takes a template name or a path to a YAML file. Three templates ship
@@ -195,6 +195,63 @@ left and scroll on the right. The `+12/-3` column counts lines changed against
 the branch the session started from, and `?` marks untracked files. Every pane
 refetches on a timer, so a diff you are reading keeps up with the agent editing
 underneath it.
+
+### Starting a session
+
+`n` opens a picker over the git repositories on your disk -- type to filter,
+enter to choose -- and then a form for everything `sbx new` takes:
+
+```
+┌ pick a repo (15) ────────────────────────────────────────────────────────────┐
+│ > sbx                                                                        │
+│> ~/dev/sbx                              main                                 │
+│  ~/dev/sbx-playground                   feat/pickers                         │
+│  ~/dev/notes                            main                     no origin   │
+└──────────────────────────────────────────────────────────────────────────────┘
+ type to filter  up/down move  enter pick  esc cancel
+
+┌ new session ─────────────────────────────────────────────────────────────────┐
+│repo       ~/dev/sbx                                                          │
+│clones     https://github.com/you/sbx.git                                     │
+│                                                                              │
+│task       fix the readme typo                                                │
+│name       fix-the-readme                                                     │
+│base       main                                                               │
+│policy     < feature-work >  clone, agent, push (github + azure devops)       │
+│providers    [x] claude-oauth          claude-code-oauth                      │
+│             [ ] azure-pat             azure-devops-pat                       │
+│                                                                              │
+│ staying on the host: 9 uncommitted file(s), 2 unpushed commit(s)             │
+└──────────────────────────────────────────────────────────────────────────────┘
+ tab field  </> policy  space provider  enter create  esc back
+```
+
+The repository on disk is how you *name a remote*, not what gets copied: the
+sandbox clones `origin` over the gateway exactly as `sbx new --repo` does, so a
+checkout with no origin cannot start a session and is marked as such in the
+picker rather than hidden. What has not been pushed is not in the clone, which
+is what the last line counts. The current branch becomes the base branch, unless
+the remote has never seen it, in which case the remote's default branch is used.
+
+The name follows the task until you edit it, the policy is the same three
+templates `sbx policies` lists, and the providers are the ones the gateway has:
+the agent's credential and the repository host's are ticked when exactly one
+provider of that type exists, and left alone when there are several, since
+nothing here can tell which Azure organisation you meant.
+
+The scan looks in the working directory, its parent, `~/dev`, `~/src`, `~/code`,
+`~/projects`, `~/work`, `~/repos`, `~/git` and `$HOME` itself, skipping hidden
+and dependency directories and never descending into a repository it has already
+found. `SBX_REPO_ROOTS` -- colon-separated, like `PATH` -- replaces that list.
+The scan runs on the worker and its result is reused, so the picker opens
+instantly the second time and refreshes behind you.
+
+Creating runs on its own thread: the list, the panes and the state column keep
+working while a sandbox is provisioned, and the new session appears in the list
+as `creating`, then `seeding`, then `ready`, before the gateway has been asked
+about it. It needs the sandbox image to exist already -- `sbx image build`
+streams docker's output, which a TUI cannot survive -- and `sbx doctor` says so
+when it is missing.
 
 ## Policy
 

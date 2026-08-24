@@ -9,13 +9,15 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
 
 use crate::events::Verdict;
 use crate::ops;
 use crate::pane;
+use crate::repos::{Facts, LocalRepo};
 use crate::session::{self, Session, State};
 use crate::status::Source;
+use crate::tui::create::{Create, Field, Form, Input, Picker};
 use crate::tui::{App, Focus, RightView};
 
 /// Width of the session-name column. Names are capped at 15 characters by the
@@ -71,6 +73,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_list(frame, app, left);
     draw_right(frame, app, right);
     draw_footer(frame, app, footer);
+    // Last, and over everything: the create flow is modal, and it owns the
+    // keyboard while it is up.
+    draw_create(frame, app, frame.area());
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -116,8 +121,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             Line::from(""),
             Line::from("  no sessions yet").style(Style::default().fg(Color::DarkGray)),
             Line::from(""),
-            Line::from("  sbx new --repo <url> --task <what>")
-                .style(Style::default().fg(Color::DarkGray)),
+            Line::from("  press n to start one").style(Style::default().fg(Color::DarkGray)),
         ])
         .block(pane(title, focused));
         frame.render_widget(hint, area);
@@ -582,10 +586,17 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     // and, in the policy pane, gain the two keys that only work there. Four
     // views no longer fit in "tab preview/diff", so tab is named by what it
     // does rather than by what it cycles between.
-    let keys = match (app.focus, app.right_view()) {
-        (_, RightView::Policy) => "w widen  t tighten  tab pane  enter attach  q quit",
-        (Focus::List, _) => "j/k move  tab view  enter attach  P publish  r refresh  q quit",
-        (Focus::Right, _) => "j/k scroll  pgup/pgdn page  h pane  tab view  enter attach  q quit",
+    let keys = match (app.create_flow(), app.focus, app.right_view()) {
+        // The flow is modal, so its keys are the only ones that do anything.
+        (Some(Create::Pick(_)), ..) => "type to filter  up/down move  enter pick  esc cancel",
+        (Some(Create::Fill(_)), ..) => {
+            "tab field  </> policy  space provider  enter create  esc back"
+        }
+        (_, _, RightView::Policy) => "w widen  t tighten  tab pane  enter attach  q quit",
+        (_, Focus::List, _) => "j/k move  n new  tab view  enter attach  P publish  q quit",
+        (_, Focus::Right, _) => {
+            "j/k scroll  pgup/pgdn page  h pane  tab view  enter attach  q quit"
+        }
     };
     // A pending question outranks both the hints and any status message: it is
     // the only thing the keyboard will respond to.
@@ -621,6 +632,317 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
+/// A centred box, clamped to what the frame can hold.
+///
+/// Both dimensions are a *maximum*: on a small terminal the box shrinks rather
+/// than being drawn outside the frame, which ratatui would clip into nonsense.
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let w = width.min(area.width);
+    let h = height.min(area.height);
+    Rect {
+        x: area.x + (area.width - w) / 2,
+        y: area.y + (area.height - h) / 2,
+        width: w,
+        height: h,
+    }
+}
+
+/// Width the modal boxes aim for. Wide enough for a path plus a branch, narrow
+/// enough to leave the list visible around it on a normal terminal.
+const MODAL_W: u16 = 78;
+/// Rows the picker's list gets at most, so a long scan does not fill the screen.
+const PICKER_ROWS: usize = 12;
+/// Width of the create form's label column.
+const LABEL_W: usize = 11;
+
+fn draw_create(frame: &mut Frame, app: &App, area: Rect) {
+    match app.create_flow() {
+        None => {}
+        Some(Create::Pick(picker)) => draw_picker(frame, picker, area),
+        Some(Create::Fill(form)) => draw_form(frame, form, area),
+    }
+}
+
+/// Render a field's value with the cursor drawn in it.
+///
+/// The cursor is a reversed cell rather than a terminal cursor: the frame is
+/// redrawn on a timer and positioning the real cursor would mean threading a
+/// coordinate out of here, for a caret that blinks in a place the layout already
+/// knows.
+fn with_cursor(input: &Input, focused: bool) -> Vec<Span<'static>> {
+    let text = input.text().to_string();
+    if !focused {
+        return vec![Span::raw(text)];
+    }
+    let chars: Vec<char> = text.chars().collect();
+    let at = input.cursor().min(chars.len());
+    let before: String = chars[..at].iter().collect();
+    // At the end of the line there is no character to reverse, so a space
+    // stands in for one.
+    let (under, after) = match chars.get(at) {
+        Some(c) => (c.to_string(), chars[at + 1..].iter().collect::<String>()),
+        None => (" ".to_string(), String::new()),
+    };
+    vec![
+        Span::raw(before),
+        Span::styled(under, Style::default().add_modifier(Modifier::REVERSED)),
+        Span::raw(after),
+    ]
+}
+
+fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
+    let rows = picker.rows();
+    let shown = rows.len().min(PICKER_ROWS);
+    // Query line, the rows, and a line for a complaint when there is one.
+    let height = 2 + 1 + shown.max(1) + usize::from(picker.error().is_some());
+    let box_area = centered(area, MODAL_W, u16::try_from(height).unwrap_or(u16::MAX));
+    let inner_w = box_area.width.saturating_sub(2) as usize;
+
+    let mut lines = vec![Line::from(
+        [
+            vec![Span::styled("> ", Style::default().fg(Color::DarkGray))],
+            with_cursor(picker.query(), true),
+        ]
+        .concat(),
+    )];
+
+    if rows.is_empty() {
+        lines.push(Line::from(Span::styled(
+            if picker.scanning() {
+                "  scanning ..."
+            } else {
+                "  nothing matches"
+            },
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // A window around the cursor, so a long list stays navigable in twelve rows.
+    let first = picker.cursor().saturating_sub(PICKER_ROWS - 1);
+    for (i, repo) in rows.iter().enumerate().skip(first).take(shown) {
+        lines.push(repo_row(repo, i == picker.cursor(), inner_w));
+    }
+
+    if let Some(error) = picker.error() {
+        lines.push(Line::from(Span::styled(
+            format!("  {error}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let mut title = format!(" pick a repo ({}", picker.total());
+    if picker.scanning() {
+        title.push_str(", scanning ...) ");
+    } else {
+        title.push_str(") ");
+    }
+
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(Paragraph::new(lines).block(pane(title, true)), box_area);
+}
+
+/// One repository row: where it is, what branch it is on, and whether it can
+/// start a session at all.
+fn repo_row(repo: &LocalRepo, selected: bool, width: usize) -> Line<'static> {
+    // Branch and marker are fixed-width on the right, so the path gets whatever
+    // is left rather than pushing them off the box.
+    const BRANCH_W: usize = 22;
+    /// Width of the "no origin" marker, reserved whether or not it is shown so
+    /// the branch column lands in the same place on every row.
+    const MARKER_W: usize = 10;
+    let path_w = width.saturating_sub(2 + BRANCH_W + MARKER_W).max(8);
+
+    let mut spans = vec![
+        Span::raw(if selected { "> " } else { "  " }),
+        Span::raw(format!(
+            "{:<w$}",
+            truncate(&repo.display, path_w),
+            w = path_w
+        )),
+    ];
+    match &repo.branch {
+        Some(b) => spans.push(Span::styled(
+            format!("{:<BRANCH_W$}", truncate(b, BRANCH_W)),
+            Style::default().fg(Color::Cyan),
+        )),
+        None => spans.push(Span::styled(
+            format!("{:<BRANCH_W$}", "(detached)"),
+            Style::default().fg(Color::DarkGray),
+        )),
+    }
+    // Named on the row rather than hidden, because the picker refuses these and
+    // saying why in advance beats an error on enter.
+    if repo.origin.is_none() {
+        spans.push(Span::styled(
+            "no origin",
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::default().add_modifier(Modifier::REVERSED))
+    } else {
+        line
+    }
+}
+
+fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
+    let focused = form.field();
+    let label = |field: Field| {
+        let style = if field == focused {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        Span::styled(format!("{:<LABEL_W$}", field.label()), style)
+    };
+
+    let mut lines = Vec::new();
+
+    // Everything past the label column, so a long path or clone URL is
+    // truncated rather than clipped by the border.
+    let value_w = usize::from(MODAL_W).saturating_sub(2 + LABEL_W);
+
+    // What the sandbox will actually clone, spelled out: the local checkout is
+    // only how the remote was named, and conflating the two is the one
+    // misunderstanding this screen has to prevent.
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<LABEL_W$}", "repo"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(truncate(&form.repo.display, value_w)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!("{:<LABEL_W$}", "clones"),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            truncate(form.repo.origin.as_deref().unwrap_or("-"), value_w),
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    for field in [Field::Task, Field::Name, Field::Base] {
+        let Some(input) = form.input(field) else {
+            continue;
+        };
+        let mut spans = vec![label(field)];
+        spans.extend(with_cursor(input, field == focused));
+        // An empty base is not a missing answer, it is "the remote's default",
+        // and saying so stops it reading as something left unfilled.
+        if field == Field::Base && input.text().trim().is_empty() {
+            spans.push(Span::styled(
+                " (the remote's default branch)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    let template = form.policy();
+    lines.push(Line::from(vec![
+        label(Field::Policy),
+        Span::styled(
+            format!("< {} >", template.name),
+            Style::default().fg(Color::Yellow),
+        ),
+        Span::styled(
+            format!("  {}", template.summary),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    let providers = form.providers();
+    if providers.is_empty() {
+        lines.push(Line::from(vec![
+            label(Field::Providers),
+            Span::styled(
+                form.providers_error().unwrap_or("none defined").to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    for (i, choice) in providers.iter().enumerate() {
+        let cursor = form.field() == Field::Providers && i == form.provider_cursor();
+        let spans = vec![
+            // The label sits on the first row only; the rest are indented under
+            // it, which is what makes the group read as one field.
+            if i == 0 {
+                label(Field::Providers)
+            } else {
+                Span::raw(" ".repeat(LABEL_W))
+            },
+            Span::raw(if cursor { "> " } else { "  " }),
+            Span::styled(
+                if choice.selected { "[x] " } else { "[ ] " },
+                if choice.selected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::raw(format!("{:<22}", truncate(&choice.name, 22))),
+            Span::styled(choice.kind.clone(), Style::default().fg(Color::DarkGray)),
+        ];
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(note) = drift_note(form.facts()) {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            truncate(&format!(" {note}"), usize::from(MODAL_W) - 2),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+    if let Some(error) = form.error() {
+        lines.push(Line::from(Span::styled(
+            format!(" {error}"),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let box_area = centered(area, MODAL_W, height);
+    frame.render_widget(Clear, box_area);
+    frame.render_widget(
+        Paragraph::new(lines).block(pane(" new session ".to_string(), true)),
+        box_area,
+    );
+}
+
+/// What the sandbox will not be getting, in words.
+///
+/// The sandbox clones `origin`, so anything not pushed stays on the host. That
+/// is the design, but it is a surprise the first time, and a count is the only
+/// honest way to say it.
+fn drift_note(facts: Option<&Facts>) -> Option<String> {
+    let facts = facts?;
+    let mut parts = Vec::new();
+    if facts.uncommitted > 0 {
+        parts.push(format!("{} uncommitted file(s)", facts.uncommitted));
+    }
+    match facts.unpushed {
+        Some(n) if n > 0 => parts.push(format!("{n} unpushed commit(s)")),
+        // No upstream at all: nothing has been pushed, so nothing about the
+        // local branch is in the clone.
+        None => parts.push("no upstream for this branch".to_string()),
+        Some(_) => {}
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    // Short on purpose: it has to fit the box on one line, and the sentence it
+    // replaces ("... stay on the host because the sandbox clones from the
+    // remote rather than from this checkout") is the doc comment above.
+    Some(format!("staying on the host: {}", parts.join(", ")))
+}
+
 fn truncate(s: &str, width: usize) -> String {
     if s.chars().count() <= width {
         return s.to_string();
@@ -632,6 +954,8 @@ fn truncate(s: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::crossterm::event::{KeyCode, KeyEvent};
+
     use super::*;
 
     #[test]
@@ -818,5 +1142,231 @@ diff --git a/b b/b
         assert_eq!(wrapped_height(&lines, 40), 2);
         // A zero-width pane must not divide by zero.
         assert_eq!(wrapped_height(&lines, 0), 2);
+    }
+
+    #[test]
+    fn a_modal_box_is_clamped_to_the_frame() {
+        let frame = Rect::new(0, 0, 100, 40);
+        let box_area = centered(frame, MODAL_W, 20);
+        assert_eq!(box_area.width, MODAL_W);
+        assert_eq!(box_area.x, (100 - MODAL_W) / 2);
+
+        // A terminal smaller than the box shrinks it rather than drawing off
+        // the frame, which ratatui would clip into nonsense.
+        let tiny = Rect::new(0, 0, 30, 6);
+        let box_area = centered(tiny, MODAL_W, 20);
+        assert_eq!((box_area.width, box_area.height), (30, 6));
+        assert_eq!((box_area.x, box_area.y), (0, 0));
+    }
+
+    #[test]
+    fn the_cursor_is_drawn_in_the_focused_field_only() {
+        let input = Input::new("abc");
+        let spans = with_cursor(&input, false);
+        assert_eq!(spans.len(), 1, "an unfocused field is plain text");
+
+        // At the end of the line there is no character to reverse, so a space
+        // stands in for one.
+        let spans = with_cursor(&input, true);
+        let reversed: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(reversed, vec![" "]);
+    }
+
+    /// The whole point of the note: the sandbox clones `origin`, so anything not
+    /// pushed is not in it. Silence when there is nothing to say.
+    #[test]
+    fn the_drift_note_only_appears_when_something_would_be_left_behind() {
+        assert_eq!(drift_note(None), None, "nothing is known yet");
+        assert_eq!(
+            drift_note(Some(&Facts {
+                uncommitted: 0,
+                unpushed: Some(0),
+                base_on_remote: true,
+            })),
+            None,
+            "in sync: no warning to give"
+        );
+
+        let note = drift_note(Some(&Facts {
+            uncommitted: 3,
+            unpushed: Some(2),
+            base_on_remote: true,
+        }))
+        .unwrap();
+        assert!(note.contains("3 uncommitted"), "{note}");
+        assert!(note.contains("2 unpushed"), "{note}");
+
+        // No upstream is not "in sync with zero commits ahead".
+        let note = drift_note(Some(&Facts {
+            uncommitted: 0,
+            unpushed: None,
+            base_on_remote: false,
+        }))
+        .unwrap();
+        assert!(note.contains("no upstream"), "{note}");
+    }
+
+    /// A long path must not push the branch column out of the box, and a
+    /// repository that cannot start a session has to say so on its own row.
+    #[test]
+    fn a_repository_row_fits_the_box_and_names_a_missing_origin() {
+        let repo = LocalRepo {
+            path: "/x".into(),
+            display: "~/dev/some/quite/deeply/nested/checkout-with-a-long-name".into(),
+            name: "checkout-with-a-long-name".into(),
+            origin: None,
+            branch: Some("feature/a-long-branch-name-too".into()),
+        };
+        let line = repo_row(&repo, true, 76);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.chars().count() <= 76,
+            "{} columns: {text}",
+            text.chars().count()
+        );
+        assert!(text.contains("no origin"), "{text}");
+        assert!(
+            text.contains('…'),
+            "the path is truncated, not wrapped: {text}"
+        );
+    }
+
+    /// Both modals, rendered into a real buffer.
+    ///
+    /// The pure helpers cover what each line says; this covers what only a
+    /// buffer knows -- that nothing overflows the box. A line one column too
+    /// long is not a wrapped line, it is a sentence with its end cut off, and
+    /// the one that says what stays on the host is exactly the line that must
+    /// not lose its ending.
+    fn render(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    fn probe_repo(name: &str, origin: Option<&str>, branch: &str) -> LocalRepo {
+        LocalRepo {
+            path: format!("/home/u/dev/{name}").into(),
+            display: format!("~/dev/{name}"),
+            name: name.to_string(),
+            origin: origin.map(String::from),
+            branch: Some(branch.to_string()),
+        }
+    }
+
+    /// An app with the create flow open on the picker, populated.
+    fn app_picking() -> App {
+        let mut app = App::new();
+        app.repos = Some(vec![
+            probe_repo("sbx", Some("https://github.com/o/sbx.git"), "main"),
+            probe_repo(
+                "Inet.Server",
+                Some("https://inetse@dev.azure.com/inetse/inet/_git/Inet.Server"),
+                "tobias/CODE-18757-qty-shipped-non-nullable",
+            ),
+            probe_repo("notes", None, "main"),
+        ]);
+        app.providers = Some(Ok(vec![
+            openshell_client::Provider {
+                name: "claude-oauth".into(),
+                kind: "claude-code-oauth".into(),
+                credential_keys: vec![],
+            },
+            openshell_client::Provider {
+                name: "azure-pat".into(),
+                kind: "azure-devops-pat".into(),
+                credential_keys: vec![],
+            },
+        ]));
+        app.open_create();
+        app
+    }
+
+    #[test]
+    fn the_picker_renders_inside_its_box() {
+        let mut app = app_picking();
+        let rows = render(&mut app, 100, 26);
+        let picker = rows
+            .iter()
+            .find(|r| r.contains("pick a repo"))
+            .expect("the picker box");
+        assert!(
+            picker.contains("(3)"),
+            "the count is in the title: {picker}"
+        );
+
+        // Every repository is offered, including the one that cannot be used --
+        // with the reason on its row.
+        let body = rows.join("\n");
+        assert!(body.contains("~/dev/sbx"), "{body}");
+        assert!(body.contains("no origin"), "{body}");
+        // The long branch is truncated rather than pushing the box apart.
+        assert!(body.contains("tobias/CODE-18757"), "{body}");
+        for row in &rows {
+            assert!(row.chars().count() <= 100, "overflowed the frame: {row}");
+        }
+    }
+
+    #[test]
+    fn the_form_renders_inside_its_box() {
+        let mut app = app_picking();
+        // Pick the second repository, so the long Azure URL is the one shown.
+        app.on_key(KeyEvent::from(KeyCode::Down));
+        app.on_key(KeyEvent::from(KeyCode::Enter));
+        app.on_update(crate::tui::worker::Update::Inspected {
+            path: "/home/u/dev/Inet.Server".into(),
+            facts: Box::new(Facts {
+                uncommitted: 9,
+                unpushed: Some(2),
+                base_on_remote: true,
+            }),
+        });
+
+        let rows = render(&mut app, 100, 26);
+        let body = rows.join("\n");
+        assert!(body.contains("new session"), "{body}");
+        assert!(body.contains("feature-work"), "the default policy: {body}");
+        // The agent's credential, and the one for this repository's host: an
+        // Azure repo with exactly one Azure PAT defined leaves no ambiguity.
+        assert!(body.contains("[x] claude-oauth"), "preselected: {body}");
+        assert!(body.contains("[x] azure-pat"), "preselected: {body}");
+        // And the URL the sandbox will clone, which is the point of the screen.
+        assert!(body.contains("dev.azure.com/inetse/inet/_git"), "{body}");
+
+        // The note has to survive intact: it is the one thing on this screen
+        // that corrects a wrong assumption about what the sandbox will contain.
+        let note = rows
+            .iter()
+            .find(|r| r.contains("staying on the host"))
+            .expect("the drift note");
+        assert!(
+            note.contains("staying on the host: 9 uncommitted file(s), 2 unpushed commit(s)"),
+            "the note was cut off by the border: {note}"
+        );
+    }
+
+    /// A terminal too small for the box must still render something rather than
+    /// panicking on an out-of-frame rect.
+    #[test]
+    fn the_modals_survive_a_tiny_terminal() {
+        let mut app = app_picking();
+        for (w, h) in [(20u16, 6u16), (40, 10), (78, 4)] {
+            let rows = render(&mut app, w, h);
+            assert_eq!(rows.len(), usize::from(h));
+        }
     }
 }

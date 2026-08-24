@@ -1,21 +1,25 @@
 //! The terminal UI.
 
 mod attach;
+mod create;
 mod ui;
 mod worker;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use openshell_client::{CliClient, PolicyRevision, PolicyUpdate};
+use openshell_client::{CliClient, PolicyRevision, PolicyUpdate, Provider};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use crate::ops;
 use crate::policy;
+use crate::repos::LocalRepo;
 use crate::session::{Session, State};
 use crate::status;
 use crate::tui::attach::attach;
+use create::{Create, Form, Picker};
 use worker::{Request, Update, Worker};
 
 /// How often the session list is reconciled against the gateway.
@@ -186,12 +190,39 @@ pub struct App {
     confirm: Option<(String, Confirm)>,
     publish_request: Option<Session>,
     publishing: Option<String>,
+    /// The create flow, while it is open. It owns the keyboard, like a pending
+    /// question does.
+    create: Option<Create>,
+    /// The picker as it was when a repository was chosen, so escaping the form
+    /// comes back to the same query rather than to a blank filter.
+    stashed_picker: Option<Picker>,
+    /// Repositories found on the host, kept for the TUI's lifetime so reopening
+    /// the picker is instant. Refreshed in the background each time it opens, so
+    /// a checkout made since the last one still shows up.
+    repos: Option<Vec<LocalRepo>>,
+    scan_in_flight: bool,
+    /// The gateway's providers, or why they could not be read. Fetched once:
+    /// providers are created by hand and do not change under a running TUI.
+    providers: Option<Result<Vec<Provider>, String>>,
+    providers_in_flight: bool,
+    /// A session being created, or just created, that the store may not know
+    /// about yet. Merged into the list so the row appears the moment the create
+    /// starts rather than after the next refresh.
+    pending: Option<Session>,
+    /// Set by the key handler; sent by the event loop, which owns the worker.
+    scan_request: bool,
+    providers_request: bool,
+    inspect_request: Option<(PathBuf, Option<String>)>,
+    create_request: Option<Box<ops::Draft>>,
 }
 
 /// An action held pending confirmation.
 #[derive(Debug, Clone)]
 enum Confirm {
     Publish(Box<Session>),
+    /// Quitting while a create is running. The create thread dies with the
+    /// process, so this is worth asking about; see `worker::spawn_create`.
+    Quit,
 }
 
 impl App {
@@ -229,6 +260,17 @@ impl App {
             confirm: None,
             publish_request: None,
             publishing: None,
+            create: None,
+            stashed_picker: None,
+            repos: None,
+            scan_in_flight: false,
+            providers: None,
+            providers_in_flight: false,
+            pending: None,
+            scan_request: false,
+            providers_request: false,
+            inspect_request: None,
+            create_request: None,
         }
     }
 
@@ -334,6 +376,24 @@ impl App {
         self.poll(&session.name)
             .and_then(|p| p.status.as_ref())
             .map_or(session.state, |r| r.state)
+    }
+
+    /// Whether the gateway can be asked about a session yet.
+    ///
+    /// False only for the row standing in for a create that has not got as far
+    /// as a sandbox: every exec against it would fail for the seconds that
+    /// takes, at the cost of a subprocess and a blanked pane each. Once the
+    /// sandbox exists the row is polled like any other, half-cloned repository
+    /// and all -- the poll script is written to tolerate that.
+    ///
+    /// Deliberately not keyed off `State::Creating` in general. A cached session
+    /// left in that state by a crashed create *does* have a sandbox, usually,
+    /// and refusing to poll it would leave it saying `creating` for ever.
+    fn is_live(&self, session: &Session) -> bool {
+        !self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.name == session.name && p.state == State::Creating)
     }
 
     /// What the agent is doing, for the preview pane.
@@ -493,6 +553,129 @@ impl App {
                 self.note(format!("publishing {} ...", session.work_branch));
                 self.publish_request = Some(*session);
             }
+            Confirm::Quit => self.should_quit = true,
+        }
+    }
+
+    /// The create flow, for the renderer.
+    pub fn create_flow(&self) -> Option<&Create> {
+        self.create.as_ref()
+    }
+
+    /// Open the create flow on the repository picker.
+    ///
+    /// The cached scan is shown immediately and a fresh one requested behind it,
+    /// so the picker is never empty on a second opening and never stale on a
+    /// long-running TUI.
+    fn open_create(&mut self) {
+        if self.pending.is_some() {
+            self.fail("a session is already being created");
+            return;
+        }
+        let mut picker = Picker::new();
+        if let Some(repos) = &self.repos {
+            picker.scanned(repos.clone());
+        }
+        self.create = Some(Create::Pick(picker));
+        self.stashed_picker = None;
+        self.scan_request = true;
+        // The form needs these, and asking now means they are usually there by
+        // the time a repository has been chosen. Asked again after a failure,
+        // so a gateway hiccup does not leave the form unable to offer
+        // credentials for the rest of the session.
+        self.providers_request = !matches!(self.providers, Some(Ok(_)));
+    }
+
+    /// Route a key to the create flow and act on what it decided.
+    fn on_create_key(&mut self, key: KeyEvent) {
+        let Some(flow) = self.create.as_mut() else {
+            return;
+        };
+        let action = match flow {
+            Create::Pick(picker) => picker.on_key(key),
+            Create::Fill(form) => form.on_key(key),
+        };
+        match action {
+            create::Action::None => {}
+            create::Action::Cancel => {
+                self.create = None;
+                self.stashed_picker = None;
+            }
+            create::Action::Picked(repo) => {
+                if let Some(Create::Pick(picker)) = self.create.take() {
+                    self.stashed_picker = Some(picker);
+                }
+                self.inspect_request = Some((repo.path.clone(), repo.branch.clone()));
+                self.create = Some(Create::Fill(Box::new(Form::new(
+                    *repo,
+                    self.providers.as_ref(),
+                ))));
+            }
+            create::Action::Back => {
+                // The stashed picker keeps the query; the cache keeps it
+                // current, in case a scan landed while the form was up.
+                let mut picker = self.stashed_picker.take().unwrap_or_else(Picker::new);
+                if let Some(repos) = &self.repos {
+                    picker.scanned(repos.clone());
+                }
+                self.create = Some(Create::Pick(picker));
+            }
+            create::Action::Submit(draft) => self.submit_create(*draft),
+        }
+    }
+
+    /// Accept a filled-in form, or push the reason back into it.
+    ///
+    /// The duplicate-name check lives here rather than in the form because only
+    /// the app knows what sessions exist -- and it has to be made again inside
+    /// [`ops::create`] anyway, against the store, which is the authority.
+    fn submit_create(&mut self, draft: ops::Draft) {
+        let taken = self.sessions.iter().any(|s| s.name == draft.name)
+            || self.pending.as_ref().is_some_and(|s| s.name == draft.name);
+        if taken {
+            if let Some(Create::Fill(form)) = self.create.as_mut() {
+                form.set_error(format!("session `{}` already exists", draft.name));
+            }
+            return;
+        }
+
+        // A row for the session before it exists, so the list accounts for it
+        // while the gateway works. Replaced by the real record on the first
+        // refresh that sees it.
+        let mut row = Session::new(draft.name.clone(), draft.repo.clone(), draft.task.clone());
+        row.base_branch = draft.base.clone();
+        row.policy = Some(draft.policy.clone());
+        row.providers = draft.providers.clone();
+        row.state = State::Creating;
+
+        self.note(format!("creating {} ...", draft.name));
+        self.set_pending(row);
+        self.select(&draft.name);
+        self.create = None;
+        self.stashed_picker = None;
+        self.create_request = Some(Box::new(draft));
+    }
+
+    /// Record the session being created, in the list as well as in `pending`.
+    ///
+    /// Both, so a stage change shows up immediately rather than at the next
+    /// refresh: the list is rebuilt from the store every few seconds, and until
+    /// then it holds this copy.
+    fn set_pending(&mut self, session: Session) {
+        match self.sessions.iter_mut().find(|s| s.name == session.name) {
+            Some(row) => *row = session.clone(),
+            None => {
+                self.sessions.push(session.clone());
+                self.sessions.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
+        self.pending = Some(session);
+    }
+
+    /// Put the cursor on a session by name, if the list has it.
+    fn select(&mut self, name: &str) {
+        if let Some(i) = self.sessions.iter().position(|s| s.name == name) {
+            self.list_state.select(Some(i));
         }
     }
 
@@ -506,10 +689,29 @@ impl App {
             }
             return;
         }
+        // Then the create flow, for the same reason: a character typed into the
+        // task must not also move the session list.
+        if self.create.is_some() {
+            self.on_create_key(key);
+            return;
+        }
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
-                self.should_quit = true;
+                // Quitting kills the create thread with the process, which can
+                // leave a sandbox half-seeded, so it asks first.
+                match self.pending.as_ref().map(|s| s.name.clone()) {
+                    Some(name) => {
+                        self.confirm = Some((
+                            format!("{name} is still being created; quit anyway?  y/n"),
+                            Confirm::Quit,
+                        ));
+                    }
+                    None => self.should_quit = true,
+                }
             }
+            // New session: the picker, then the form. Lowercase, unlike publish,
+            // because nothing has left the machine until the form is submitted.
+            (KeyCode::Char('n'), _) => self.open_create(),
             // Pane movement, mirroring Ctrl-w h/l in vim. Available from either
             // pane so there is always a way back.
             (KeyCode::Char('h'), _) | (KeyCode::Left, _) => self.focus = Focus::List,
@@ -636,6 +838,62 @@ impl App {
                     Err(e) => self.fail(e.clone()),
                 }
             }
+            Update::Repos(repos) => {
+                self.scan_in_flight = false;
+                // Into the open picker as well as the cache: a scan that lands
+                // while the picker is up should fill it in, not wait for the
+                // next opening.
+                if let Some(Create::Pick(picker)) = self.create.as_mut() {
+                    picker.scanned(repos.clone());
+                }
+                self.repos = Some(repos);
+            }
+            Update::Inspected { path, facts } => {
+                // Only if the form is still about that repository: going back
+                // and picking another one must not be told about the first.
+                if let Some(Create::Fill(form)) = self.create.as_mut()
+                    && form.repo.path == path
+                {
+                    form.inspected(*facts);
+                }
+            }
+            Update::Providers(result) => {
+                self.providers_in_flight = false;
+                if let Some(Create::Fill(form)) = self.create.as_mut() {
+                    form.providers_arrived(&result);
+                }
+                self.providers = Some(*result);
+            }
+            Update::Creating { session, step } => {
+                if let Some(mut row) = self.pending.clone().filter(|p| p.name == session) {
+                    row.state = step.state();
+                    self.set_pending(row);
+                }
+                self.note(format!("{session}: {}", step.label()));
+            }
+            Update::Created { session, result } => {
+                match *result {
+                    Ok(created) => {
+                        let mut msg = format!("created {session}");
+                        if let Some(w) = created.warnings.first() {
+                            msg.push_str(&format!("  -- {w}"));
+                        }
+                        self.note(msg);
+                        // Kept as the pending row until a refresh reads it back
+                        // from the store, so the row does not blink out of the
+                        // list in between.
+                        self.set_pending(created.session);
+                    }
+                    Err(e) => {
+                        self.fail(format!("could not create {session}: {e}"));
+                        // Dropped rather than left showing: whether a record
+                        // survived is up to how far the create got, and the
+                        // refresh below is what knows.
+                        self.pending = None;
+                    }
+                }
+                self.last_refresh = Instant::now() - REFRESH_EVERY;
+            }
             Update::Failed(e) => {
                 self.refreshing = false;
                 self.fail(e);
@@ -648,6 +906,19 @@ impl App {
         // would jump when a session is added or removed above the cursor.
         let previously = self.selected().map(|s| s.name.clone());
         self.sessions = r.sessions;
+
+        // A create in flight is not in the store yet -- and a create that has
+        // just finished may not be either, since the worker's refresh could have
+        // read the file before the create thread wrote it. Either way the row
+        // belongs in the list; once the store has it, the store's copy wins.
+        match &self.pending {
+            Some(row) if !self.sessions.iter().any(|s| s.name == row.name) => {
+                self.sessions.push(row.clone());
+                self.sessions.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+            Some(_) => self.pending = None,
+            None => {}
+        }
 
         let index = previously
             .and_then(|name| self.sessions.iter().position(|s| s.name == name))
@@ -717,6 +988,26 @@ fn event_loop(
             worker.send(Request::Publish(Box::new(session)));
         }
 
+        // A scan already running answers the pending request too, so a second
+        // one is dropped rather than queued behind it.
+        if std::mem::take(&mut app.scan_request) && !app.scan_in_flight {
+            app.scan_in_flight = true;
+            worker.send(Request::ScanRepos);
+        }
+
+        if std::mem::take(&mut app.providers_request) && !app.providers_in_flight {
+            app.providers_in_flight = true;
+            worker.send(Request::Providers);
+        }
+
+        if let Some((path, branch)) = app.inspect_request.take() {
+            worker.send(Request::Inspect { path, branch });
+        }
+
+        if let Some(draft) = app.create_request.take() {
+            worker.send(Request::Create(draft));
+        }
+
         if let Some((session, update, label)) = app.repolicy_request.take() {
             worker.send(Request::Repolicy {
                 session: Box::new(session),
@@ -773,7 +1064,7 @@ fn event_loop(
 fn dispatch_fetches(app: &mut App, worker: &Worker) {
     // Cloned out first so the immutable borrow of `app` ends before the
     // in-flight markers are written.
-    let selected = app.selected().cloned();
+    let selected = app.selected().cloned().filter(|s| app.is_live(s));
     if let Some(session) = selected {
         let view = app.right_view();
         let ttl = view.ttl();
@@ -830,9 +1121,11 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
 /// is being read, then whichever has been stale longest.
 fn next_poll_target(app: &App) -> Option<Session> {
     let due = |s: &Session| {
-        app.polls
-            .get(&s.name)
-            .is_none_or(|c| c.stale_after(POLL_TTL))
+        app.is_live(s)
+            && app
+                .polls
+                .get(&s.name)
+                .is_none_or(|c| c.stale_after(POLL_TTL))
     };
 
     if let Some(s) = app.selected().filter(|s| due(s)) {
@@ -1603,5 +1896,309 @@ mod tests {
         app.apply_refresh(refreshed);
         assert!(app.status_is_error);
         assert_eq!(app.selected().map(|s| s.state), None::<State>);
+    }
+
+    // --- the create flow, driven through `App` exactly as keys reach it ------
+
+    fn local_repo(name: &str, origin: Option<&str>) -> LocalRepo {
+        LocalRepo {
+            path: format!("/home/u/dev/{name}").into(),
+            display: format!("~/dev/{name}"),
+            name: name.to_string(),
+            origin: origin.map(String::from),
+            branch: Some("main".into()),
+        }
+    }
+
+    /// Walk the flow to a queued create, returning the app it left behind.
+    fn app_after_submit(names: &[&str], task: &str) -> App {
+        let mut app = app_with(names);
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_update(Update::Repos(vec![local_repo(
+            "api",
+            Some("https://github.com/o/api.git"),
+        )]));
+        app.on_key(key(KeyCode::Enter));
+        for c in task.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+        app
+    }
+
+    #[test]
+    fn n_opens_the_picker_and_asks_for_a_scan() {
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('n')));
+        assert!(matches!(app.create, Some(Create::Pick(_))));
+        assert!(app.scan_request, "the loop sends this");
+        assert!(app.providers_request);
+    }
+
+    #[test]
+    fn a_failed_provider_read_is_retried_when_the_picker_opens_again() {
+        let mut app = app_with(&[]);
+        app.providers = Some(Err("gateway unreachable".into()));
+        app.open_create();
+        assert!(
+            app.providers_request,
+            "a failure is worth asking about again"
+        );
+
+        app.providers = Some(Ok(vec![]));
+        app.providers_request = false;
+        app.create = None;
+        app.open_create();
+        assert!(
+            !app.providers_request,
+            "but a good answer is only read once"
+        );
+    }
+
+    /// A cached scan is shown at once. Reopening the picker and waiting seconds
+    /// for a walk of a home directory already done would be the difference
+    /// between this being usable and not.
+    #[test]
+    fn a_cached_scan_fills_the_picker_immediately() {
+        let mut app = app_with(&[]);
+        app.repos = Some(vec![local_repo("api", Some("u"))]);
+        app.on_key(key(KeyCode::Char('n')));
+        match &app.create {
+            Some(Create::Pick(p)) => {
+                assert!(!p.scanning());
+                assert_eq!(p.rows().len(), 1);
+            }
+            _ => panic!("expected the picker"),
+        }
+    }
+
+    /// The flow is modal: while it is open, keys go to it and nothing else.
+    #[test]
+    fn the_flow_owns_the_keyboard() {
+        let mut app = app_with(&["a", "b"]);
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(
+            app.list_state.selected(),
+            Some(0),
+            "j is a character in the filter, not a movement"
+        );
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.create.is_none());
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list_state.selected(), Some(1), "and now it moves again");
+    }
+
+    #[test]
+    fn submitting_queues_the_create_and_shows_a_row() {
+        let app = app_after_submit(&["other"], "fix the readme");
+
+        let draft = app.create_request.as_ref().expect("a queued create");
+        assert_eq!(draft.name, "fix-the-readme");
+        assert_eq!(draft.repo, "https://github.com/o/api.git");
+        assert!(app.create.is_none(), "the flow closes on submit");
+
+        // The row is in the list before the gateway has done anything, and it is
+        // what the cursor is on.
+        let row = app
+            .sessions
+            .iter()
+            .find(|s| s.name == "fix-the-readme")
+            .expect("a row");
+        assert_eq!(row.state, State::Creating);
+        assert_eq!(
+            app.selected().map(|s| s.name.as_str()),
+            Some("fix-the-readme")
+        );
+    }
+
+    #[test]
+    fn a_name_already_taken_is_refused_in_the_form() {
+        let mut app = app_after_submit(&["fix-the-readme"], "fix the readme");
+        assert!(app.create_request.is_none(), "nothing may be queued");
+        match &app.create {
+            Some(Create::Fill(form)) => assert!(
+                form.error().unwrap().contains("already exists"),
+                "got {:?}",
+                form.error()
+            ),
+            _ => panic!("the form must stay open with the complaint on it"),
+        }
+
+        // Editing the name to something free lets it through.
+        app.on_key(key(KeyCode::Tab));
+        app.on_key(key(KeyCode::Char('2')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.create_request.is_some());
+    }
+
+    #[test]
+    fn progress_moves_the_row_through_the_states() {
+        let mut app = app_after_submit(&[], "fix the readme");
+        let name = "fix-the-readme";
+        let state = |app: &App| app.sessions.iter().find(|s| s.name == name).unwrap().state;
+
+        app.on_update(Update::Creating {
+            session: name.to_string(),
+            step: ops::Step::Clone,
+        });
+        assert_eq!(state(&app), State::Seeding);
+
+        app.on_update(Update::Creating {
+            session: name.to_string(),
+            step: ops::Step::Agent,
+        });
+        assert_eq!(state(&app), State::Ready);
+    }
+
+    /// A create that has not reached a sandbox yet must not be polled: every
+    /// exec would fail, at the cost of a subprocess and a blanked pane each.
+    #[test]
+    fn the_pending_row_is_not_polled_until_it_has_a_sandbox() {
+        let mut app = app_after_submit(&[], "fix the readme");
+        let name = "fix-the-readme";
+        assert!(
+            next_poll_target(&app).is_none(),
+            "nothing else exists, and the pending row is not askable"
+        );
+
+        // Once the sandbox is up, it is polled like anything else.
+        app.on_update(Update::Creating {
+            session: name.to_string(),
+            step: ops::Step::Clone,
+        });
+        assert_eq!(
+            next_poll_target(&app).map(|s| s.name),
+            Some(name.to_string())
+        );
+    }
+
+    #[test]
+    fn a_created_session_keeps_its_row_until_the_store_has_it() {
+        let mut app = app_after_submit(&[], "fix the readme");
+        let name = "fix-the-readme";
+        let mut created = Session::new(name.into(), "r".into(), "t".into());
+        created.state = State::Ready;
+
+        app.on_update(Update::Created {
+            session: name.to_string(),
+            result: Box::new(Ok(ops::Created {
+                session: created.clone(),
+                warnings: vec![],
+            })),
+        });
+        assert!(app.pending.is_some());
+
+        // A refresh that has not caught up yet keeps the row rather than
+        // blinking it out of the list.
+        app.apply_refresh(ops::Refreshed::default());
+        assert_eq!(app.sessions.len(), 1);
+
+        // And once the store knows about it, the store's copy takes over.
+        app.apply_refresh(ops::Refreshed {
+            sessions: vec![created],
+            ..Default::default()
+        });
+        assert!(app.pending.is_none());
+        assert_eq!(app.sessions.len(), 1);
+    }
+
+    #[test]
+    fn a_failed_create_drops_the_row_and_says_why() {
+        let mut app = app_after_submit(&[], "fix the readme");
+        app.on_update(Update::Created {
+            session: "fix-the-readme".to_string(),
+            result: Box::new(Err("the gateway said no".into())),
+        });
+        assert!(app.pending.is_none());
+        assert!(app.status_is_error);
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .contains("the gateway said no")
+        );
+        // The refresh that follows is what decides whether a record survived.
+        assert!(app.last_refresh.elapsed() >= REFRESH_EVERY);
+    }
+
+    /// The create runs on a thread that dies with the process, so quitting
+    /// mid-create can leave a half-seeded sandbox behind. Worth one question.
+    #[test]
+    fn quitting_mid_create_asks_first() {
+        let mut app = app_after_submit(&[], "fix the readme");
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(!app.should_quit);
+        assert!(
+            app.pending_question()
+                .unwrap()
+                .contains("still being created"),
+            "got {:?}",
+            app.pending_question()
+        );
+        app.on_key(key(KeyCode::Char('y')));
+        assert!(app.should_quit);
+    }
+
+    #[test]
+    fn quitting_with_nothing_in_flight_does_not_ask() {
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('q')));
+        assert!(app.should_quit);
+    }
+
+    /// Going back from the form re-opens the picker with the scan intact, so a
+    /// mis-pick costs one keystroke rather than another walk of the disk.
+    #[test]
+    fn escaping_the_form_returns_to_a_populated_picker() {
+        let mut app = app_with(&[]);
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_update(Update::Repos(vec![local_repo("api", Some("u"))]));
+        app.on_key(key(KeyCode::Char('a')));
+        app.on_key(key(KeyCode::Char('p')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(matches!(app.create, Some(Create::Fill(_))));
+
+        app.on_key(key(KeyCode::Esc));
+        match &app.create {
+            Some(Create::Pick(p)) => {
+                assert_eq!(p.rows().len(), 1, "the scan is reused");
+                assert_eq!(p.query().text(), "ap", "and so is what was typed");
+            }
+            _ => panic!("expected the picker"),
+        }
+        // And escaping again leaves the flow entirely.
+        app.on_key(key(KeyCode::Esc));
+        assert!(app.create.is_none());
+    }
+
+    /// An inspection is asked for on the pick and matched to the repository it
+    /// was asked about, so an answer arriving after a re-pick is discarded.
+    #[test]
+    fn an_inspection_for_another_repository_is_ignored() {
+        let mut app = app_with(&[]);
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_update(Update::Repos(vec![local_repo("api", Some("u"))]));
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.inspect_request.as_ref().map(|(p, _)| p.clone()),
+            Some("/home/u/dev/api".into())
+        );
+
+        app.on_update(Update::Inspected {
+            path: "/home/u/dev/somewhere-else".into(),
+            facts: Box::new(crate::repos::Facts {
+                uncommitted: 9,
+                unpushed: None,
+                base_on_remote: false,
+            }),
+        });
+        match &app.create {
+            Some(Create::Fill(form)) => assert!(
+                form.facts().is_none(),
+                "an answer about another repository must not be shown"
+            ),
+            _ => panic!("expected the form"),
+        }
     }
 }

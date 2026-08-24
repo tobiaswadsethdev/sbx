@@ -327,6 +327,22 @@ pub struct Binary {
 /// independent: `--binary` applies to *every* `--add-endpoint` in the same
 /// invocation, and `--rule-name` is only accepted when there is exactly one.
 /// Modelling it as separate ops would invite building a command the CLI rejects.
+/// A credential provider the gateway can attach to a sandbox.
+///
+/// Only identity and shape: the credential itself lives in gateway state and is
+/// never returned by the CLI, which is the whole point of a provider.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Provider {
+    pub name: String,
+    /// Profile type, e.g. `claude-code-oauth` or `azure-devops-pat`. This, not
+    /// the name, is what says what a provider is *for*: names are chosen by
+    /// whoever created them and several may share a type.
+    #[serde(rename = "type", default)]
+    pub kind: String,
+    #[serde(default)]
+    pub credential_keys: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PolicyUpdate {
     /// `host:port[:access[:protocol[:enforcement[:options]]]]`.
@@ -362,6 +378,9 @@ pub trait OpenShell {
     fn policy_update(&self, name: &str, update: &PolicyUpdate) -> Result<()>;
     /// Recent gateway and sandbox log lines, newest last.
     fn logs(&self, name: &str, lines: usize) -> Result<String>;
+    /// Providers defined at the gateway, for offering a choice of
+    /// credentials rather than requiring their names to be known.
+    fn providers(&self) -> Result<Vec<Provider>>;
 }
 
 /// [`OpenShell`] backed by the `openshell` CLI.
@@ -616,6 +635,12 @@ impl OpenShell for CliClient {
         let out = self.run_checked(["logs", name, "-n", &n], &display)?;
         Ok(out.stdout)
     }
+
+    fn providers(&self) -> Result<Vec<Provider>> {
+        let display = "provider list --output json";
+        let out = self.run_checked(["provider", "list", "--output", "json"], display)?;
+        Self::parse_json(&out.stdout, display)
+    }
 }
 
 #[cfg(test)]
@@ -633,6 +658,27 @@ mod tests {
         "name": "sbx-probe",
         "phase": "Ready",
         "resource_version": 7,
+        "workspace": "default"
+      }
+    ]"#;
+
+    /// Captured verbatim from `openshell provider list --output json` on 0.0.110,
+    /// with the credential values redacted -- the CLI never prints them.
+    const PROVIDERS_JSON: &str = r#"[
+      {
+        "credential_keys": ["CLAUDE_CODE_OAUTH_TOKEN"],
+        "id": "e469673c-4f1e-4fa3-912b-d4e10a6cc633",
+        "name": "claude-oauth",
+        "resource_version": 1,
+        "type": "claude-code-oauth",
+        "workspace": "default"
+      },
+      {
+        "credential_keys": ["AZURE_DEVOPS_PAT"],
+        "id": "123dea58-a262-44e8-abd4-573b934888dc",
+        "name": "azure-pat",
+        "resource_version": 1,
+        "type": "azure-devops-pat",
         "workspace": "default"
       }
     ]"#;
@@ -815,6 +861,18 @@ mod tests {
         assert!(st.is_connected());
         assert_eq!(st.version, "0.0.110");
         assert_eq!(st.authentication.status, "authenticated");
+    }
+
+    #[test]
+    fn parses_providers() {
+        let ps: Vec<Provider> = serde_json::from_str(PROVIDERS_JSON).unwrap();
+        assert_eq!(ps.len(), 2);
+        assert_eq!(ps[0].name, "claude-oauth");
+        // `type` is a keyword, so the field is renamed; if that mapping breaks,
+        // every provider reads as having no type and the create form can no
+        // longer tell an agent credential from a git one.
+        assert_eq!(ps[0].kind, "claude-code-oauth");
+        assert_eq!(ps[1].credential_keys, vec!["AZURE_DEVOPS_PAT"]);
     }
 
     /// Unknown fields and phases must not break parsing: the gateway adds them

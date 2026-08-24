@@ -67,7 +67,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-8 are done. What is left is the unscheduled list below.
+Increments 0-9 are done. What is left is the unscheduled list below.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -287,9 +287,71 @@ Increments 0-8 are done. What is left is the unscheduled list below.
 
   Deferred, deliberately: `git format-patch` for repos with no writable remote
   is still unwritten -- the isolation argument for it stands, but nothing has
-  wanted it yet. The TUI publish uses default options; title, body, target and
-  `--draft` are CLI-only, because entering text in the TUI needs input handling
-  that does not exist until `sbx new` moves there too.
+  wanted it yet. The TUI publish still uses default options; title, body, target
+  and `--draft` remain CLI-only. The reason given here was that entering text in
+  the TUI needed input handling that did not exist -- increment 9 built it, so
+  this is now only unwritten, not blocked.
+
+- **9. `sbx new` from the TUI** — DONE. `n` opens a repository picker over the
+  host's git checkouts, then a form for everything `sbx new` takes, and the
+  create runs on its own thread so the rest of the TUI keeps working while a
+  sandbox is provisioned.
+
+  The design decision worth recording: **a local repository names a remote, it
+  is not a source of code.** The sandbox still clones `origin` over the gateway,
+  exactly as `sbx new --repo <url>` does. `openshell sandbox upload` exists and
+  would allow the alternative -- bundle the checkout, upload it, clone from the
+  bundle, rewire `origin` afterwards -- and that would carry unpushed commits
+  and uncommitted edits into the sandbox. It was not taken: it needs the origin
+  rewiring to keep publish, base-branch resolution and the diff pane working,
+  and every one of those is a new way for a session to be subtly wrong. What the
+  form does instead is *say* what stays behind, counted by one `git status` and
+  one `rev-list` on the picked repository. Upload remains the obvious next move
+  if local-only work turns out to matter.
+
+  How it is put together:
+
+  * `repos.rs` is the only module that touches the host filesystem. Discovery
+    walks a handful of roots (working directory, its parent, the conventional
+    `~/dev`-style directories, `$HOME` at depth 1; `SBX_REPO_ROOTS` replaces the
+    lot), skipping hidden and dependency directories and never descending into a
+    repository it has found. Metadata is read *out of `.git`* rather than by
+    running git -- `HEAD` for the branch, `config` for the origin, `commondir`
+    for worktrees -- because three subprocesses per repository would turn a scan
+    of a home directory into seconds. 15 repositories in 23ms on the dev box.
+  * The fuzzy filter is a subsequence scorer with bonuses for consecutive runs,
+    word boundaries and prefixes, so `sbx` finds `~/dev/sbx` before
+    `~/work/toolbox-sbx`. No new dependency for forty lines.
+  * `tui/create.rs` is a pure state machine: `Input` (a single-line field with a
+    *character* cursor, so pasted non-ASCII cannot panic it), `Picker`, `Form`.
+    No I/O at all -- the scan, the git inspection, the provider list and the
+    create are worker requests -- so all of it is tested with synthetic key
+    events, as the rest of the TUI already was.
+  * `ops::create` is `cmd_new`'s body, lifted so the CLI and the TUI cannot
+    drift. It reports progress through a callback: the CLI prints the steps, the
+    TUI turns them into `creating` / `seeding` / `ready` on the row. It does
+    **not** build the image, because `image::build` streams docker's output and
+    would tear the TUI apart; the CLI calls `image::ensure` first and the create
+    thread refuses with "run `sbx image build`".
+  * Creating runs on a thread of its own, unlike every other worker request.
+    Requests are served one at a time, so a create served inline would freeze
+    the state column and every pane for the half-minute it takes. It is detached
+    rather than joined on shutdown -- holding the terminal for the rest of a
+    clone would be worse -- so quitting mid-create asks first.
+  * The list shows the session before it exists. `App::pending` holds a row that
+    is merged into the list on every refresh until the store has it, which also
+    covers the race where the worker's refresh reads `sessions.json` before the
+    create thread writes it. That row is deliberately not polled until it has a
+    sandbox: every exec would fail, at a subprocess each.
+  * Providers are preselected by *type*, not name: the agent's credential and
+    the repository host's, and only when exactly one provider of that type
+    exists. Two Azure PATs means no way to know which organisation was meant,
+    and a wrong credential fails three steps later.
+
+  Verified: the CLI path through the refactored `ops::create` (create, clone,
+  `ls`, `diff`, `rm`) and the worker's create seam against a live gateway,
+  through `Request::Create` to `Update::Created`, both against
+  `octocat/Hello-World` under `readonly-explore` with no agent started.
 
 ### Later, unscheduled
 
@@ -307,8 +369,9 @@ Increments 0-8 are done. What is left is the unscheduled list below.
 - **Multiple agents** — the `agent` field is already stored per session and
   hardcoded to `claude`. codex, opencode and copilot are all in the community
   policy, so most of the work is policy templates plus a launch command.
-- **`sbx new` from the TUI** — creating a session still means dropping to the
-  shell.
+- **A local repository as a *source*** — `openshell sandbox upload` would let a
+  session start from unpushed work, or from a checkout with no remote at all.
+  See increment 9 for why it clones `origin` instead, and what it would cost.
 
 ## Risks
 
@@ -350,7 +413,7 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-8 done, `main` at a clean tree, 171 tests, clippy
+Current state: increments 0-9 done, `main` at a clean tree, 234 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
@@ -359,7 +422,8 @@ The loop that works today, end to end:
 ```sh
 sbx new --repo <url> --task "..." --policy feature-work \
         --provider claude-oauth --provider azure-pat
-sbx            # Enter to attach, Ctrl-b d to detach, q to quit
+sbx            # or start one here: n, pick a repo, fill the form, enter
+               # Enter to attach, Ctrl-b d to detach, q to quit
                # Tab cycles preview/diff/policy/events; w/t widen/tighten egress
                # P publishes (asks first)
 sbx publish <name>

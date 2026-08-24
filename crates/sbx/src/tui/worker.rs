@@ -4,13 +4,15 @@
 //! milliseconds, so none of them may happen on the render thread. The worker
 //! owns all I/O; the UI only ever sends requests and drains updates.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
-use openshell_client::{CliClient, PolicyRevision, PolicyUpdate};
+use openshell_client::{CliClient, OpenShell, PolicyRevision, PolicyUpdate, Provider};
 
 use crate::events::Event;
 use crate::ops;
+use crate::repos::{self, Facts, LocalRepo};
 use crate::session::Session;
 
 pub enum Request {
@@ -29,6 +31,17 @@ pub enum Request {
         label: String,
     },
     Publish(Box<Session>),
+    /// Scan the host for git repositories, for the create flow's picker.
+    ScanRepos,
+    /// Ask git how far a checkout has drifted from its remote.
+    Inspect {
+        path: PathBuf,
+        branch: Option<String>,
+    },
+    /// The providers defined at the gateway, for the create form.
+    Providers,
+    /// Start a session. Runs on a thread of its own; see [`Worker::spawn`].
+    Create(Box<ops::Draft>),
     Shutdown,
 }
 
@@ -66,7 +79,64 @@ pub enum Update {
         session: String,
         result: Box<Result<crate::publish::Outcome, String>>,
     },
+    /// The result of a host scan. Never an error: an unreadable directory is
+    /// skipped rather than failing the scan, so the worst case is an empty list.
+    Repos(Vec<LocalRepo>),
+    /// Git's answer about one checkout. Carries the path it was asked about, so
+    /// an answer arriving after the repository was changed can be discarded
+    /// rather than shown against the wrong one.
+    Inspected {
+        path: PathBuf,
+        facts: Box<Facts>,
+    },
+    Providers(Box<Result<Vec<Provider>, String>>),
+    /// A stage of a create beginning, so the list and the footer can say where
+    /// it has got to over the half-minute it takes.
+    Creating {
+        session: String,
+        step: ops::Step,
+    },
+    Created {
+        session: String,
+        result: Box<Result<ops::Created, String>>,
+    },
     Failed(String),
+}
+
+/// Run one create on its own thread, reporting each stage as it starts.
+///
+/// Detached deliberately: joining it on shutdown would hold the terminal
+/// hostage for the rest of a clone, and the session is recoverable either way --
+/// the store carries a record of how far it got, and the sandbox carries its own
+/// metadata. Quitting mid-create asks for confirmation for the same reason.
+fn spawn_create(client: CliClient, up_tx: Sender<Update>, draft: ops::Draft) {
+    thread::spawn(move || {
+        let name = draft.name.clone();
+        // Checked here rather than built: `image::build` streams docker's output
+        // to the terminal, which would tear the TUI apart mid-frame.
+        if !crate::image::exists() {
+            let _ = up_tx.send(Update::Created {
+                session: name,
+                result: Box::new(Err(format!(
+                    "the sandbox image {} is missing; run `sbx image build`",
+                    crate::session::IMAGE
+                ))),
+            });
+            return;
+        }
+
+        let progress = &mut |step: ops::Step| {
+            let _ = up_tx.send(Update::Creating {
+                session: name.clone(),
+                step,
+            });
+        };
+        let result = ops::create(&client, &draft, progress);
+        let _ = up_tx.send(Update::Created {
+            session: draft.name,
+            result: Box::new(result),
+        });
+    });
 }
 
 pub struct Worker {
@@ -84,6 +154,15 @@ impl Worker {
             while let Ok(req) = req_rx.recv() {
                 let update = match req {
                     Request::Shutdown => break,
+                    // On its own thread, unlike every other request. A create
+                    // takes tens of seconds -- sandbox, clone, agent -- and
+                    // requests here are served one at a time, so running it
+                    // inline would freeze the state column and every pane for
+                    // as long as it lasts.
+                    Request::Create(draft) => {
+                        spawn_create(client.clone(), up_tx.clone(), *draft);
+                        continue;
+                    }
                     Request::Refresh => match ops::refresh(&client) {
                         Ok(r) => Update::Sessions(Box::new(r)),
                         Err(e) => Update::Failed(e.to_string()),
@@ -116,6 +195,16 @@ impl Worker {
                         )),
                         session: session.name,
                     },
+                    Request::ScanRepos => Update::Repos(repos::discover()),
+                    Request::Inspect { path, branch } => Update::Inspected {
+                        facts: Box::new(repos::inspect(&path, branch.as_deref())),
+                        path,
+                    },
+                    Request::Providers => Update::Providers(Box::new(
+                        client
+                            .providers()
+                            .map_err(|e| format!("could not read the provider list: {e}")),
+                    )),
                     Request::Repolicy {
                         session,
                         update,
