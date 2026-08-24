@@ -24,9 +24,21 @@ sbx new --repo <url> --task "what to do"      # sandbox + clone + branch + agent
 sbx ls                                        # sessions, reconciled with the gateway
 sbx attach <name>                             # attach to the agent; Ctrl-b d to detach
 sbx diff <name>                               # what the agent has changed so far
+sbx policy <name>                             # the policy the gateway is enforcing
+sbx events <name>                             # recent allow/deny decisions
+sbx policies                                  # the policy templates shipped in the binary
 sbx rm <name>                                 # delete session and sandbox
 sbx                                           # the TUI
 ```
+
+`--policy` takes a template name or a path to a YAML file. Three templates ship
+in the binary, and `feature-work` is the default:
+
+| Template | Egress |
+| --- | --- |
+| `readonly-explore` | clone and read; no model API, no push |
+| `feature-work` | clone, agent, push; nothing else reachable |
+| `net-open` | `feature-work` plus the npm and PyPI registries |
 
 Each agent runs under a tmux session *inside* its own sandbox, so it keeps
 working whether or not anything is attached to it.
@@ -43,7 +55,7 @@ working whether or not anything is attached to it.
 │                                         │┃── untracked                                 ┃
 │                                         │┃tests/test_readme.py                         ┃
 └─────────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
- j/k scroll  pgup/pgdn page  h pane  tab preview/diff  enter attach  q quit
+ j/k scroll  pgup/pgdn page  h pane  tab view  enter attach  q quit
 ```
 
 The state column is what the *agent* is doing, not just whether the sandbox is
@@ -54,12 +66,34 @@ scraping the agent's screen as well as from hooks baked into the image, because
 Claude Code fires no hook for a permission prompt or an interrupt; the preview
 pane says which source decided.
 
-`Tab` cycles the right pane between the preview and the diff, remembered per
-session. `h`/`l` move focus between the panes, and the movement keys follow it:
-`j`/`k` walk the session list on the left and scroll on the right. The `+12/-3`
-column counts lines changed against the branch the session started from, and
-`?` marks untracked files. Both panes refetch on a timer, so a diff you are
-reading keeps up with the agent editing underneath it.
+`Tab` cycles the right pane through preview, diff, policy and events
+(`Shift-Tab` goes back), remembered per session. `h`/`l` move focus between the
+panes, and the movement keys follow it: `j`/`k` walk the session list on the
+left and scroll on the right. The `+12/-3` column counts lines changed against
+the branch the session started from, and `?` marks untracked files. Every pane
+refetches on a timer, so a diff you are reading keeps up with the agent editing
+underneath it.
+
+## Policy
+
+The isolation is the point, so it is visible rather than buried in a YAML file.
+The **policy** pane shows the rules the gateway is actually enforcing, per
+binary, and the **events** pane is the allow/deny feed behind them:
+
+```
+┌ events (UTC) - add-tests ───────────────────────────────────────────────────┐
+│11:15:02  allow  GET github.com:443/octocat/Hello-World.git/info/refs  [git] │
+│11:15:02  DENY   /usr/bin/curl(93) -> pastebin.com:443                       │
+│             endpoint pastebin.com:443 is not allowed by any policy          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+In the policy pane, `w` widens egress to the package registries and `t`
+tightens it back, without restarting the agent -- for the task that turns out
+to need a dependency installed. Only the network section: the filesystem and
+process sections are fixed when the sandbox is created, and the gateway will
+accept a change to them, report it as effective, and never enforce it, so the
+pane labels them and declines to offer it.
 
 The local cache is disposable: each session's record lives inside its own
 sandbox, so deleting `~/.config/sbx/sessions.json` and running `sbx ls`

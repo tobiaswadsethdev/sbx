@@ -1,15 +1,17 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
 
 mod doctor;
+mod events;
 mod image;
 mod ops;
+mod pane;
+mod policy;
 mod seed;
 mod session;
 mod status;
 mod store;
 mod tui;
 
-use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -57,6 +59,21 @@ enum Command {
         name: String,
     },
 
+    /// Print the policy the gateway is enforcing for a session.
+    Policy {
+        /// Session name.
+        name: String,
+    },
+
+    /// Print a session's recent allow/deny decisions, newest first.
+    Events {
+        /// Session name.
+        name: String,
+    },
+
+    /// List the policy templates shipped with this binary.
+    Policies,
+
     /// Manage the sandbox image.
     Image {
         #[command(subcommand)]
@@ -90,9 +107,12 @@ struct NewArgs {
     #[arg(long)]
     base: Option<String>,
 
-    /// Policy YAML applied to the sandbox.
+    /// Policy to apply: a template name, or a path to a YAML file.
+    ///
+    /// Defaults to `feature-work`. See `sbx policies` for the templates; a spec
+    /// containing a `/` or ending in `.yaml` is always read as a path.
     #[arg(long)]
-    policy: Option<PathBuf>,
+    policy: Option<String>,
 
     /// Credential provider to attach. Repeatable.
     #[arg(long = "provider")]
@@ -131,6 +151,12 @@ fn main() -> ExitCode {
         Some(Command::Ls) => cmd_ls(&client),
         Some(Command::Attach { name }) => cmd_attach(&client, &name),
         Some(Command::Diff { name }) => cmd_diff(&client, &name),
+        Some(Command::Policy { name }) => cmd_policy(&client, &name),
+        Some(Command::Events { name }) => cmd_events(&client, &name),
+        Some(Command::Policies) => {
+            println!("{}", policy::help());
+            return ExitCode::SUCCESS;
+        }
         Some(Command::Image { action }) => match action {
             ImageAction::Build => image::build().map_err(Into::into),
         },
@@ -170,9 +196,15 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
         return Err(format!("session `{name}` already exists").into());
     }
 
+    // Resolved before anything is created, so a typo in --policy fails before a
+    // sandbox exists rather than after. The guard owns a temp file when the
+    // policy came from a template, so it has to outlive the create call below.
+    let spec = args.policy.as_deref().unwrap_or(policy::DEFAULT_TEMPLATE);
+    let resolved = policy::resolve(spec)?;
+
     let mut s = Session::new(name, args.repo, args.task);
     s.base_branch = args.base;
-    s.policy = args.policy.as_ref().map(|p| p.display().to_string());
+    s.policy = Some(resolved.label.clone());
     s.providers = args.providers.clone();
 
     image::ensure()?;
@@ -181,7 +213,7 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
     let opts = CreateOpts {
         name: s.sandbox.clone(),
         labels: s.labels(),
-        policy: args.policy,
+        policy: Some(resolved.path().to_path_buf()),
         providers: args.providers,
         from: Some(session::IMAGE.to_string()),
         // Keep the sandbox alive after the create command exits.
@@ -234,6 +266,7 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
     println!();
     println!("session  {}", s.name);
     println!("sandbox  {}", s.sandbox);
+    println!("policy   {}", resolved.label);
     println!("branch   {}", s.work_branch);
     println!("workdir  {}", session::REPO_PATH);
     Ok(())
@@ -283,11 +316,7 @@ fn cmd_ls(client: &dyn OpenShell) -> Fallible {
 }
 
 fn cmd_diff(client: &dyn OpenShell, name: &str) -> Fallible {
-    let store = Store::load()?;
-    let session = store
-        .get(name)
-        .cloned()
-        .ok_or_else(|| format!("no session `{name}`; see sbx ls"))?;
+    let session = require_session(name)?;
 
     if let Some(stat) = ops::poll(client, &session).stat {
         println!(
@@ -299,12 +328,57 @@ fn cmd_diff(client: &dyn OpenShell, name: &str) -> Fallible {
     Ok(())
 }
 
-fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
-    let store = Store::load()?;
-    let session = store
+/// A session by name, or an error naming what to do about it.
+fn require_session(name: &str) -> Result<Session, Box<dyn std::error::Error>> {
+    Store::load()?
         .get(name)
         .cloned()
-        .ok_or_else(|| format!("no session `{name}`; see sbx ls"))?;
+        .ok_or_else(|| format!("no session `{name}`; see sbx ls").into())
+}
+
+fn cmd_policy(client: &dyn OpenShell, name: &str) -> Fallible {
+    let session = require_session(name)?;
+    let rev = ops::policy(client, &session)?;
+    print!(
+        "{}",
+        pane::to_plain(&policy::render(&rev, session.policy.as_deref()))
+    );
+    Ok(())
+}
+
+fn cmd_events(client: &dyn OpenShell, name: &str) -> Fallible {
+    let session = require_session(name)?;
+    let events = ops::events(client, &session)?;
+    if events.is_empty() {
+        println!("no policy decisions in the recent log");
+        return Ok(());
+    }
+    for e in &events {
+        let verdict = match e.verdict {
+            events::Verdict::Allowed => "allow",
+            events::Verdict::Denied => "DENY",
+            events::Verdict::Neutral => "-",
+        };
+        println!(
+            "{}  {:<5}  {:<16} {}{}",
+            e.clock_utc(),
+            verdict,
+            e.class,
+            e.subject,
+            e.policy
+                .as_deref()
+                .map(|p| format!("  [{p}]"))
+                .unwrap_or_default(),
+        );
+        if let Some(reason) = &e.reason {
+            println!("                                   {reason}");
+        }
+    }
+    Ok(())
+}
+
+fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
+    let session = require_session(name)?;
 
     let script = format!(
         "tmux -f /etc/tmux.conf attach -d -t {tmux} 2>/dev/null \

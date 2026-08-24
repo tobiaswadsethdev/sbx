@@ -1,0 +1,104 @@
+# net-open: feature-work plus the package registries.
+#
+# For a task that has to install dependencies. Everything in feature-work.yaml,
+# with npm and PyPI added -- still per-binary, still nothing else reachable.
+#
+# `access: read-only` rather than a path allow-list, deliberately. A registry
+# fetch is thousands of unpredictable paths, so an allow-list would either be
+# wrong or be `/**`; read-only says what is actually meant, which is "GET
+# anything here, write nothing". Note that this is genuinely broader than a
+# rules block: `rules:` alone is default-deny, but `access:` grants its whole
+# method class, and the two combined grant the union.
+#
+# crates.io is not here, unlike the sketch in PLAN.md: the sandbox image ships
+# no Rust toolchain, so the endpoint would be unreachable decoration. Add it
+# alongside a cargo binary if the image ever grows one.
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+    # Pseudo-terminals, needed to run the agent under an in-sandbox tmux. See
+    # feature-work.yaml for why the directory and not /dev/ptmx.
+    - /dev/pts
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  claude_code:
+    name: claude-code
+    endpoints:
+      - { host: api.anthropic.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: platform.claude.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+    binaries:
+      - { path: /usr/local/bin/claude }
+      - { path: /usr/bin/node }
+
+  github_git:
+    name: github-git
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/**/info/refs*" }
+          - allow: { method: POST, path: "/**/git-upload-pack" }
+          - allow: { method: POST, path: "/**/git-receive-pack" }
+    binaries:
+      - { path: /usr/bin/git }
+      - { path: /usr/lib/git-core/git-remote-http }
+      - { path: /usr/lib/git-core/git-remote-https }
+
+  github_rest_api:
+    name: github-rest-api
+    endpoints:
+      - { host: api.github.com, port: 443, protocol: rest, enforcement: enforce, access: read-write }
+    binaries:
+      - { path: /usr/bin/gh }
+
+  # npm. The binary is node, not npm: /usr/bin/npm is a JavaScript file with a
+  # `#!/usr/bin/env node` line, so the kernel-resolved /proc/<pid>/exe the
+  # gateway matches on is the interpreter. Listing /usr/bin/npm alone denies
+  # every install with a "binary not allowed" that names a path you can see is
+  # in the policy.
+  npm_registry:
+    name: npm-registry
+    endpoints:
+      - { host: registry.npmjs.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+    binaries:
+      - { path: /usr/bin/node }
+
+  # PyPI. Same interpreter caveat as npm, but worse. `uv pip install` works;
+  # plain `/sandbox/.venv/bin/pip install` is DENIED, because the venv's python
+  # is a symlink into a uv-managed interpreter and the kernel reports the real
+  # path -- measured as
+  # /sandbox/.uv/python/cpython-3.13.12-linux-x86_64-gnu/bin/python3.13. That
+  # version is baked into the image, so hardcoding it here would break on the
+  # next rebuild and silently widen nothing. uv is the supported route; the two
+  # venv paths below cover a python that is not uv-managed.
+  pypi:
+    name: pypi
+    endpoints:
+      - { host: pypi.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+      - { host: files.pythonhosted.org, port: 443, protocol: rest, enforcement: enforce, access: read-only }
+    binaries:
+      - { path: /usr/local/bin/uv }
+      - { path: /sandbox/.venv/bin/python }
+      - { path: /sandbox/.venv/bin/python3 }

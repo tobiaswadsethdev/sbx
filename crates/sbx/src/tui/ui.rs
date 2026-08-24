@@ -11,7 +11,9 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, List, ListItem, Paragraph, Wrap};
 
+use crate::events::Verdict;
 use crate::ops;
+use crate::pane;
 use crate::session::{self, Session, State};
 use crate::status::Source;
 use crate::tui::{App, Focus, RightView};
@@ -202,6 +204,15 @@ fn draw_right(frame: &mut Frame, app: &mut App, area: Rect) {
     let (lines, wrap, label) = match view {
         RightView::Preview => (preview_lines(app, &session), true, "preview"),
         RightView::Diff => (diff_lines(app, &session), false, "diff"),
+        // Wrapped: a policy is prose as much as data, and a notice that says
+        // why a section cannot be changed is worth more than the alignment.
+        RightView::Policy => (policy_lines(app, &session), true, "policy"),
+        // Not wrapped, unlike the policy. A feed is read by scanning the time
+        // and verdict columns, and a wrapped continuation starts at column
+        // zero -- which puts a fragment of a URL where a verdict should be and
+        // makes the whole pane unscannable. Long lines are clipped instead;
+        // `sbx events` prints them in full.
+        RightView::Events => (event_lines(app, &session), false, "events (UTC)"),
     };
 
     // With wrapping on, one logical line can occupy several rows, and
@@ -317,23 +328,16 @@ fn diff_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
 /// what makes a diff readable at a glance.
 fn diff_line(line: &str, in_hunk: &mut bool) -> Line<'static> {
     // The section and notice markers are ours, added by the fetch script, so
-    // they are rendered as headings rather than as diff content.
-    if let Some(heading) = line.strip_prefix(ops::DIFF_SECTION) {
+    // they are rendered as headings rather than as diff content. Shared with
+    // the policy pane via `marked_line`, so the two cannot drift apart.
+    if line.starts_with(ops::DIFF_SECTION) {
+        // A heading ends whatever hunk was open; the next `---` after it is a
+        // file header again, not a removed line.
         *in_hunk = false;
-        return Line::from(Span::styled(
-            format!("── {heading} "),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
+        return marked_line(line);
     }
-    if let Some(notice) = line.strip_prefix(ops::DIFF_NOTICE) {
-        return Line::from(Span::styled(
-            format!("! {notice}"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
+    if line.starts_with(ops::DIFF_NOTICE) {
+        return marked_line(line);
     }
 
     if line.starts_with("diff --git") {
@@ -385,6 +389,139 @@ fn is_file_header(line: &str) -> bool {
         || PREFIXES.iter().any(|p| line.starts_with(p))
 }
 
+/// The effective policy, rendered from the marked-up body [`crate::policy`]
+/// produces. Same split as the diff pane: fetching builds text, rendering
+/// colours it.
+fn policy_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
+    if app.repolicying() == Some(session.name.as_str()) {
+        return vec![
+            Line::from("  applying the policy change ...")
+                .style(Style::default().fg(Color::Yellow)),
+            Line::from(""),
+            Line::from("  the gateway takes a few seconds to load a revision")
+                .style(Style::default().fg(Color::DarkGray)),
+        ];
+    }
+    let Some(result) = app.policy(&session.name) else {
+        return vec![
+            Line::from("  reading policy ...").style(Style::default().fg(Color::DarkGray)),
+        ];
+    };
+    let rev = match result {
+        Ok(rev) => rev,
+        Err(e) => return vec![Line::from(e.clone()).style(Style::default().fg(Color::Red))],
+    };
+
+    let body = crate::policy::render(rev, session.policy.as_deref());
+    body.lines().map(marked_line).collect()
+}
+
+/// Style a line of a marked-up pane body, stripping the sigil.
+fn marked_line(line: &str) -> Line<'static> {
+    if let Some(heading) = line.strip_prefix(pane::SECTION) {
+        return Line::from(Span::styled(
+            format!("── {heading} "),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some(notice) = line.strip_prefix(pane::NOTICE) {
+        return Line::from(Span::styled(
+            format!("! {notice}"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if let Some(field) = line.strip_prefix(pane::FIELD) {
+        // The label is fixed-width, written by `pane::field`, so it can be
+        // split off and dimmed without parsing the value.
+        let (label, value) = field.split_at(field.len().min(FIELD_LABEL_W));
+        return Line::from(vec![
+            Span::styled(format!("  {label}"), Style::default().fg(Color::DarkGray)),
+            Span::raw(value.to_string()),
+        ]);
+    }
+    Line::from(line.to_string())
+}
+
+/// Width `pane::field` pads its label to.
+const FIELD_LABEL_W: usize = 12;
+
+/// The allow/deny feed, newest first.
+///
+/// A denial is the event worth seeing, so it is the only one that gets a filled
+/// badge -- the same reasoning as `Waiting` in the list. An allow is routine and
+/// stays quiet; making both loud would make neither legible.
+fn event_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
+    let Some(result) = app.events(&session.name) else {
+        return vec![Line::from("  reading log ...").style(Style::default().fg(Color::DarkGray))];
+    };
+    let events = match result {
+        Ok(e) => e,
+        Err(e) => return vec![Line::from(e.clone()).style(Style::default().fg(Color::Red))],
+    };
+    if events.is_empty() {
+        return vec![
+            Line::from("  no policy decisions in the recent log")
+                .style(Style::default().fg(Color::DarkGray)),
+            Line::from(""),
+            Line::from("  sbx's own polling is filtered out, so this stays empty")
+                .style(Style::default().fg(Color::DarkGray)),
+            Line::from("  until something in the sandbox reaches for the network")
+                .style(Style::default().fg(Color::DarkGray)),
+        ];
+    }
+
+    let mut lines = Vec::with_capacity(events.len() * 2);
+    for e in events {
+        let (badge, badge_style) = match e.verdict {
+            Verdict::Denied => (
+                " DENY  ",
+                Style::default()
+                    .bg(Color::Red)
+                    .fg(Color::Black)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Verdict::Allowed => (" allow ", Style::default().fg(Color::Green)),
+            Verdict::Neutral => (
+                "   -   ",
+                Style::default().fg(if e.severity.is_notable() {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                }),
+            ),
+        };
+        let mut spans = vec![
+            Span::styled(
+                format!("{} ", e.clock_utc()),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(badge, badge_style),
+            Span::raw(" "),
+            Span::raw(e.subject.clone()),
+        ];
+        if let Some(p) = &e.policy {
+            spans.push(Span::styled(
+                format!("  [{p}]"),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(spans));
+
+        // The reason only exists on a denial, and it is the whole value of the
+        // pane: "endpoint pastebin.com:443 is not allowed by any policy" is the
+        // sentence the user came here to read.
+        if let Some(reason) = &e.reason {
+            lines.push(Line::from(Span::styled(
+                format!("             {reason}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    lines
+}
+
 /// What the agent is doing, and which source said so.
 ///
 /// The source is shown because the two disagree by design: the pane sees a
@@ -427,12 +564,14 @@ fn field(label: &str, value: &str) -> Line<'static> {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    // The hints follow the focus, because that is what decides where j/k go.
-    let keys = match app.focus {
-        Focus::List => "j/k move  l pane  tab preview/diff  enter attach  r refresh  q quit",
-        Focus::Right => {
-            "j/k scroll  pgup/pgdn page  h pane  tab preview/diff  enter attach  q quit"
-        }
+    // The hints follow the focus, because that is what decides where j/k go --
+    // and, in the policy pane, gain the two keys that only work there. Four
+    // views no longer fit in "tab preview/diff", so tab is named by what it
+    // does rather than by what it cycles between.
+    let keys = match (app.focus, app.right_view()) {
+        (_, RightView::Policy) => "w widen  t tighten  tab pane  enter attach  q quit",
+        (Focus::List, _) => "j/k move  l pane  tab view  enter attach  r refresh  q quit",
+        (Focus::Right, _) => "j/k scroll  pgup/pgdn page  h pane  tab view  enter attach  q quit",
     };
     let line = match &app.status {
         Some(msg) if app.status_is_error => Line::from(vec![

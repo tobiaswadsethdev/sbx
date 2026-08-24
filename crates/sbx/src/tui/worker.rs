@@ -7,8 +7,9 @@
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread;
 
-use openshell_client::CliClient;
+use openshell_client::{CliClient, PolicyRevision, PolicyUpdate};
 
+use crate::events::Event;
 use crate::ops;
 use crate::session::Session;
 
@@ -17,6 +18,16 @@ pub enum Request {
     Preview(Box<Session>),
     Diff(Box<Session>),
     Poll(Box<Session>),
+    Policy(Box<Session>),
+    Events(Box<Session>),
+    /// Widen or tighten a live sandbox's network rules. Carries the label to
+    /// report, since only the caller knows whether this was a widen or a
+    /// tighten by the time the answer comes back.
+    Repolicy {
+        session: Box<Session>,
+        update: Box<PolicyUpdate>,
+        label: String,
+    },
     Shutdown,
 }
 
@@ -33,6 +44,22 @@ pub enum Update {
     Polled {
         session: String,
         poll: Box<ops::Poll>,
+    },
+    Policy {
+        session: String,
+        result: Box<Result<PolicyRevision, String>>,
+    },
+    Events {
+        session: String,
+        result: Box<Result<Vec<Event>, String>>,
+    },
+    /// A completed policy change. The revision comes back with it so the pane
+    /// can show the result rather than refetching and briefly showing the old
+    /// rules as though nothing happened.
+    Repolicied {
+        session: String,
+        label: String,
+        result: Box<Result<PolicyRevision, String>>,
     },
     Failed(String),
 }
@@ -67,6 +94,23 @@ impl Worker {
                     Request::Poll(session) => Update::Polled {
                         poll: Box::new(ops::poll(&client, &session)),
                         session: session.name,
+                    },
+                    Request::Policy(session) => Update::Policy {
+                        result: Box::new(ops::policy(&client, &session)),
+                        session: session.name,
+                    },
+                    Request::Events(session) => Update::Events {
+                        result: Box::new(ops::events(&client, &session)),
+                        session: session.name,
+                    },
+                    Request::Repolicy {
+                        session,
+                        update,
+                        label,
+                    } => Update::Repolicied {
+                        result: Box::new(ops::repolicy(&client, &session, &update)),
+                        session: session.name,
+                        label,
                     },
                 };
                 // A closed channel means the UI is gone; stop quietly.

@@ -23,7 +23,8 @@ Working binary name: `sbx` (changeable).
 ```
                 +-------------------------+
                 |        sbx (TUI)        |   ratatui + crossterm
-                |  list | preview | diff  |
+                | list | preview | diff   |
+                |      | policy  | events |
                 +-----------+-------------+
                             |
         +-------------------+--------------------+
@@ -66,7 +67,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-6 are done; 7 onward are specified but not started.
+Increments 0-7 are done; 8 onward are specified but not started.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -150,26 +151,78 @@ Increments 0-6 are done; 7 onward are specified but not started.
   question wording varies by tool -- "make this edit to README.md?" versus
   "proceed?" -- so the menu is matched structurally rather than by text.
 
-### 7. Policy layer
+- **7. Policy layer** — DONE. The capability claude-squad structurally cannot
+  have, made visible rather than buried in a YAML file.
 
-The capability claude-squad structurally cannot have, so it deserves to be
-visible rather than buried in a YAML file.
+  Three templates embedded in the binary (`crates/sbx/src/policy.rs`, written
+  out to a temp file when the CLI needs a path, the trick `image.rs` already
+  used): `readonly-explore`, `feature-work`, `net-open`. `--policy` takes a name
+  or a path, and a spec containing `/` or ending `.yaml` is always a path, so
+  the checked-in files stay usable and a local file cannot shadow a template.
+  `feature-work` is now the **default** where before no policy was applied at
+  all -- for a tool whose point is isolation, inheriting the gateway's default
+  was the wrong starting position.
 
-- Named templates shipped with the binary: `readonly-explore` (no egress at
-  all), `feature-work` (what exists today), `net-open` (npm, pypi, crates.io
-  added). `sbx new --policy` should accept a template name as well as a path.
-- Policy pane showing the effective rules per binary. The data is already
-  available: `sandbox get --output json` returns the full effective policy,
-  unlike `policy get` which returns only metadata.
-- A keybinding to widen or tighten network rules mid-run. Network and inference
-  sections hot-reload; filesystem and process sections are locked at creation,
-  so the UI must not offer to change those.
-- Live allow/deny feed. `openshell logs <sandbox>` emits OCSF lines
-  (`OCSF NET:OPEN`, `SSH:OPEN ALLOWED`, `CONFIG:APPLYING`) that can be tailed
-  into a pane. "The agent tried to reach pastebin.com and was denied" as a
-  live event is the demo that sells the tool.
-- Deprecation to fix while here: the gateway warns that `tls: terminate` is
-  deprecated and TLS termination is now automatic; `tls: skip` disables it.
+  A policy pane and an events pane, so `Tab` now cycles four views
+  (`Shift-Tab` goes back) and each keeps its own scroll offset. In the policy
+  pane `w` widens to the package registries and `t` tightens back, guarded so a
+  blind or overlapping change cannot be issued. `sbx policy`, `sbx events` and
+  `sbx policies` expose the same three things to the shell. `tls: terminate` is
+  gone from every template; verified that termination still happens, `engine:l7`
+  still decides, and the per-create deprecation warnings stop.
+
+  **The plan was wrong about where the data lives, and about what a policy
+  change means.** Four things only running it showed:
+
+  * `policy get --full` is the call, not `sandbox get`. Both carry a `policy`,
+    but only `policy get` reports `active_version` alongside `version` -- and
+    without that there is no way to tell a *submitted* policy from an *enforced*
+    one, which is the difference the pane exists to show during the ~6s a
+    revision takes to load.
+  * **A filesystem change is accepted, reported as effective, and never
+    enforced.** `policy set` with an extra `read_write` path returns "Policy
+    version 4 loaded", `policy get --full` then lists the new path, and every
+    subsequent Landlock application still logs the creation-time count
+    (`rw:4`, not 5). So the gateway's own answer for that section cannot be
+    trusted on a live sandbox. The pane renders it under a notice saying so;
+    the plan's "the UI must not offer to change those" was right for a weaker
+    reason than the real one.
+  * **`rules:` is default-deny, but only without `access:`.** An endpoint with
+    an allow-list and no access class denies every unlisted path (measured:
+    `/get` 200, `/ip` 403). Add `access: read-only` next to the same allow-list
+    and the unlisted path is allowed again -- the two grant the *union*. This
+    was found by writing the test the wrong way round first, and it is the kind
+    of thing that makes a policy read as a restriction while granting far more.
+    The pane says `(rules only)` or names the class, and warns when both are set.
+  * **The gateway names the rules, and makes more of them than you ask for.**
+    `--rule-name` is rejected for a multi-endpoint update, and three
+    `--add-endpoint` flags become *three* rules (`allow_pypi_org_443`, ...),
+    one per endpoint, each with the full binary list. So "is the preset already
+    applied?" is answered by matching endpoints, never names.
+
+  Also learned, and the reason the events pane is usable at all: **the feed is
+  mostly the observer.** `sbx` polls once a second, every poll opens an exec,
+  and every exec logs an ssh relay open, an `SSH:OPEN ALLOWED`, a relay close
+  and a `CONFIG:APPLYING`/`CONFIG:BUILT` pair as Landlock is applied to the new
+  process. Five events a second, all of them ours, and a real denial scrolled
+  off the top within a second. The filter keeps decisions plus anything graded
+  above `INFO` -- that second clause is what preserves `CONFIG:VALIDATED [MED]`,
+  the only channel the gateway has for saying a policy key is deprecated, and
+  how the `tls: terminate` removal was found in the first place.
+
+  Deferred, deliberately: the events pane does not wrap. A wrapped continuation
+  starts at column zero, which puts a URL fragment where a verdict should be and
+  destroys the columns the feed is scanned by; `sbx events` prints the full text.
+  `--tail` is unused too -- streaming needs a thread and a way to stop it, and
+  refetching a bounded window on a timer is what every other pane already does.
+  `net-open` covers npm and PyPI but not crates.io as sketched above: the image
+  ships no Rust toolchain, so the endpoint would be unreachable decoration.
+
+  Untested end to end: **that `readonly-explore` denies a push.** Its policy has
+  no `git-receive-pack` allow and is default-deny, and the unit tests assert
+  both, but git never reaches the POST -- it bails on credentials at the
+  discovery step. Proving it needs a token and a writable repo, which is
+  increment 8.
 
 ### 8. Publish
 
@@ -217,6 +270,11 @@ visible rather than buried in a YAML file.
   lines, since the pane does not scroll horizontally.
 - **No first-class host mounts** (NVIDIA/OpenShell#500). Watch that issue; it
   would unlock a much better local-dev mode.
+- **The OCSF log format is not an API either.** The events pane parses
+  `[ts] [source] [level] [logger] CLASS:ACTIVITY [SEV] ...` by hand, because
+  `openshell logs` has no JSON output. Mitigated the same way as the pane
+  scraping: one module, real captured specimens in its tests, and lines that
+  fail to parse are dropped rather than crashing the pane.
 - **Overlap with `openshell term`** — that is a k9s-style resource browser.
   Stay out of its lane: `sbx` orchestrates tasks, not resources.
 
@@ -236,16 +294,16 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-6 done, `main` at a clean tree, 88 tests, clippy
+Current state: increments 0-7 done, `main` at a clean tree, 133 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
 The loop that works today:
 
 ```sh
-sbx new --repo <url> --task "..." --policy policies/feature-work.yaml \
-        --provider claude-oauth
+sbx new --repo <url> --task "..." --policy feature-work --provider claude-oauth
 sbx            # Enter to attach, Ctrl-b d to detach, q to quit
+               # Tab cycles preview/diff/policy/events; w/t widen/tighten egress
 sbx rm <name>
 ```
 
@@ -285,3 +343,20 @@ Things a future session should know that are not obvious from the code:
 * Agent status comes from the *screen*, not the hooks. See increment 6 above:
   Claude Code fires no hook for a permission prompt or an interrupt. If a future
   version adds one, `status::combine` is the single place to revisit.
+* **The gateway will report a policy it is not enforcing.** Only the network and
+  inference sections of a live sandbox's policy actually change; a filesystem or
+  process change is accepted, acknowledged as loaded, and returned by
+  `policy get --full` while Landlock goes on enforcing the creation-time
+  ruleset. Never trust those two sections on a running sandbox -- check the
+  `Applying Landlock` line in `openshell logs` for the counts really in force.
+* **`access:` and `rules:` on one endpoint grant the union, not the
+  intersection.** `rules:` alone is default-deny; adding an access class next to
+  it re-allows everything in that class. A policy can therefore read far
+  stricter than it is. See increment 7.
+* Anything that reads the sandbox costs an exec, and an exec is itself five
+  OCSF log events. That is fine until something *reads the log* -- see the
+  filter in `crates/sbx/src/events.rs`, and expect the same problem in any
+  future feature that watches the gateway's own output.
+* `openshell logs` and `policy list` have no `--output json`. The log is parsed
+  by line in `events.rs`; policy history is not surfaced at all because the
+  table would have to be scraped.

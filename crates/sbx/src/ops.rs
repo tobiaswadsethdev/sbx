@@ -1,7 +1,8 @@
 //! Operations shared by the CLI and the TUI.
 
-use openshell_client::OpenShell;
+use openshell_client::{OpenShell, PolicyRevision, PolicyUpdate};
 
+use crate::events;
 use crate::seed;
 use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session};
 use crate::status;
@@ -82,12 +83,9 @@ fi
 /// scrolled in memory, so the fetch is bounded rather than the render.
 const DIFF_LINE_CAP: usize = 2000;
 
-/// Marks a section heading in the diff body. Chosen because unified diff output
-/// can never produce a line starting with `#` in column zero: body lines always
-/// begin with `+`, `-`, ` `, `@` or `\`, and file headers with `diff`/`index`.
-pub const DIFF_SECTION: &str = "### ";
-/// Marks a notice (truncation, missing base branch) in the diff body.
-pub const DIFF_NOTICE: &str = "!!! ";
+/// Section and notice markers for the diff body. Shared with the policy pane;
+/// see [`crate::pane`] for why these sigils and not others.
+pub use crate::pane::{NOTICE as DIFF_NOTICE, SECTION as DIFF_SECTION};
 
 /// How much a session's working copy has diverged from its base branch.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -200,6 +198,48 @@ if [ -z "$any" ]; then printf 'no changes yet\n'; fi
         Ok(out) => format!("(could not read the diff: {})", out.stderr.trim()),
         Err(e) => format!("(sandbox unreachable: {e})"),
     }
+}
+
+/// The effective policy of a session's sandbox.
+///
+/// A gateway call, not an exec, so unlike the diff and the poll this does not
+/// queue behind whatever else is running against the sandbox.
+pub fn policy(client: &dyn OpenShell, session: &Session) -> Result<PolicyRevision, String> {
+    client
+        .policy(&session.sandbox)
+        .map_err(|e| format!("could not read the policy: {e}"))
+}
+
+/// How many log lines to ask for. The gateway returns the newest, so this is a
+/// window on the end of the log rather than a limit on what is kept. Large
+/// enough to survive the noise a busy session generates between refreshes,
+/// small enough that parsing it every few seconds costs nothing.
+const LOG_LINES: usize = 400;
+
+/// A session's recent policy decisions, newest first.
+///
+/// Newest first because the pane is a feed: the event you want is the one that
+/// just happened, and it should be at the top without scrolling.
+pub fn events(client: &dyn OpenShell, session: &Session) -> Result<Vec<events::Event>, String> {
+    let raw = client
+        .logs(&session.sandbox, LOG_LINES)
+        .map_err(|e| format!("could not read the log: {e}"))?;
+    let mut parsed = events::parse(&raw);
+    parsed.reverse();
+    Ok(parsed)
+}
+
+/// Apply an incremental policy change and report what the sandbox ended up
+/// with, so the caller never has to assume the change landed.
+pub fn repolicy(
+    client: &dyn OpenShell,
+    session: &Session,
+    update: &PolicyUpdate,
+) -> Result<PolicyRevision, String> {
+    client
+        .policy_update(&session.sandbox, update)
+        .map_err(|e| format!("policy update failed: {e}"))?;
+    policy(client, session)
 }
 
 /// Everything one round trip per session is worth spending an exec on.

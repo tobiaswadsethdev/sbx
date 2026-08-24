@@ -39,15 +39,17 @@ process:
 network_policies:
   # Every endpoint here is credentialed by the claude-oauth provider, and the
   # gateway refuses to inject a credential into a connection it can only see at
-  # L4 -- so all of these must terminate TLS for L7 inspection. The community
+  # L4 -- so all of these must be L7-inspectable. That needs no `tls:` key:
+  # termination is automatic as of 0.0.110, and the explicit `tls: terminate`
+  # this file used to carry is deprecated (`tls: skip` opts out). The community
   # base policy lists statsig.anthropic.com and sentry.io as bare host/port
   # telemetry; they are dropped rather than inspected, since denying agent
   # telemetry is a feature here.
   claude_code:
     name: claude-code
     endpoints:
-      - { host: api.anthropic.com, port: 443, protocol: rest, enforcement: enforce, access: full, tls: terminate }
-      - { host: platform.claude.com, port: 443, protocol: rest, enforcement: enforce, access: full, tls: terminate }
+      - { host: api.anthropic.com, port: 443, protocol: rest, enforcement: enforce, access: full }
+      - { host: platform.claude.com, port: 443, protocol: rest, enforcement: enforce, access: full }
     binaries:
       - { path: /usr/local/bin/claude }
       - { path: /usr/bin/node }
@@ -60,7 +62,6 @@ network_policies:
       - host: github.com
         port: 443
         protocol: rest
-        tls: terminate
         enforcement: enforce
         rules:
           - allow: { method: GET,  path: "/**/info/refs*" }

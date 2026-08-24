@@ -7,11 +7,12 @@ mod worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use openshell_client::CliClient;
+use openshell_client::{CliClient, PolicyRevision, PolicyUpdate};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
 use crate::ops;
+use crate::policy;
 use crate::session::{Session, State};
 use crate::status;
 use crate::tui::attach::attach;
@@ -42,18 +43,49 @@ const POLL_TTL: Duration = Duration::from_secs(6);
 const POLL_MIN_GAP: Duration = Duration::from_secs(1);
 
 /// What the right-hand pane is showing.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// The order is the Tab order, and it runs outward from the session: what it is
+/// (preview), what it has done (diff), what it is allowed to do (policy), what
+/// it has actually tried (events).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RightView {
     #[default]
     Preview,
     Diff,
+    Policy,
+    Events,
 }
 
 impl RightView {
+    const ORDER: [RightView; 4] = [
+        RightView::Preview,
+        RightView::Diff,
+        RightView::Policy,
+        RightView::Events,
+    ];
+
     fn next(self) -> Self {
+        let i = Self::ORDER.iter().position(|v| *v == self).unwrap_or(0);
+        Self::ORDER[(i + 1) % Self::ORDER.len()]
+    }
+
+    fn prev(self) -> Self {
+        let i = Self::ORDER.iter().position(|v| *v == self).unwrap_or(0);
+        Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+
+    /// How long fetched content stays fresh.
+    ///
+    /// Not one constant, because the panes want different things. A diff under
+    /// the user's eyes has to keep up with the agent editing underneath it; a
+    /// policy only changes when someone changes it, and refetching it every few
+    /// seconds would spend a subprocess on an answer that is never different.
+    /// The events feed is the fastest, because it is a feed.
+    fn ttl(self) -> Duration {
         match self {
-            RightView::Preview => RightView::Diff,
-            RightView::Diff => RightView::Preview,
+            RightView::Preview | RightView::Diff => PANE_TTL,
+            RightView::Policy => Duration::from_secs(30),
+            RightView::Events => Duration::from_secs(3),
         }
     }
 }
@@ -67,25 +99,16 @@ pub enum Focus {
 }
 
 /// Scroll offset per view, so switching back and forth keeps your place.
-#[derive(Debug, Clone, Copy, Default)]
-struct Scroll {
-    preview: u16,
-    diff: u16,
-}
+#[derive(Debug, Clone, Default)]
+struct Scroll(HashMap<RightView, u16>);
 
 impl Scroll {
     fn get(&self, view: RightView) -> u16 {
-        match view {
-            RightView::Preview => self.preview,
-            RightView::Diff => self.diff,
-        }
+        self.0.get(&view).copied().unwrap_or(0)
     }
 
     fn set(&mut self, view: RightView, offset: u16) {
-        match view {
-            RightView::Preview => self.preview = offset,
-            RightView::Diff => self.diff = offset,
-        }
+        self.0.insert(view, offset);
     }
 }
 
@@ -116,12 +139,23 @@ pub struct App {
     diffs: HashMap<String, Cached<String>>,
     /// Diff stat and agent state per session, from one exec each.
     polls: HashMap<String, Cached<ops::Poll>>,
+    /// The effective policy, and the reason if it could not be read. Both are
+    /// worth caching: an unreachable gateway should not blank the pane on every
+    /// tick, it should keep saying why.
+    policies: HashMap<String, Cached<Result<PolicyRevision, String>>>,
+    events: HashMap<String, Cached<Result<Vec<crate::events::Event>, String>>>,
     /// Sessions whose content is currently being fetched, so the same request
     /// is not queued repeatedly while the worker is busy. One per kind, so a
     /// slow diff does not stall the stat column.
     preview_in_flight: Option<String>,
     diff_in_flight: Option<String>,
     poll_in_flight: Option<String>,
+    policy_in_flight: Option<String>,
+    events_in_flight: Option<String>,
+    /// A policy change in progress. Blocks a second one for the same session:
+    /// two overlapping updates would race on the revision and the loser's
+    /// endpoints would silently not be there.
+    repolicy_in_flight: Option<String>,
     last_poll_request: Instant,
     /// Right-pane choice per session: switching sessions must not reset it.
     views: HashMap<String, RightView>,
@@ -140,6 +174,8 @@ pub struct App {
     /// Set by the key handler; acted on by the event loop, which is the only
     /// place with access to the terminal.
     attach_request: Option<Session>,
+    /// Set by the key handler; sent by the event loop, which owns the worker.
+    repolicy_request: Option<(Session, Box<PolicyUpdate>, String)>,
 }
 
 impl App {
@@ -150,9 +186,14 @@ impl App {
             previews: HashMap::new(),
             diffs: HashMap::new(),
             polls: HashMap::new(),
+            policies: HashMap::new(),
+            events: HashMap::new(),
             preview_in_flight: None,
             diff_in_flight: None,
             poll_in_flight: None,
+            policy_in_flight: None,
+            events_in_flight: None,
+            repolicy_in_flight: None,
             // Force an immediate first poll.
             last_poll_request: Instant::now() - POLL_MIN_GAP,
             views: HashMap::new(),
@@ -168,6 +209,7 @@ impl App {
             last_refresh: Instant::now() - REFRESH_EVERY,
             should_quit: false,
             attach_request: None,
+            repolicy_request: None,
         }
     }
 
@@ -214,9 +256,9 @@ impl App {
             .unwrap_or_default()
     }
 
-    fn toggle_right_view(&mut self) {
+    fn cycle_right_view(&mut self, step: fn(RightView) -> RightView) {
         if let Some(name) = self.selected_name() {
-            let next = self.right_view().next();
+            let next = step(self.right_view());
             self.views.insert(name, next);
         }
     }
@@ -289,12 +331,94 @@ impl App {
             .count()
     }
 
+    /// The last policy read for a session, if one has come back.
+    pub fn policy(&self, name: &str) -> Option<&Result<PolicyRevision, String>> {
+        self.policies.get(name).map(|c| &c.value)
+    }
+
+    /// The last events read for a session, if any have come back.
+    pub fn events(&self, name: &str) -> Option<&Result<Vec<crate::events::Event>, String>> {
+        self.events.get(name).map(|c| &c.value)
+    }
+
+    /// Whether a policy change is in flight for the selected session, so the
+    /// pane can say "widening ..." rather than looking like nothing happened
+    /// for the six seconds the gateway takes to load a revision.
+    pub fn repolicying(&self) -> Option<&str> {
+        self.repolicy_in_flight.as_deref()
+    }
+
+    /// Whether the registries preset is currently in force, which decides
+    /// whether `w` or `t` is the useful key.
+    pub fn widened(&self, name: &str) -> Option<bool> {
+        match self.policy(name)? {
+            Ok(rev) => rev
+                .policy
+                .as_ref()
+                .map(|p| !policy::preset_rule_names(p, &policy::REGISTRIES).is_empty()),
+            Err(_) => None,
+        }
+    }
+
+    /// Widen or tighten the selected session's egress.
+    ///
+    /// Only the network section, and deliberately so: the filesystem and
+    /// process sections are fixed when the sandbox is created, and the gateway
+    /// will happily accept a change to them, report it as effective, and never
+    /// enforce it. Offering that would be worse than not offering it.
+    fn request_repolicy(&mut self, widen: bool) -> Option<(Session, Box<PolicyUpdate>, String)> {
+        let session = self.selected().cloned()?;
+        if self.repolicy_in_flight.is_some() {
+            self.fail("a policy change is already in flight");
+            return None;
+        }
+        // Refusing rather than guessing: without a policy read there is no way
+        // to know whether the preset is already applied, and a widen issued
+        // blind would report a change it did not make.
+        let Some(applied) = self.widened(&session.name) else {
+            self.fail("the policy has not been read yet");
+            return None;
+        };
+        if applied == widen {
+            self.note(if widen {
+                "the registries are already reachable"
+            } else {
+                "the registries are already denied"
+            });
+            return None;
+        }
+
+        let preset = &policy::REGISTRIES;
+        let (update, label) = if widen {
+            (
+                preset.widen(),
+                format!("widened: {} now reachable", preset.label),
+            )
+        } else {
+            (
+                preset.tighten(),
+                format!("tightened: {} denied again", preset.label),
+            )
+        };
+        self.repolicy_in_flight = Some(session.name.clone());
+        // Switching to the pane makes the consequence visible, which is the
+        // only reason it is safe to bind this to one key.
+        self.views.insert(session.name.clone(), RightView::Policy);
+        self.note(format!(
+            "{} ... the gateway takes a few seconds to load a revision",
+            if widen { "widening" } else { "tightening" }
+        ));
+        Some((session, Box::new(update), label))
+    }
+
     /// Forget everything fetched for a session. Called when the repository is
     /// known to have moved underneath us, e.g. after an attach.
     fn invalidate(&mut self, name: &str) {
         self.previews.remove(name);
         self.diffs.remove(name);
         self.polls.remove(name);
+        self.policies.remove(name);
+        self.events.remove(name);
     }
 
     fn on_key(&mut self, key: KeyEvent) {
@@ -307,8 +431,19 @@ impl App {
             (KeyCode::Char('h'), _) | (KeyCode::Left, _) => self.focus = Focus::List,
             (KeyCode::Char('l'), _) | (KeyCode::Right, _) => self.focus = Focus::Right,
             // Cycling the right pane works from either side: wanting to see the
-            // diff should not first require focusing it.
-            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => self.toggle_right_view(),
+            // diff should not first require focusing it. Shift-Tab goes back,
+            // which matters now there are four views rather than two.
+            (KeyCode::Tab, _) => self.cycle_right_view(RightView::next),
+            (KeyCode::BackTab, _) => self.cycle_right_view(RightView::prev),
+            // Widen and tighten egress. Only bound while the policy pane is
+            // showing, so the rules being changed are on screen when the key is
+            // pressed and the result is visible without doing anything else.
+            (KeyCode::Char('w'), _) if self.right_view() == RightView::Policy => {
+                self.repolicy_request = self.request_repolicy(true);
+            }
+            (KeyCode::Char('t'), _) if self.right_view() == RightView::Policy => {
+                self.repolicy_request = self.request_repolicy(false);
+            }
             (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
                 self.attach_request = self.selected().cloned();
             }
@@ -364,6 +499,35 @@ impl App {
                 }
                 self.polls.insert(session, Cached::new(*poll));
             }
+            Update::Policy { session, result } => {
+                if self.policy_in_flight.as_deref() == Some(session.as_str()) {
+                    self.policy_in_flight = None;
+                }
+                self.policies.insert(session, Cached::new(*result));
+            }
+            Update::Events { session, result } => {
+                if self.events_in_flight.as_deref() == Some(session.as_str()) {
+                    self.events_in_flight = None;
+                }
+                self.events.insert(session, Cached::new(*result));
+            }
+            Update::Repolicied {
+                session,
+                label,
+                result,
+            } => {
+                if self.repolicy_in_flight.as_deref() == Some(session.as_str()) {
+                    self.repolicy_in_flight = None;
+                }
+                match &*result {
+                    Ok(_) => self.note(label),
+                    Err(e) => self.fail(e.clone()),
+                }
+                // The revision that came back is the authority, so it replaces
+                // the cached one instead of merely invalidating it -- otherwise
+                // the pane shows the pre-change rules until the next TTL.
+                self.policies.insert(session, Cached::new(*result));
+            }
             Update::Failed(e) => {
                 self.refreshing = false;
                 self.fail(e);
@@ -388,6 +552,8 @@ impl App {
         self.previews.retain(|name, _| live.contains(name));
         self.diffs.retain(|name, _| live.contains(name));
         self.polls.retain(|name, _| live.contains(name));
+        self.policies.retain(|name, _| live.contains(name));
+        self.events.retain(|name, _| live.contains(name));
         self.views.retain(|name, _| live.contains(name));
         self.scroll.retain(|name, _| live.contains(name));
 
@@ -437,6 +603,14 @@ fn event_loop(
             && key.kind == KeyEventKind::Press
         {
             app.on_key(key);
+        }
+
+        if let Some((session, update, label)) = app.repolicy_request.take() {
+            worker.send(Request::Repolicy {
+                session: Box::new(session),
+                update,
+                label,
+            });
         }
 
         if let Some(session) = app.attach_request.take() {
@@ -489,26 +663,43 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
     // in-flight markers are written.
     let selected = app.selected().cloned();
     if let Some(session) = selected {
-        match app.right_view() {
-            RightView::Preview => {
-                let due = app
-                    .previews
-                    .get(&session.name)
-                    .is_none_or(|c| c.stale_after(PANE_TTL));
-                if due && app.preview_in_flight.is_none() {
-                    app.preview_in_flight = Some(session.name.clone());
+        let view = app.right_view();
+        let ttl = view.ttl();
+        let name = session.name.clone();
+        // Each arm asks the same three questions -- is it stale, is one already
+        // in flight, and if not, fetch -- of a different map, so the shapes are
+        // spelled out rather than abstracted over. Four near-identical closures
+        // over four differently-typed maps costs more than it saves.
+        let due = match view {
+            RightView::Preview => app.previews.get(&name).is_none_or(|c| c.stale_after(ttl)),
+            RightView::Diff => app.diffs.get(&name).is_none_or(|c| c.stale_after(ttl)),
+            RightView::Policy => app.policies.get(&name).is_none_or(|c| c.stale_after(ttl)),
+            RightView::Events => app.events.get(&name).is_none_or(|c| c.stale_after(ttl)),
+        };
+        if due {
+            match view {
+                RightView::Preview if app.preview_in_flight.is_none() => {
+                    app.preview_in_flight = Some(name);
                     worker.send(Request::Preview(Box::new(session.clone())));
                 }
-            }
-            RightView::Diff => {
-                let due = app
-                    .diffs
-                    .get(&session.name)
-                    .is_none_or(|c| c.stale_after(PANE_TTL));
-                if due && app.diff_in_flight.is_none() {
-                    app.diff_in_flight = Some(session.name.clone());
+                RightView::Diff if app.diff_in_flight.is_none() => {
+                    app.diff_in_flight = Some(name);
                     worker.send(Request::Diff(Box::new(session.clone())));
                 }
+                // Not while a change is in flight: the refetch would land
+                // before the update finished and put the pre-change rules back
+                // on screen, which reads as the widen having failed.
+                RightView::Policy
+                    if app.policy_in_flight.is_none() && app.repolicy_in_flight.is_none() =>
+                {
+                    app.policy_in_flight = Some(name);
+                    worker.send(Request::Policy(Box::new(session.clone())));
+                }
+                RightView::Events if app.events_in_flight.is_none() => {
+                    app.events_in_flight = Some(name);
+                    worker.send(Request::Events(Box::new(session.clone())));
+                }
+                _ => {}
             }
         }
     }
@@ -700,9 +891,16 @@ mod tests {
         app.move_by(-1);
         assert_eq!(app.right_view(), RightView::Diff);
 
-        // And cycling returns.
-        app.on_key(key(KeyCode::Tab));
+        // And cycling all the way round returns.
+        for _ in 1..RightView::ORDER.len() {
+            app.on_key(key(KeyCode::Tab));
+        }
         assert_eq!(app.right_view(), RightView::Preview);
+
+        // Shift-Tab walks back, which is the only sane way to reach the last
+        // view once there are four of them.
+        app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(app.right_view(), RightView::Events);
     }
 
     #[test]
@@ -790,7 +988,7 @@ mod tests {
         // Scroll "a"'s preview, then switch "a" to the diff: a fresh view.
         app.scroll_by(5);
         assert_eq!(app.right_scroll(), 5);
-        app.toggle_right_view();
+        app.cycle_right_view(RightView::next);
         assert_eq!(app.right_scroll(), 0, "the diff has its own offset");
         app.scroll_by(7);
 
@@ -801,8 +999,186 @@ mod tests {
         // Both of "a"'s offsets survived.
         app.move_by(-1);
         assert_eq!(app.right_scroll(), 7);
-        app.toggle_right_view();
+        app.cycle_right_view(RightView::prev);
         assert_eq!(app.right_scroll(), 5);
+    }
+
+    /// Every view keeps its own offset, not just the first two. A shared one
+    /// would drop the user halfway down a policy after reading a long diff.
+    #[test]
+    fn all_four_views_scroll_independently() {
+        let mut app = app_with(&["a"]);
+        app.focus = Focus::Right;
+        app.right_lines = 500;
+        app.right_height = 10;
+
+        for (i, _) in RightView::ORDER.iter().enumerate() {
+            app.scroll_by(i as isize + 1);
+            app.cycle_right_view(RightView::next);
+        }
+        // Back at the start after a full cycle, with each offset intact.
+        for (i, view) in RightView::ORDER.iter().enumerate() {
+            assert_eq!(app.right_view(), *view);
+            assert_eq!(app.right_scroll(), i as u16 + 1, "{view:?}");
+            app.cycle_right_view(RightView::next);
+        }
+    }
+
+    fn policy_with_registries(applied: bool) -> PolicyRevision {
+        let mut rev: PolicyRevision = serde_json::from_value(serde_json::json!({
+            "version": 1, "active_version": 1, "hash": "abc",
+        }))
+        .unwrap();
+        let mut p = openshell_client::Policy::default();
+        if applied {
+            p.network_policies.insert(
+                // A name the gateway chose, not one we asked for.
+                "registry-npmjs-org".into(),
+                openshell_client::NetworkPolicy {
+                    name: None,
+                    endpoints: vec![openshell_client::Endpoint {
+                        host: "registry.npmjs.org".into(),
+                        port: 443,
+                        ..Default::default()
+                    }],
+                    binaries: vec![],
+                },
+            );
+        }
+        rev.policy = Some(p);
+        rev
+    }
+
+    /// Widening is a change to a security boundary on one keypress, so every
+    /// path that could make it happen by accident is worth a test.
+    #[test]
+    fn widening_needs_a_policy_read_first() {
+        let mut app = app_with(&["a"]);
+        // Nothing read yet: refuse rather than issue a change blind, which
+        // would report a widen whether or not it altered anything.
+        assert!(app.request_repolicy(true).is_none());
+        assert!(app.status_is_error);
+        assert!(app.repolicy_in_flight.is_none());
+    }
+
+    #[test]
+    fn widening_is_a_no_op_when_already_applied() {
+        let mut app = app_with(&["a"]);
+        app.policies
+            .insert("a".into(), Cached::new(Ok(policy_with_registries(true))));
+        assert_eq!(app.widened("a"), Some(true));
+
+        assert!(app.request_repolicy(true).is_none(), "already reachable");
+        assert!(!app.status_is_error, "a no-op is not an error");
+        assert!(app.repolicy_in_flight.is_none());
+
+        // Tightening from the same state is the one that should go through.
+        let (session, update, label) = app.request_repolicy(false).expect("a tighten");
+        assert_eq!(session.name, "a");
+        assert!(!update.remove_endpoints.is_empty());
+        assert!(update.add_endpoints.is_empty());
+        assert!(label.contains("tightened"));
+        assert_eq!(app.repolicy_in_flight.as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn widening_switches_to_the_pane_that_shows_the_result() {
+        let mut app = app_with(&["a"]);
+        app.policies
+            .insert("a".into(), Cached::new(Ok(policy_with_registries(false))));
+        assert_eq!(app.widened("a"), Some(false));
+
+        assert!(app.request_repolicy(true).is_some());
+        assert_eq!(
+            app.right_view(),
+            RightView::Policy,
+            "the consequence has to be on screen"
+        );
+    }
+
+    /// Two overlapping updates would race on the revision, and the loser's
+    /// endpoints would silently not be there.
+    #[test]
+    fn a_second_change_is_refused_while_one_is_in_flight() {
+        let mut app = app_with(&["a"]);
+        app.policies
+            .insert("a".into(), Cached::new(Ok(policy_with_registries(false))));
+        assert!(app.request_repolicy(true).is_some());
+        assert!(app.request_repolicy(false).is_none());
+        assert!(app.status_is_error);
+    }
+
+    /// The keys only exist in the policy pane, so that the rules being changed
+    /// are on screen when the key is pressed. In any other view `w` and `t`
+    /// must fall through to the movement handling rather than widening egress.
+    #[test]
+    fn the_widen_keys_are_inert_outside_the_policy_pane() {
+        let mut app = app_with(&["a"]);
+        app.policies
+            .insert("a".into(), Cached::new(Ok(policy_with_registries(false))));
+
+        for view in [RightView::Preview, RightView::Diff, RightView::Events] {
+            app.views.insert("a".into(), view);
+            app.on_key(key(KeyCode::Char('w')));
+            app.on_key(key(KeyCode::Char('t')));
+            assert!(app.repolicy_request.is_none(), "{view:?}");
+            assert!(app.repolicy_in_flight.is_none(), "{view:?}");
+        }
+
+        app.views.insert("a".into(), RightView::Policy);
+        app.on_key(key(KeyCode::Char('w')));
+        assert!(app.repolicy_request.is_some(), "bound in the policy pane");
+    }
+
+    /// A failed read must not read as "the registries are denied", or the widen
+    /// key would report success against a sandbox it never reached.
+    #[test]
+    fn an_unreadable_policy_is_not_a_narrow_one() {
+        let mut app = app_with(&["a"]);
+        app.policies
+            .insert("a".into(), Cached::new(Err("gateway down".into())));
+        assert_eq!(app.widened("a"), None);
+        assert!(app.request_repolicy(true).is_none());
+        assert!(app.status_is_error);
+    }
+
+    /// The revision that comes back from a change is the authority. Merely
+    /// invalidating the cache would leave the pane showing the pre-change rules
+    /// until the next fetch, which reads as the widen having failed.
+    #[test]
+    fn a_completed_change_replaces_the_cached_policy() {
+        let mut app = app_with(&["a"]);
+        app.policies
+            .insert("a".into(), Cached::new(Ok(policy_with_registries(false))));
+        app.repolicy_in_flight = Some("a".into());
+
+        app.on_update(Update::Repolicied {
+            session: "a".into(),
+            label: "widened: registries now reachable".into(),
+            result: Box::new(Ok(policy_with_registries(true))),
+        });
+
+        assert!(app.repolicy_in_flight.is_none());
+        assert_eq!(app.widened("a"), Some(true));
+        assert!(!app.status_is_error);
+        assert_eq!(
+            app.status.as_deref(),
+            Some("widened: registries now reachable")
+        );
+    }
+
+    #[test]
+    fn a_failed_change_is_reported_as_an_error() {
+        let mut app = app_with(&["a"]);
+        app.repolicy_in_flight = Some("a".into());
+        app.on_update(Update::Repolicied {
+            session: "a".into(),
+            label: "widened".into(),
+            result: Box::new(Err("policy update failed: exit 1".into())),
+        });
+        assert!(app.status_is_error);
+        assert!(app.status.as_deref().unwrap().contains("exit 1"));
+        assert!(app.repolicy_in_flight.is_none());
     }
 
     fn poll_with(state: Option<State>) -> ops::Poll {

@@ -1,0 +1,57 @@
+# readonly-explore: read the code, answer questions, reach nothing.
+#
+# For pointing an agent at a repository you do not want it changing anything
+# outside of, and do not want it talking to the internet from. The clone still
+# happens -- `sbx new` seeds the repository before the agent starts -- so git
+# keeps its egress; everything else, including the agent, has none.
+#
+# That makes this the one template where the agent cannot reach its own model
+# API, so it is only useful with a locally-served model or for inspecting a
+# session after the fact. It exists to make the strict end of the range real
+# rather than hypothetical: `net-open` is only meaningful next to something
+# that denies.
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /usr
+    - /lib
+    - /proc
+    - /dev/urandom
+    - /app
+    - /etc
+    - /var/log
+  read_write:
+    - /sandbox
+    - /tmp
+    - /dev/null
+    # Pseudo-terminals, needed to run the agent under an in-sandbox tmux. See
+    # feature-work.yaml for why the directory and not /dev/ptmx.
+    - /dev/pts
+
+landlock:
+  compatibility: best_effort
+
+process:
+  run_as_user: sandbox
+  run_as_group: sandbox
+
+network_policies:
+  # Cloning only. Fetch is allowed and push is not: the receive-pack rule that
+  # feature-work.yaml adds is deliberately absent, so an agent under this policy
+  # can read a repository but cannot publish to it.
+  github_git:
+    name: github-git
+    endpoints:
+      - host: github.com
+        port: 443
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET,  path: "/**/info/refs*" }
+          - allow: { method: POST, path: "/**/git-upload-pack" }
+    binaries:
+      - { path: /usr/bin/git }
+      - { path: /usr/lib/git-core/git-remote-http }
+      - { path: /usr/lib/git-core/git-remote-https }

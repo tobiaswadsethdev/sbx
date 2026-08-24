@@ -111,8 +111,10 @@ pub struct Sandbox {
     pub workspace: String,
 }
 
-/// The subset of `sandbox get` we deserialize. The full response also carries
-/// the effective policy, which the policy pane will want later.
+/// The subset of `sandbox get` we deserialize. The full response also carries a
+/// `policy`, but the policy pane reads it from `policy get --full` instead --
+/// that call additionally reports which revision is *active*, which is what
+/// distinguishes a submitted policy from an enforced one.
 #[derive(Debug, serde::Deserialize)]
 struct RawSandbox {
     id: String,
@@ -196,6 +198,155 @@ pub struct CreateOpts {
     pub command: Vec<String>,
 }
 
+/// One revision of a sandbox's policy, as `policy get --full` reports it.
+///
+/// `policy get` without `--full` returns only this metadata; the payload needs
+/// the flag. `sandbox get` carries a `policy` too, but this is the call that
+/// also says which revision is *active*, which is the only way to tell a
+/// submitted policy from a loaded one.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PolicyRevision {
+    #[serde(default)]
+    pub version: u32,
+    /// The revision the sandbox has actually loaded. Lags `version` for the few
+    /// seconds between submitting a policy and the supervisor applying it.
+    #[serde(default)]
+    pub active_version: u32,
+    #[serde(default)]
+    pub hash: String,
+    /// `sandbox` or `global`: a gateway-global policy lock outranks the
+    /// sandbox's own, and the pane has to be able to say so.
+    #[serde(default)]
+    pub policy_source: String,
+    #[serde(default)]
+    pub status: String,
+    /// Absent unless `--full` was passed.
+    #[serde(default)]
+    pub policy: Option<Policy>,
+}
+
+impl PolicyRevision {
+    /// Whether the loaded revision is the latest submitted one.
+    pub fn is_settled(&self) -> bool {
+        self.active_version == self.version
+    }
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Policy {
+    #[serde(default)]
+    pub filesystem_policy: FilesystemPolicy,
+    #[serde(default)]
+    pub process: ProcessPolicy,
+    /// Keyed by rule key, which is not the same as the rule's `name`.
+    #[serde(default)]
+    pub network_policies: BTreeMap<String, NetworkPolicy>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct FilesystemPolicy {
+    #[serde(default)]
+    pub include_workdir: bool,
+    #[serde(default)]
+    pub read_only: Vec<String>,
+    #[serde(default)]
+    pub read_write: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct ProcessPolicy {
+    #[serde(default)]
+    pub run_as_user: Option<String>,
+    #[serde(default)]
+    pub run_as_group: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct NetworkPolicy {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub endpoints: Vec<Endpoint>,
+    #[serde(default)]
+    pub binaries: Vec<Binary>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Endpoint {
+    #[serde(default)]
+    pub host: String,
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub enforcement: Option<String>,
+    /// A method class: `read-only`, `read-write`, `full`. Absent when the
+    /// endpoint is governed only by [`Endpoint::rules`].
+    #[serde(default)]
+    pub access: Option<String>,
+    /// `terminate` (deprecated, now the default) or `skip`.
+    #[serde(default)]
+    pub tls: Option<String>,
+    #[serde(default)]
+    pub rules: Vec<Rule>,
+}
+
+impl Endpoint {
+    pub fn host_port(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// A method/path rule. Exactly one of the two is set.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Rule {
+    #[serde(default)]
+    pub allow: Option<MethodPath>,
+    #[serde(default)]
+    pub deny: Option<MethodPath>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct MethodPath {
+    #[serde(default)]
+    pub method: String,
+    #[serde(default)]
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Binary {
+    #[serde(default)]
+    pub path: String,
+}
+
+/// An incremental policy change, mapping one-to-one onto `policy update`.
+///
+/// One struct rather than a list of operations because the CLI's flags are not
+/// independent: `--binary` applies to *every* `--add-endpoint` in the same
+/// invocation, and `--rule-name` is only accepted when there is exactly one.
+/// Modelling it as separate ops would invite building a command the CLI rejects.
+#[derive(Debug, Clone, Default)]
+pub struct PolicyUpdate {
+    /// `host:port[:access[:protocol[:enforcement[:options]]]]`.
+    pub add_endpoints: Vec<String>,
+    /// `host:port`.
+    pub remove_endpoints: Vec<String>,
+    /// Applied to each added endpoint.
+    pub binaries: Vec<String>,
+    pub rule_name: Option<String>,
+    /// Block until the sandbox reports the new revision loaded. Without this
+    /// the call returns while the old policy is still being enforced.
+    pub wait: bool,
+}
+
+impl PolicyUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.add_endpoints.is_empty() && self.remove_endpoints.is_empty()
+    }
+}
+
 pub trait OpenShell {
     fn status(&self) -> Result<GatewayStatus>;
     fn create(&self, opts: &CreateOpts) -> Result<Sandbox>;
@@ -204,6 +355,13 @@ pub trait OpenShell {
     fn get(&self, name: &str) -> Result<Sandbox>;
     fn exec(&self, name: &str, argv: &[&str]) -> Result<ExecOutput>;
     fn delete(&self, name: &str) -> Result<()>;
+    /// The policy the gateway is actually enforcing, provider-composed entries
+    /// included.
+    fn policy(&self, name: &str) -> Result<PolicyRevision>;
+    /// Merge an incremental change into a live sandbox's policy.
+    fn policy_update(&self, name: &str, update: &PolicyUpdate) -> Result<()>;
+    /// Recent gateway and sandbox log lines, newest last.
+    fn logs(&self, name: &str, lines: usize) -> Result<String>;
 }
 
 /// [`OpenShell`] backed by the `openshell` CLI.
@@ -412,6 +570,52 @@ impl OpenShell for CliClient {
         self.run_checked(["sandbox", "delete", name], &display)?;
         Ok(())
     }
+
+    fn policy(&self, name: &str) -> Result<PolicyRevision> {
+        let display = format!("policy get {name} --full");
+        let out = self.run_checked(
+            ["policy", "get", name, "--output", "json", "--full"],
+            &display,
+        )?;
+        Self::parse_json(&out.stdout, &display)
+    }
+
+    fn policy_update(&self, name: &str, update: &PolicyUpdate) -> Result<()> {
+        let mut args: Vec<String> = vec!["policy".into(), "update".into(), name.into()];
+        for e in &update.add_endpoints {
+            args.push("--add-endpoint".into());
+            args.push(e.clone());
+        }
+        for e in &update.remove_endpoints {
+            args.push("--remove-endpoint".into());
+            args.push(e.clone());
+        }
+        for b in &update.binaries {
+            args.push("--binary".into());
+            args.push(b.clone());
+        }
+        if let Some(n) = &update.rule_name {
+            args.push("--rule-name".into());
+            args.push(n.clone());
+        }
+        if update.wait {
+            args.push("--wait".into());
+        }
+
+        let display = format!("policy update {name}");
+        self.run_checked(&args, &display)?;
+        Ok(())
+    }
+
+    fn logs(&self, name: &str, lines: usize) -> Result<String> {
+        let n = lines.to_string();
+        let display = format!("logs {name} -n {n}");
+        // Deliberately not `--tail`: streaming would need a thread of its own
+        // and a way to stop it. Refetching a bounded window on a timer is what
+        // every other pane already does.
+        let out = self.run_checked(["logs", name, "-n", &n], &display)?;
+        Ok(out.stdout)
+    }
 }
 
 #[cfg(test)]
@@ -472,6 +676,137 @@ mod tests {
             assert_eq!(Phase::from(text), want);
             assert_eq!(want.to_string(), text, "Display must round-trip");
         }
+    }
+
+    /// Captured verbatim from `openshell policy get <name> --output json --full`
+    /// on 0.0.110, against a sandbox created from `policies/feature-work.yaml`.
+    /// Trimmed to one rule of each shape: an `access`-governed endpoint, a
+    /// `rules`-governed one, and one with both absent.
+    const POLICY_JSON: &str = r#"{
+      "active_version": 1,
+      "config_revision": 3957685892634909647,
+      "hash": "90715775a1ec73bed8bcf1b289d245562fe2dfec88ba9dee0c26fc6ebe02eab6",
+      "policy": {
+        "filesystem_policy": {
+          "include_workdir": true,
+          "read_only": ["/usr", "/lib", "/proc"],
+          "read_write": ["/sandbox", "/tmp", "/dev/null", "/dev/pts"]
+        },
+        "landlock": { "compatibility": "best_effort" },
+        "network_policies": {
+          "claude_code": {
+            "binaries": [{ "path": "/usr/local/bin/claude" }, { "path": "/usr/bin/node" }],
+            "endpoints": [
+              {
+                "access": "full",
+                "enforcement": "enforce",
+                "host": "api.anthropic.com",
+                "port": 443,
+                "protocol": "rest"
+              }
+            ],
+            "name": "claude-code"
+          },
+          "github_git": {
+            "binaries": [{ "path": "/usr/bin/git" }],
+            "endpoints": [
+              {
+                "enforcement": "enforce",
+                "host": "github.com",
+                "port": 443,
+                "protocol": "rest",
+                "rules": [
+                  { "allow": { "method": "GET", "path": "/**/info/refs*" } },
+                  { "allow": { "method": "POST", "path": "/**/git-receive-pack" } }
+                ],
+                "tls": "terminate"
+              }
+            ],
+            "name": "github-git"
+          }
+        },
+        "process": { "run_as_group": "sandbox", "run_as_user": "sandbox" },
+        "version": 1
+      },
+      "policy_source": "sandbox",
+      "sandbox": "sbx-probe",
+      "scope": "sandbox",
+      "status": "effective",
+      "version": 1
+    }"#;
+
+    #[test]
+    fn parses_the_effective_policy() {
+        let rev: PolicyRevision = serde_json::from_str(POLICY_JSON).unwrap();
+        assert_eq!(rev.version, 1);
+        assert!(rev.is_settled());
+        assert_eq!(rev.policy_source, "sandbox");
+
+        let p = rev.policy.expect("--full carries a payload");
+        assert!(p.filesystem_policy.include_workdir);
+        assert_eq!(p.filesystem_policy.read_write.len(), 4);
+        assert_eq!(p.process.run_as_user.as_deref(), Some("sandbox"));
+
+        // Keyed by rule key, and the display name differs from it.
+        let claude = &p.network_policies["claude_code"];
+        assert_eq!(claude.name.as_deref(), Some("claude-code"));
+        assert_eq!(claude.binaries.len(), 2);
+        assert_eq!(claude.endpoints[0].host_port(), "api.anthropic.com:443");
+        assert_eq!(claude.endpoints[0].access.as_deref(), Some("full"));
+        assert!(claude.endpoints[0].rules.is_empty());
+
+        // A rules-governed endpoint has no `access` at all, which is what makes
+        // it default-deny. Conflating the two would misreport the policy.
+        let git = &p.network_policies["github_git"];
+        assert_eq!(git.endpoints[0].access, None);
+        assert_eq!(git.endpoints[0].rules.len(), 2);
+        let first = git.endpoints[0].rules[0].allow.as_ref().unwrap();
+        assert_eq!(
+            (first.method.as_str(), first.path.as_str()),
+            ("GET", "/**/info/refs*")
+        );
+        assert!(git.endpoints[0].rules[0].deny.is_none());
+    }
+
+    /// A policy submitted but not yet loaded is the normal state for a few
+    /// seconds after a mid-run widen, and the pane has to be able to say so
+    /// rather than claiming the new rules are in force.
+    #[test]
+    fn an_unsettled_revision_is_distinguishable() {
+        let json = r#"{"version": 4, "active_version": 3, "hash": "abc"}"#;
+        let rev: PolicyRevision = serde_json::from_str(json).unwrap();
+        assert!(!rev.is_settled());
+        assert!(rev.policy.is_none(), "no --full, no payload");
+    }
+
+    /// Without `--full` the payload is absent, not empty. Treating that as an
+    /// empty policy would render a sandbox as having no rules at all.
+    #[test]
+    fn a_metadata_only_revision_has_no_payload() {
+        let json = r#"{
+          "active_version": 1, "hash": "9071", "policy_source": "sandbox",
+          "status": "effective", "version": 1, "future_field": true
+        }"#;
+        let rev: PolicyRevision = serde_json::from_str(json).unwrap();
+        assert!(rev.policy.is_none());
+        assert!(rev.is_settled());
+    }
+
+    /// The flag order is a contract with the CLI: `--binary` applies to every
+    /// `--add-endpoint` in the invocation, so a widen that needs per-rule
+    /// binaries has to be split into separate calls rather than merged.
+    #[test]
+    fn a_policy_update_is_empty_until_it_changes_something() {
+        let mut u = PolicyUpdate {
+            binaries: vec!["/usr/bin/node".into()],
+            rule_name: Some("registries".into()),
+            wait: true,
+            ..Default::default()
+        };
+        assert!(u.is_empty(), "binaries alone change nothing");
+        u.add_endpoints
+            .push("registry.npmjs.org:443:read-only".into());
+        assert!(!u.is_empty());
     }
 
     #[test]
