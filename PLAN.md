@@ -67,7 +67,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-9 are done. What is left is the unscheduled list below.
+Increments 0-12 are done. What is left is the unscheduled list below.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -353,6 +353,215 @@ Increments 0-9 are done. What is left is the unscheduled list below.
   through `Request::Create` to `Update::Created`, both against
   `octocat/Hello-World` under `readonly-explore` with no agent started.
 
+- **10. Destroying a session, and the agent's own version** — DONE. Two things
+  the tool could not do for itself: end a session without dropping to a shell,
+  and run a current Claude Code.
+
+  **`D` destroys the selected session.** `ops::destroy` is the one description of
+  what that means -- delete the sandbox, drop the record -- and `sbx rm` was
+  rewritten on top of it, so the CLI and the TUI cannot disagree about what is
+  left behind. Three decisions worth recording:
+
+  * **It always asks, and the question says what is at stake.** A sandbox holds
+    the only copy of whatever the agent has not published, so the question
+    carries the diff stat the list is already showing: `+12/-3 ? goes with the
+    sandbox`. An *unpolled* session says `the sandbox and everything in it goes`
+    instead -- absence of a stat is absence of knowledge, and `no changes to
+    lose` would be a claim the poll never made. Capital `D`, next to `P`, for the
+    same reason: the two irreversible keys are the two that are hard to hit by
+    accident, and lowercase `d` is bound to nothing.
+  * **The row goes when the gateway answers, not on the next refresh.** Deletion
+    is asynchronous and the sandbox stays listed as `Deleting`, which
+    `store::reconcile` reads as dead -- so a refresh landing in that window would
+    put the row back as `dead` and make the destroy look half-done. `App::forget`
+    drops the row and everything keyed by it, and clamps the cursor onto the
+    neighbour rather than jumping to the top.
+  * **A session still being created is refused.** The create thread writes its
+    record after it finishes, so destroying mid-create would leave a record for a
+    sandbox that no longer exists and a clone still running against it. Waiting
+    is tens of seconds; the alternative is a mess. A sandbox that is *already*
+    gone, on the other hand, is the desired end state -- the record is dropped
+    and the row cleared, which is the only way to get rid of a session left
+    behind by a create that died before provisioning anything.
+
+  **The image installs the newest Claude Code, not the base image's.** The
+  community base shipped 2.1.143 while 2.1.246 was current, and the agent cannot
+  fix that from inside: no policy template reaches the download service, and
+  /usr/local/bin is root-owned. So the version became the image's business --
+  `ARG CLAUDE_VERSION=latest`, resolved against the release manifest, checksummed
+  with SHA-256, verified with `claude --version` after installing, and pinnable
+  with `--build-arg`. The release binary rather than `install.sh`, which lands a
+  launcher under `$HOME` -- the sandbox user's *writable* home, where the agent
+  could replace its own binary.
+
+  **The trap: `latest` inside a Dockerfile is not latest.** Docker answers a
+  rebuild from the cached layer, so a `latest` resolved inside the build means
+  "whatever was newest the first time that layer was built" -- the exact
+  staleness the step exists to fix. `sbx image build` therefore resolves the
+  version on the host and passes it in, because changing the ARG is what
+  invalidates the layer. `sbx doctor` compares the built image against the newest
+  release and says when it has fallen behind, so this cannot rot silently again.
+
+  **And the upgrade broke idle detection, which is why it was worth verifying by
+  hand.** Increment 6's markers were taken from 2.1.143. By 2.1.246 the footer
+  under the input box is no longer a fixed hint but a list -- permission mode,
+  then a rotating tip, then whatever applies -- truncated to the pane width with
+  an ellipsis. `? for shortcuts` now shares that slot with several other tips, so
+  an idle agent frequently showed *no* idle marker and the state fell back to the
+  hook file, which is stuck on `running` after an interrupt -- the bug increment 6
+  existed to fix. The input box is now recognised by its *shape* (two rules with
+  the prompt between them), checked after the waiting and running markers so a
+  working agent is never read as idle for having one. `esc to interrupt` survived
+  as an entry in the same list, and at tmux's default 80 columns that list already
+  ends in `← for a…`; the image now sets `default-size 200x50`, because the width
+  of an unattached pane is the width every status scrape reads. Specimens for both
+  new screens are committed next to the old ones.
+
+  Also: `DISABLE_AUTOUPDATER=1`, in the image *and* in the baked
+  `settings.json`, because the gateway does not pass the image environment
+  through to an exec. Without it the agent's screen carried
+  `✘ Auto-update failed · Run claude doctor` for the rest of the session, and the
+  events pane a denied egress with nothing behind it worth investigating.
+
+  Verified against a live gateway: a session created on the rebuilt image
+  (claude 2.1.246, 200x50 pane, no update noise), its waiting state read off a
+  real permission prompt, its idle state read off the *screen* rather than the
+  hook file, then destroyed from the TUI under tmux -- cancelled with `n` first,
+  confirmed with `y`, sandbox gone from `openshell sandbox list` and record gone
+  from `sessions.json`, with no `dead` row appearing in between.
+
+- **11. The agent's terminal, in the pane** — DONE. `Enter` opens the selected
+  agent's terminal in the right-hand pane and gives it the keyboard; `F12` gives
+  it back and the terminal keeps running. `a` still hands the whole terminal
+  over, unchanged.
+
+  **The measurement that decided it was worth building.** An embedded terminal is
+  a held `exec --tty` per open session, and the note above says exec on one
+  sandbox is serialised gateway-side -- if that applied here, the state column
+  and the diff pane would freeze for whichever session you were looking at, which
+  would make the feature actively worse than attaching. Tested before writing any
+  of it: with an attach held open, ordinary execs against the same sandbox
+  returned in ~200ms, and the row for a session being typed at went to `waiting`
+  and its stat column to `+1/-1` while its terminal was on screen. Also tested,
+  and contrary to what increment 0 recorded: killing an attach did **not** wedge
+  exec for that sandbox on 0.0.110.
+
+  How it is put together:
+
+  * `tui/term.rs` owns one `Terminal` per open session: a `portable-pty` child
+    running the same attach script as `sbx attach`, a thread doing nothing but
+    feeding a `vt100::Parser`, and `tui-term` drawing that parser's screen into
+    the pane. Three dependencies, which for a terminal emulator is the right
+    call -- this is exactly the code not to write by hand.
+  * Spawned lazily. Cycling `Tab` onto the agent view shows an invitation and
+    costs nothing; only asking for the keyboard spends a process. Walking a list
+    of ten sessions must not leave ten attaches running.
+  * Key routing is a third `Focus`. While `Focus::Agent` holds the keyboard,
+    every key goes through `term::encode_key` to the pty -- including `q`, `D`
+    and the answer to a pending y/n question, which outranks even the confirm
+    prompt: `y` typed at an agent must never publish something behind it. The
+    encoding is a pure function, so "does Ctrl-C reach the agent", "is Enter a
+    carriage return and not a newline" and "is Backspace DEL" are unit tests
+    rather than things to try by hand against a live sandbox.
+  * `F12` is the way out, and the reason is layouts as much as collisions:
+    `Ctrl-b` is the agent's own tmux prefix, `Ctrl-c` and `Esc` belong to the
+    agent, and `Ctrl-]` is AltGr gymnastics on a Swedish keyboard. It is shown in
+    the pane title, because an escape hatch that has to be looked up is a trap.
+  * `F12` lands on the *list*, not on the pane the terminal was drawn in. Found
+    by using it: leaving an agent is almost always the first half of going to
+    look at another one, and landing on the pane made `j` a scroll and put an `h`
+    between every pair of sessions.
+  * The pty is resized to the inner pane area on every draw, so the agent's tmux
+    redraws at the size it is actually being shown at.
+  * The session's facts moved out of the preview's header and into a pane under
+    the list, because a terminal in the right-hand pane hid them -- and they are
+    exactly what you want beside a terminal. Each fact is one row cut to the
+    pane, not wrapped: the first attempt wrapped, and a repository URL is one
+    unbreakable word, so the pane was taller than the character count that sized
+    it and the `agent at` line fell off the bottom. The preview keeps the task
+    and the repository in full.
+  * `PageUp` and `PageDown` are forwarded like everything else, which is what
+    makes a long session scrollable; see below for why that is the whole
+    implementation.
+
+  **Two bugs found by watching the sandbox rather than the screen.** tmux resizes
+  a window to its latest client and keeps that size after the client leaves, and
+  the status scraper reads that window -- so closing an embedded terminal used to
+  leave the agent's window pinned to whatever the pane happened to be, one narrow
+  pane away from truncating the markers increment 10 had just widened the window
+  for. And the clean detach on the way out (`Ctrl-b d`, so no client is left
+  listed as attached) lost a race with the kill that followed it. `Terminal::drop`
+  now resizes back to `SCRAPE_SIZE`, waits for the detach to land, and only then
+  kills; verified by checking `list-clients` and `#{window_width}` inside the
+  sandbox after quitting, which is the only place the difference is visible.
+  `SCRAPE_SIZE` and the image's `default-size` are the same number, with a test
+  that says so.
+
+  **Scrolling belongs to the agent, and both obvious implementations were
+  wrong.** A parser-side scrollback collects nothing, because what arrives over
+  the pty is a full-screen client repainting itself rather than lines scrolling
+  off. Reaching into the sandbox tmux's 50k-line history collects nothing either:
+  Claude Code runs on the *alternate* screen -- `#{alternate_on}` is 1 and
+  `#{history_size}` is 0 -- which is precisely the mode that means "no scrollback
+  here". It keeps its own transcript and scrolls it on page-up. The first
+  implementation intercepted `PageUp` to enter tmux copy mode and so replaced a
+  working scrollback with an empty one; it looked like it worked once, because a
+  single page of the *previous* screen was still there. Sending the key straight
+  through scrolls properly and progressively -- verified by paging back to the
+  banner at the top of a session and down again. The whole feature is now the
+  absence of a special case, which is the sort of thing only a live test tells
+  you.
+
+  Deferred, deliberately: the mouse and paste. Mouse capture is terminal-wide
+  state, so it would take text selection away from the entire interface and can
+  be left enabled by a panic; paste has the same shape. Neither is what the pane
+  is for.
+
+  Verified against a live gateway, driving the TUI under tmux: opened an agent,
+  typed a prompt into it and got an answer, answered a permission prompt with
+  `1`, watched the list say `waiting` and then `+1/-1` for that same session,
+  left with `F12`, walked to another session and back to find the terminal still
+  live with its history, destroyed the session with its terminal open, and quit
+  with one open -- checking afterwards that no client was left attached, the
+  window was back to 200x50, and no `openshell` child had leaked.
+
+- **12. A face closer to Claude Squad's** — DONE. The reference is
+  [claude-squad's screenshot](https://github.com/smtg-ai/claude-squad/blob/main/assets/screenshot.png);
+  what was taken from it is shape rather than colour.
+
+  * **A session is two rows and a gap**, numbered, with the branch on a dimmed
+    second line and the diff stat and age right-aligned under the state. One line
+    had to answer two different questions -- which session is this, and where has
+    it got to -- and paid for it by truncating the name to fifteen columns with
+    nowhere to put the branch. The numbers are live: `1`-`9` select that session
+    from either pane, which is faster than walking `j` to it.
+  * **The right pane's views are tabs along its top border**, active one in the
+    accent. On the border rather than in a row of their own because the pane
+    keeps its full height that way, which matters most for the view that is a
+    live terminal. The session name and the scroll position moved to the other
+    end of the same border.
+  * **The footer is keys, not a sentence**: `(key, what it does)` pairs, key in
+    the accent and the word after it grey, `·` between keys and `│` between
+    groups of them, grouped by moving / acting / leaving. It is data now, so a
+    new binding is a tuple rather than a string to re-punctuate.
+  * **The accent is `LightBlue`, and ANSI on purpose.** Claude Squad's violet is
+    a hard-coded RGB, which fights a light terminal theme; the shapes are what
+    make this recognisable, not the hue. Not magenta, because magenta belongs to
+    the `waiting` badge and has to stay the only thing on screen wearing it.
+  * The selection is a quiet fill plus a bar in the accent, rather than reversed
+    video, which turns every coloured span inside out -- a state word is least
+    readable exactly when it is selected.
+
+  **The bug that needed a colour assertion to find.** A list's `highlight_style`
+  is patched *over* the row, so the selection's fill replaced the `waiting`
+  badge's magenta background and left its black text on dark grey: the one signal
+  the whole tool exists to deliver became invisible at the moment you selected
+  it. On a selected row the badge is now bright magenta text instead of a fill.
+  The test reads the styles back out of a rendered `TestBackend` buffer, because
+  text is exactly what this class of bug does not show -- and the first version
+  of that test looked fine while asserting on the wrong cells, since `str::find`
+  returns a byte offset and a border row is mostly multi-byte box drawing.
+
 ### Later, unscheduled
 
 - **Warm pool** — less urgent than expected: sandbox creation is ~1s with the
@@ -496,6 +705,33 @@ Things a future session should know that are not obvious from the code:
   OCSF log events. That is fine until something *reads the log* -- see the
   filter in `crates/sbx/src/events.rs`, and expect the same problem in any
   future feature that watches the gateway's own output.
+* **A held `exec --tty` does not block ordinary execs, and killing one does not
+  wedge the sandbox.** Both were assumed to be true the other way round -- the
+  second is written down in increment 0 -- and both were measured on 0.0.110
+  while building increment 11: execs stayed at ~200ms with an attach open, and
+  survived the attach being killed. Worth re-measuring rather than trusting if
+  the embedded terminal ever starts feeling slow, because everything it does
+  rests on it.
+* **The agent is on the alternate screen, so nothing outside it has a
+  scrollback.** `#{alternate_on}=1`, `#{history_size}=0`: tmux keeps no history
+  for that pane and a host-side parser has none to collect either, because the
+  pty carries repaints rather than scrolling lines. Anything that wants to scroll
+  an agent has to let the agent do it. Check those two format strings before
+  building a scrollback for any agent, and expect a different answer from one
+  that renders inline. See increment 11.
+* **tmux keeps a window at its last client's size after that client leaves.**
+  `default-size` only applies at creation, so anything that attaches at a small
+  size -- an embedded pane, a narrow terminal -- decides what the status scraper
+  reads from then on. Whatever attaches has to put the size back.
+* **The agent's version is the image's problem, and pane markers belong to a
+  version.** The base image freezes whatever Claude Code was current when it was
+  published, and a sandbox can neither reach the download service nor write to
+  /usr/local/bin. Worse, upgrading moves the markers `status.rs` matches on: by
+  2.1.246 the footer is a truncated list of rotating hints, so `? for shortcuts`
+  is only sometimes present. Anything that reads the agent's screen has to be
+  re-verified against a real session after a version bump -- and the pane it
+  reads has to be wide enough that the markers are not truncated away. See
+  increment 10.
 * `openshell logs` and `policy list` have no `--output json`. The log is parsed
   by line in `events.rs`; policy history is not surfaced at all because the
   table would have to be scraped.

@@ -2,6 +2,7 @@
 
 mod attach;
 mod create;
+pub mod term;
 mod ui;
 mod worker;
 
@@ -21,6 +22,10 @@ use crate::status;
 use crate::tui::attach::attach;
 use create::{Create, Form, Picker};
 use worker::{Request, Update, Worker};
+
+/// What to press to get into the agent's terminal, quoted in messages so the
+/// binding is stated in one place.
+const ENTER_AGENT_HINT: &str = "enter";
 
 /// How often the session list is reconciled against the gateway.
 const REFRESH_EVERY: Duration = Duration::from_secs(3);
@@ -58,14 +63,19 @@ pub enum RightView {
     Diff,
     Policy,
     Events,
+    /// The agent's own terminal, live. Last in the cycle: it is the only view
+    /// that takes the keyboard, so walking round the others never lands on it
+    /// by surprise.
+    Agent,
 }
 
 impl RightView {
-    const ORDER: [RightView; 4] = [
+    pub const ORDER: [RightView; 5] = [
         RightView::Preview,
         RightView::Diff,
         RightView::Policy,
         RightView::Events,
+        RightView::Agent,
     ];
 
     fn next(self) -> Self {
@@ -76,6 +86,17 @@ impl RightView {
     fn prev(self) -> Self {
         let i = Self::ORDER.iter().position(|v| *v == self).unwrap_or(0);
         Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
+    }
+
+    /// What the tab along the pane's border says.
+    pub fn label(self) -> &'static str {
+        match self {
+            RightView::Preview => "preview",
+            RightView::Diff => "diff",
+            RightView::Policy => "policy",
+            RightView::Events => "events",
+            RightView::Agent => "agent",
+        }
     }
 
     /// How long fetched content stays fresh.
@@ -90,6 +111,9 @@ impl RightView {
             RightView::Preview | RightView::Diff => PANE_TTL,
             RightView::Policy => Duration::from_secs(30),
             RightView::Events => Duration::from_secs(3),
+            // Nothing is fetched for it: the pty pushes, so there is no poll to
+            // keep fresh. The value is never read.
+            RightView::Agent => Duration::MAX,
         }
     }
 }
@@ -100,6 +124,9 @@ pub enum Focus {
     #[default]
     List,
     Right,
+    /// The agent's terminal has the keyboard: almost every key is forwarded to
+    /// it, and [`term::ESCAPE_KEY`] is the way back.
+    Agent,
 }
 
 /// Scroll offset per view, so switching back and forth keeps your place.
@@ -190,6 +217,23 @@ pub struct App {
     confirm: Option<(String, Confirm)>,
     publish_request: Option<Session>,
     publishing: Option<String>,
+    /// Set by the key handler; sent by the event loop, which owns the worker.
+    destroy_request: Option<String>,
+    /// Open agent terminals, one pty each. Not `Option`, because the map being
+    /// empty is the normal state: a terminal is opened only when asked for.
+    terminals: term::Terminals,
+    /// Bytes the focused terminal should receive, and the session they are for.
+    /// Set by the key handler, written by the event loop -- the same split every
+    /// other side effect here uses, which is what makes key routing testable
+    /// without a pty.
+    terminal_input: Vec<(String, Vec<u8>)>,
+    /// A session whose terminal should be opened. Opening spawns a process, so
+    /// it happens in the event loop rather than under the key handler.
+    terminal_request: Option<Session>,
+    /// The session a destroy is running for. One at a time, like a publish: the
+    /// gateway call takes a moment and the row has to keep saying why it is
+    /// still there.
+    destroying: Option<String>,
     /// The create flow, while it is open. It owns the keyboard, like a pending
     /// question does.
     create: Option<Create>,
@@ -220,6 +264,10 @@ pub struct App {
 #[derive(Debug, Clone)]
 enum Confirm {
     Publish(Box<Session>),
+    /// Destroying a session. Carries the name only: the sandbox is resolved
+    /// again when the destroy runs, so a record the cache has lost is still
+    /// removable.
+    Destroy(String),
     /// Quitting while a create is running. The create thread dies with the
     /// process, so this is worth asking about; see `worker::spawn_create`.
     Quit,
@@ -260,6 +308,11 @@ impl App {
             confirm: None,
             publish_request: None,
             publishing: None,
+            destroy_request: None,
+            terminals: term::Terminals::default(),
+            terminal_input: Vec::new(),
+            terminal_request: None,
+            destroying: None,
             create: None,
             stashed_picker: None,
             repos: None,
@@ -500,6 +553,34 @@ impl App {
         self.events.remove(name);
     }
 
+    /// Drop a session from the list, along with everything cached for it.
+    ///
+    /// The refresh does this too, from the store, but only once the gateway
+    /// agrees the sandbox has gone. Doing it locally is what makes the row
+    /// disappear on the keystroke rather than several seconds later.
+    fn forget(&mut self, name: &str) {
+        // Before anything else: the pty is a process holding an exec against a
+        // sandbox that is being deleted, and it detaches cleanly on the way out.
+        self.terminals.close(name);
+        if self.focus == Focus::Agent {
+            self.focus = Focus::List;
+        }
+        self.invalidate(name);
+        self.views.remove(name);
+        self.scroll.remove(name);
+        self.sessions.retain(|s| s.name != name);
+        if self.pending.as_ref().is_some_and(|p| p.name == name) {
+            self.pending = None;
+        }
+        // Clamp rather than clear: the cursor should land on the neighbour of
+        // the row that just went, not jump back to the top of the list.
+        let index = match self.sessions.len() {
+            0 => None,
+            len => Some(self.list_state.selected().unwrap_or(0).min(len - 1)),
+        };
+        self.list_state.select(index);
+    }
+
     /// Whether a question is on screen, and what it says.
     pub fn pending_question(&self) -> Option<&str> {
         self.confirm.as_ref().map(|(q, _)| q.as_str())
@@ -537,6 +618,69 @@ impl App {
         ));
     }
 
+    /// The session a destroy is running for, so the row can say so.
+    pub fn destroying(&self) -> Option<&str> {
+        self.destroying.as_deref()
+    }
+
+    /// Ask before destroying the selected session.
+    ///
+    /// Always asks, and says what is at stake: a sandbox holds the only copy of
+    /// whatever the agent has not published, so this is the one key in the TUI
+    /// that can throw away work that exists nowhere else.
+    fn ask_destroy(&mut self) {
+        let Some(session) = self.selected().cloned() else {
+            return;
+        };
+        if self.destroying.is_some() {
+            self.fail("a destroy is already running");
+            return;
+        }
+        // A create still running would write its record back after the destroy
+        // removed it, leaving a record for a sandbox that no longer exists --
+        // and the create's own clone would keep going against a dead sandbox.
+        // Waiting is a few tens of seconds; the alternative is a mess.
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.name == session.name)
+        {
+            self.fail(format!("{} is still being created", session.name));
+            return;
+        }
+        self.confirm = Some((
+            format!(
+                "destroy {}?  {}  y/n",
+                session.name,
+                self.at_stake(&session)
+            ),
+            Confirm::Destroy(session.name),
+        ));
+    }
+
+    /// What destroying a session would lose, for the question.
+    ///
+    /// Read from the last poll rather than fetched: the question has to go up on
+    /// the keystroke, and the stat is already on screen in the list column the
+    /// cursor is sitting on. An unpolled session says the honest thing rather
+    /// than claiming there is nothing to lose.
+    fn at_stake(&self, session: &Session) -> String {
+        let published = session.state == State::Published;
+        match self.poll(&session.name).and_then(|p| p.stat) {
+            Some(stat) if stat.is_empty() && published => "published, nothing uncommitted".into(),
+            Some(stat) if stat.is_empty() => "no changes to lose".into(),
+            Some(stat) => {
+                let untracked = if stat.untracked > 0 { " ?" } else { "" };
+                let published = if published { ", published" } else { "" };
+                format!(
+                    "+{}/-{}{untracked} goes with the sandbox{published}",
+                    stat.added, stat.removed
+                )
+            }
+            None => "the sandbox and everything in it goes".into(),
+        }
+    }
+
     /// Resolve a pending question. Anything but `y` cancels, so a stray key
     /// cannot publish.
     fn answer(&mut self, yes: bool) {
@@ -552,6 +696,11 @@ impl App {
                 self.publishing = Some(session.name.clone());
                 self.note(format!("publishing {} ...", session.work_branch));
                 self.publish_request = Some(*session);
+            }
+            Confirm::Destroy(name) => {
+                self.destroying = Some(name.clone());
+                self.note(format!("destroying {name} ..."));
+                self.destroy_request = Some(name);
             }
             Confirm::Quit => self.should_quit = true,
         }
@@ -680,6 +829,14 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
+        // The agent's terminal outranks everything, including a pending
+        // question: while it has the keyboard, `y`, `q` and `j` are things the
+        // user is typing at an agent, not commands. Only the escape key is read
+        // here, which is why it has to be one nothing in a sandbox wants.
+        if self.focus == Focus::Agent {
+            self.on_agent_key(key);
+            return;
+        }
         // A pending question owns the keyboard: nothing else may act while it
         // is up, or the answer could be consumed as a movement key.
         if self.confirm.is_some() {
@@ -730,12 +887,30 @@ impl App {
             (KeyCode::Char('t'), _) if self.right_view() == RightView::Policy => {
                 self.repolicy_request = self.request_repolicy(false);
             }
-            (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
+            // Enter opens the agent in the right-hand pane and gives it the
+            // keyboard. `a` still hands the whole terminal over: it is the
+            // better view for a long stretch of work, it has no key routing to
+            // get in the way, and it is the fallback if the embedded one ever
+            // misbehaves.
+            (KeyCode::Enter, _) => self.enter_agent(),
+            (KeyCode::Char('a'), _) => {
                 self.attach_request = self.selected().cloned();
             }
             // Shift-P, not p: publishing is outward-facing, so it should not
             // share a neighbourhood with the movement keys.
             (KeyCode::Char('P'), _) => self.ask_publish(),
+            // Shift-D, for the same reason as Shift-P, and more so: this is the
+            // one key that can destroy work no other copy of exists.
+            (KeyCode::Char('D'), _) => self.ask_destroy(),
+            // The numbers on the rows, made good: `3` goes to the third session.
+            // Placed before the focus-dependent movement keys, because a jump is
+            // not a movement -- it means the same thing from either pane.
+            (KeyCode::Char(c), _) if c.is_ascii_digit() && c != '0' => {
+                let index = c as usize - '1' as usize;
+                if index < self.sessions.len() {
+                    self.list_state.select(Some(index));
+                }
+            }
             (KeyCode::Char('r'), _) => {
                 // Make the next tick refresh immediately.
                 self.last_refresh = Instant::now() - REFRESH_EVERY;
@@ -761,6 +936,86 @@ impl App {
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.move_by(isize::MIN / 2),
             (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.move_by(isize::MAX / 2),
             _ => {}
+        }
+    }
+
+    /// Every key while the terminal has focus. Almost all of them are the
+    /// agent's; see [`term::encode_key`] for what each becomes.
+    fn on_agent_key(&mut self, key: KeyEvent) {
+        if key.code == term::ESCAPE_KEY {
+            self.leave_agent();
+            return;
+        }
+        let Some(name) = self.selected_name() else {
+            // The session went while its terminal was focused -- destroyed from
+            // elsewhere, or the list emptied. Nothing to type at.
+            self.leave_agent();
+            return;
+        };
+        if let Some(bytes) = term::encode_key(key) {
+            self.terminal_input.push((name, bytes));
+        }
+    }
+
+    /// Give the keyboard back to the *list*. The terminal keeps running: that is
+    /// the whole point of it living in the interface rather than replacing it.
+    ///
+    /// The list rather than the pane it was drawn in, which is what focus
+    /// otherwise means here. Leaving an agent is almost always the first half of
+    /// going to look at another one, and landing on the pane would make `j` a
+    /// scroll and put an `h` between every pair of sessions.
+    fn leave_agent(&mut self) {
+        self.focus = Focus::List;
+        self.note(format!(
+            "left the agent -- j/k for another, {} to go back in",
+            ENTER_AGENT_HINT
+        ));
+    }
+
+    /// Open the selected session's terminal and hand it the keyboard.
+    ///
+    /// The process is spawned by the event loop; this only decides that it
+    /// should be, and refuses the cases where an attach could not work.
+    fn enter_agent(&mut self) {
+        let Some(session) = self.selected().cloned() else {
+            return;
+        };
+        // A row standing in for a create with no sandbox yet has nothing to
+        // attach to, and the exec would fail with something unhelpful.
+        if !self.is_live(&session) {
+            self.fail(format!("{} has no sandbox yet", session.name));
+            return;
+        }
+        if session.state == State::Dead {
+            self.fail(format!("{}'s sandbox is gone", session.name));
+            return;
+        }
+        self.views.insert(session.name.clone(), RightView::Agent);
+        if !self.terminals.is_open(&session.name) {
+            self.note(format!("attaching to {} ...", session.name));
+            self.terminal_request = Some(session);
+        } else {
+            self.focus = Focus::Agent;
+        }
+    }
+
+    /// Whether the selected session's terminal is running, for the renderer.
+    pub fn agent_is_open(&self) -> bool {
+        self.selected()
+            .is_some_and(|s| self.terminals.is_open(&s.name))
+    }
+
+    /// The screen to draw for the selected session, if its terminal is open.
+    pub fn agent_screen(&mut self) -> Option<(std::sync::MutexGuard<'_, vt100::Parser>, bool)> {
+        let name = self.selected_name()?;
+        self.terminals.screen(&name)
+    }
+
+    /// Match the open terminal to the pane it is being drawn in. Called by the
+    /// renderer, which is the only place that knows how big that is.
+    pub fn resize_agent(&mut self, cols: u16, rows: u16) {
+        if let Some(name) = self.selected_name() {
+            self.terminals.resize(&name, cols, rows);
         }
     }
 
@@ -837,6 +1092,29 @@ impl App {
                     }
                     Err(e) => self.fail(e.clone()),
                 }
+            }
+            Update::Destroyed { session, result } => {
+                if self.destroying.as_deref() == Some(session.as_str()) {
+                    self.destroying = None;
+                }
+                match *result {
+                    Ok(outcome) => {
+                        self.note(match outcome {
+                            ops::Destroyed::Sandbox => format!("destroyed {session}"),
+                            ops::Destroyed::RecordOnly => {
+                                format!("{session} was already gone; forgot it")
+                            }
+                        });
+                        // Dropped here rather than waiting for the refresh: the
+                        // gateway lists a deleted sandbox as `Deleting` for a
+                        // while, so a refresh landing in that window would put
+                        // the row back as `dead` and make it look as though the
+                        // destroy had half worked.
+                        self.forget(&session);
+                    }
+                    Err(e) => self.fail(e),
+                }
+                self.last_refresh = Instant::now() - REFRESH_EVERY;
             }
             Update::Repos(repos) => {
                 self.scan_in_flight = false;
@@ -988,6 +1266,31 @@ fn event_loop(
             worker.send(Request::Publish(Box::new(session)));
         }
 
+        if let Some(name) = app.destroy_request.take() {
+            worker.send(Request::Destroy(name));
+        }
+
+        // Spawning a pty is a fork, not a gateway round trip, so it happens here
+        // rather than on the worker: sending it there would put it behind
+        // whatever exec is in flight, for no gain.
+        if let Some(session) = app.terminal_request.take() {
+            match app.terminals.open(attach_client, &session) {
+                Ok(()) => {
+                    app.focus = Focus::Agent;
+                    app.note(format!(
+                        "{} -- {} to leave",
+                        session.name,
+                        term::ESCAPE_HINT
+                    ));
+                }
+                Err(e) => app.fail(e),
+            }
+        }
+
+        for (name, bytes) in std::mem::take(&mut app.terminal_input) {
+            app.terminals.send(&name, &bytes);
+        }
+
         // A scan already running answers the pending request too, so a second
         // one is dropped rather than queued behind it.
         if std::mem::take(&mut app.scan_request) && !app.scan_in_flight {
@@ -1078,6 +1381,9 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
             RightView::Diff => app.diffs.get(&name).is_none_or(|c| c.stale_after(ttl)),
             RightView::Policy => app.policies.get(&name).is_none_or(|c| c.stale_after(ttl)),
             RightView::Events => app.events.get(&name).is_none_or(|c| c.stale_after(ttl)),
+            // Nothing to fetch: the terminal pushes its own updates through the
+            // pty, so a session being watched live costs no execs at all.
+            RightView::Agent => false,
         };
         if due {
             match view {
@@ -1248,15 +1554,18 @@ mod tests {
         );
     }
 
+    /// `a` is the old behaviour and keeps it: the whole terminal, handed over
+    /// until the user detaches.
     #[test]
-    fn enter_requests_an_attach_to_the_selected_session() {
+    fn a_requests_a_full_screen_attach_to_the_selected_session() {
         let mut app = app_with(&["a", "b"]);
         app.move_by(1);
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.on_key(key(KeyCode::Char('a')));
         assert_eq!(
             app.attach_request.as_ref().map(|s| s.name.as_str()),
             Some("b")
         );
+        assert!(app.terminal_request.is_none(), "and not the embedded one");
     }
 
     #[test]
@@ -1264,6 +1573,7 @@ mod tests {
         let mut app = app_with(&[]);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.attach_request.is_none());
+        assert!(app.terminal_request.is_none());
     }
 
     #[test]
@@ -1303,9 +1613,9 @@ mod tests {
         assert_eq!(app.right_view(), RightView::Preview);
 
         // Shift-Tab walks back, which is the only sane way to reach the last
-        // view once there are four of them.
+        // view once there are five of them.
         app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(app.right_view(), RightView::Events);
+        assert_eq!(app.right_view(), RightView::Agent);
     }
 
     #[test]
@@ -1701,6 +2011,389 @@ mod tests {
         assert!(app.publishing().is_none());
         assert!(app.status_is_error);
         assert!(app.status.as_deref().unwrap().contains("403"));
+    }
+
+    /// Destroying deletes the sandbox, and a sandbox holds the only copy of
+    /// whatever the agent has not published. So it asks, and the question says
+    /// what would be lost.
+    #[test]
+    fn destroying_asks_and_names_what_goes() {
+        let mut app = app_with(&["a"]);
+        app.polls.insert(
+            "a".into(),
+            Cached::new(ops::Poll {
+                stat: Some(ops::DiffStat {
+                    added: 12,
+                    removed: 3,
+                    untracked: 1,
+                }),
+                status: None,
+            }),
+        );
+
+        app.on_key(key(KeyCode::Char('D')));
+
+        let q = app.pending_question().expect("a question");
+        assert!(q.contains("destroy a"), "{q}");
+        assert!(q.contains("+12/-3"), "the stat is what is at stake: {q}");
+        assert!(q.contains('?'), "untracked files count too: {q}");
+        assert!(app.destroy_request.is_none(), "nothing sent yet");
+    }
+
+    /// An unpolled session must not claim there is nothing to lose -- absence of
+    /// a stat is absence of knowledge.
+    #[test]
+    fn an_unpolled_session_says_the_sandbox_goes() {
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('D')));
+        let q = app.pending_question().expect("a question");
+        assert!(q.contains("everything in it"), "{q}");
+        assert!(!q.contains("nothing"), "must not claim a clean tree: {q}");
+    }
+
+    #[test]
+    fn a_clean_session_says_there_is_nothing_to_lose() {
+        let mut app = app_with(&["a"]);
+        app.polls.insert(
+            "a".into(),
+            Cached::new(ops::Poll {
+                stat: Some(ops::DiffStat::default()),
+                status: None,
+            }),
+        );
+        app.on_key(key(KeyCode::Char('D')));
+        let q = app.pending_question().expect("a question");
+        assert!(q.contains("no changes"), "{q}");
+    }
+
+    #[test]
+    fn only_y_destroys_and_anything_else_cancels() {
+        for (pressed, expected) in [('y', true), ('Y', true), ('n', false), ('d', false)] {
+            let mut app = app_with(&["a"]);
+            app.on_key(key(KeyCode::Char('D')));
+            app.on_key(key(KeyCode::Char(pressed)));
+            assert_eq!(
+                app.destroy_request.is_some(),
+                expected,
+                "{pressed} should {} destroy",
+                if expected { "" } else { "not" }
+            );
+            assert!(app.pending_question().is_none());
+        }
+        // Enter is the attach key. Treating it as yes would destroy a session on
+        // a keystroke people press constantly.
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('D')));
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.destroy_request.is_none());
+        assert!(app.attach_request.is_none(), "and must not attach either");
+    }
+
+    /// Lowercase `d` is not a destroy key. It is next to `j`/`k`, and a session
+    /// deleted by a typo is not recoverable.
+    #[test]
+    fn lowercase_d_does_nothing() {
+        let mut app = app_with(&["a"]);
+        app.on_key(key(KeyCode::Char('d')));
+        assert!(app.pending_question().is_none());
+        assert!(app.destroy_request.is_none());
+    }
+
+    /// A create still running would write its record back after the destroy
+    /// dropped it, and go on cloning into a sandbox that no longer exists.
+    #[test]
+    fn a_session_still_being_created_is_refused() {
+        let mut app = app_with(&["a"]);
+        app.pending = Some(app.sessions[0].clone());
+        app.on_key(key(KeyCode::Char('D')));
+        assert!(app.pending_question().is_none());
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn a_second_destroy_is_refused_while_one_runs() {
+        let mut app = app_with(&["a", "b"]);
+        app.destroying = Some("b".into());
+        app.on_key(key(KeyCode::Char('D')));
+        assert!(app.pending_question().is_none());
+        assert!(app.status_is_error);
+    }
+
+    /// The row goes on the answer coming back, not on the next refresh: the
+    /// gateway reports a deleted sandbox as `Deleting` for a while, so a refresh
+    /// landing in that window would put the row back as `dead`.
+    #[test]
+    fn a_completed_destroy_drops_the_row_and_its_caches() {
+        let mut app = app_with(&["a", "b", "c"]);
+        app.move_by(1); // on "b"
+        for name in ["a", "b"] {
+            app.polls
+                .insert(name.into(), Cached::new(ops::Poll::default()));
+            app.views.insert(name.into(), RightView::Diff);
+        }
+        app.destroying = Some("b".into());
+
+        app.on_update(Update::Destroyed {
+            session: "b".into(),
+            result: Box::new(Ok(ops::Destroyed::Sandbox)),
+        });
+
+        assert!(app.destroying().is_none());
+        assert!(!app.status_is_error);
+        assert_eq!(
+            app.sessions
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            ["a", "c"]
+        );
+        assert!(!app.polls.contains_key("b"), "cached poll must go with it");
+        assert!(!app.views.contains_key("b"), "and the pane choice");
+        assert!(app.polls.contains_key("a"), "other sessions are untouched");
+        // The cursor lands on the neighbour rather than jumping to the top.
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("c"));
+    }
+
+    /// Destroying the last session must leave nothing selected, or every
+    /// accessor keyed on the selection indexes past the end of the list.
+    #[test]
+    fn destroying_the_last_session_clears_the_selection() {
+        let mut app = app_with(&["a"]);
+        app.on_update(Update::Destroyed {
+            session: "a".into(),
+            result: Box::new(Ok(ops::Destroyed::Sandbox)),
+        });
+        assert!(app.sessions.is_empty());
+        assert_eq!(app.list_state.selected(), None);
+        assert!(app.selected().is_none());
+    }
+
+    /// A sandbox that was already gone is the desired end state, so the record
+    /// goes too -- that is the only way to clear a session left behind by a
+    /// create that died before it provisioned anything.
+    #[test]
+    fn an_already_gone_sandbox_still_clears_the_row() {
+        let mut app = app_with(&["a"]);
+        app.destroying = Some("a".into());
+        app.on_update(Update::Destroyed {
+            session: "a".into(),
+            result: Box::new(Ok(ops::Destroyed::RecordOnly)),
+        });
+        assert!(app.sessions.is_empty());
+        assert!(!app.status_is_error);
+        assert!(app.status.as_deref().unwrap().contains("already gone"));
+    }
+
+    /// A failed destroy must leave the row alone: the sandbox is still there,
+    /// and a row that vanished would hide a session that is still running.
+    #[test]
+    fn a_failed_destroy_keeps_the_row_and_reports_why() {
+        let mut app = app_with(&["a"]);
+        app.destroying = Some("a".into());
+        app.on_update(Update::Destroyed {
+            session: "a".into(),
+            result: Box::new(Err("could not delete sbx-a: gateway unreachable".into())),
+        });
+        assert!(app.destroying().is_none());
+        assert!(app.status_is_error);
+        assert!(
+            app.status
+                .as_deref()
+                .unwrap()
+                .contains("gateway unreachable")
+        );
+        assert_eq!(app.sessions.len(), 1, "the session is still there");
+    }
+
+    /// The rows are numbered, so the numbers have to do something: `3` selects
+    /// the third session from either pane, and a number with no session behind
+    /// it does nothing rather than clearing the selection.
+    #[test]
+    fn digits_jump_to_a_session() {
+        let mut app = app_with(&["a", "b", "c"]);
+        app.on_key(key(KeyCode::Char('3')));
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("c"));
+
+        app.on_key(key(KeyCode::Char('1')));
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("a"));
+
+        // From the right pane too, where j/k mean scrolling.
+        app.focus = Focus::Right;
+        app.on_key(key(KeyCode::Char('2')));
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("b"));
+
+        // Past the end, and zero, are no-ops.
+        app.on_key(key(KeyCode::Char('9')));
+        app.on_key(key(KeyCode::Char('0')));
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("b"));
+    }
+
+    /// Entering the agent switches the right pane to it and asks for a
+    /// terminal; the pty itself is the event loop's business.
+    #[test]
+    fn enter_asks_for_the_selected_sessions_terminal() {
+        let mut app = app_with(&["a", "b"]);
+        app.move_by(1);
+        app.on_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            app.terminal_request.as_ref().map(|s| s.name.as_str()),
+            Some("b")
+        );
+        assert_eq!(app.right_view(), RightView::Agent, "and shows it");
+        // Focus follows only once the terminal is actually open, which the
+        // event loop reports; until then the list still has the keyboard.
+        assert_eq!(app.focus, Focus::List);
+    }
+
+    /// A row standing in for a create with no sandbox yet has nothing to attach
+    /// to, and the exec would fail with something unhelpful several seconds
+    /// later.
+    #[test]
+    fn a_session_without_a_sandbox_is_refused() {
+        let mut app = app_with(&["a"]);
+        let mut pending = app.sessions[0].clone();
+        pending.state = State::Creating;
+        app.pending = Some(pending);
+
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.terminal_request.is_none());
+        assert!(app.status_is_error);
+    }
+
+    #[test]
+    fn a_dead_sandbox_is_refused() {
+        let mut app = app_with(&["a"]);
+        app.sessions[0].state = State::Dead;
+        app.on_key(key(KeyCode::Enter));
+        assert!(app.terminal_request.is_none());
+        assert!(app.status_is_error);
+    }
+
+    /// The whole point of the focus mode: while the agent has the keyboard, the
+    /// keys that would otherwise quit, destroy or move the cursor are things the
+    /// user is typing at an agent.
+    #[test]
+    fn while_the_agent_has_the_keyboard_the_tui_bindings_do_nothing() {
+        let mut app = app_with(&["a", "b"]);
+        app.focus = Focus::Agent;
+
+        for pressed in ['q', 'D', 'j', 'n', 'P', 'r'] {
+            app.on_key(key(KeyCode::Char(pressed)));
+        }
+
+        assert!(!app.should_quit, "q must not quit");
+        assert!(app.pending_question().is_none(), "D must not ask anything");
+        assert_eq!(app.list_state.selected(), Some(0), "j must not move");
+        assert!(app.create.is_none(), "n must not open the create flow");
+        assert_eq!(app.focus, Focus::Agent, "and the agent keeps the keyboard");
+
+        // Every one of them went to the agent instead.
+        let sent: Vec<u8> = app
+            .terminal_input
+            .iter()
+            .flat_map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(sent, b"qDjnPr".to_vec());
+        assert!(app.terminal_input.iter().all(|(name, _)| name == "a"));
+    }
+
+    /// Even a pending question loses to the terminal. Answering `y` while typing
+    /// at an agent would publish or destroy something the user was not looking
+    /// at.
+    #[test]
+    fn a_pending_question_does_not_steal_keys_from_the_agent() {
+        let mut app = app_with_repo(ADO);
+        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
+        assert!(app.pending_question().is_some());
+
+        app.focus = Focus::Agent;
+        app.on_key(key(KeyCode::Char('y')));
+
+        assert!(app.publish_request.is_none(), "must not have published");
+        assert!(app.pending_question().is_some(), "the question is still up");
+        assert_eq!(app.terminal_input.len(), 1, "the y went to the agent");
+    }
+
+    #[test]
+    fn the_escape_key_gives_the_keyboard_back_without_reaching_the_agent() {
+        let mut app = app_with(&["a"]);
+        app.focus = Focus::Agent;
+
+        app.on_key(key(term::ESCAPE_KEY));
+
+        // The list, not the pane: `j` should walk to the next session rather
+        // than scroll the terminal that was just left.
+        assert_eq!(app.focus, Focus::List);
+        assert!(app.terminal_input.is_empty(), "and nothing was forwarded");
+        // The terminal is still running: leaving is not closing.
+        assert!(app.terminal_request.is_none());
+    }
+
+    /// The loop this feature exists for: type at one agent, leave, walk to
+    /// another, go in again -- with no key in between that does something else.
+    #[test]
+    fn leaving_an_agent_lands_where_switching_sessions_works() {
+        let mut app = app_with(&["a", "b"]);
+        app.focus = Focus::Agent;
+
+        app.on_key(key(term::ESCAPE_KEY));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("b"));
+
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            app.terminal_request.as_ref().map(|s| s.name.as_str()),
+            Some("b")
+        );
+    }
+
+    /// Scrolling is the agent's, so the paging keys have to arrive as
+    /// themselves. Claude Code runs on the alternate screen and keeps its own
+    /// transcript; intercepting these to scroll something on this side would
+    /// take a working scrollback away and replace it with an empty one.
+    #[test]
+    fn the_paging_keys_reach_the_agent_unchanged() {
+        let mut app = app_with(&["a"]);
+        app.focus = Focus::Agent;
+
+        app.on_key(key(KeyCode::PageUp));
+        app.on_key(key(KeyCode::PageDown));
+
+        assert_eq!(
+            app.terminal_input,
+            vec![
+                ("a".to_string(), b"\x1b[5~".to_vec()),
+                ("a".to_string(), b"\x1b[6~".to_vec()),
+            ]
+        );
+    }
+
+    /// A session destroyed under a focused terminal must not leave the keyboard
+    /// pointing at a pty that is being killed.
+    #[test]
+    fn destroying_a_session_takes_the_keyboard_back() {
+        let mut app = app_with(&["a"]);
+        app.focus = Focus::Agent;
+        app.on_update(Update::Destroyed {
+            session: "a".into(),
+            result: Box::new(Ok(ops::Destroyed::Sandbox)),
+        });
+        assert_eq!(app.focus, Focus::List);
+        assert!(app.sessions.is_empty());
+    }
+
+    /// Cycling onto the agent view must not start anything: a terminal is a
+    /// held process, and walking a list of ten sessions would otherwise leave
+    /// ten attaches running.
+    #[test]
+    fn tabbing_onto_the_agent_view_starts_nothing() {
+        let mut app = app_with(&["a"]);
+        for _ in 0..RightView::ORDER.len() {
+            app.on_key(key(KeyCode::Tab));
+            assert!(app.terminal_request.is_none(), "{:?}", app.right_view());
+        }
+        assert_eq!(app.focus, Focus::List, "and the keyboard stays put");
     }
 
     fn poll_with(state: Option<State>) -> ops::Poll {

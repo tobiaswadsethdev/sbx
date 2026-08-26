@@ -31,6 +31,9 @@ pub enum Request {
         label: String,
     },
     Publish(Box<Session>),
+    /// Delete a sandbox and forget the session. Carries the name rather than the
+    /// session, since the record may be all that is left of it.
+    Destroy(String),
     /// Scan the host for git repositories, for the create flow's picker.
     ScanRepos,
     /// Ask git how far a checkout has drifted from its remote.
@@ -78,6 +81,10 @@ pub enum Update {
     Published {
         session: String,
         result: Box<Result<crate::publish::Outcome, String>>,
+    },
+    Destroyed {
+        session: String,
+        result: Box<Result<ops::Destroyed, String>>,
     },
     /// The result of a host scan. Never an error: an unreadable directory is
     /// skipped rather than failing the scan, so the worst case is an empty list.
@@ -194,6 +201,10 @@ impl Worker {
                             &crate::publish::Options::default(),
                         )),
                         session: session.name,
+                    },
+                    Request::Destroy(name) => Update::Destroyed {
+                        result: Box::new(ops::destroy(&client, &name)),
+                        session: name,
                     },
                     Request::ScanRepos => Update::Repos(repos::discover()),
                     Request::Inspect { path, branch } => Update::Inspected {

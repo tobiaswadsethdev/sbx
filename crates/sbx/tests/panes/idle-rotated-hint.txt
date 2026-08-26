@@ -1,0 +1,24 @@
+  direct descendants of decisions made by Thompson, Ritchie, and their
+  collaborators over half a century ago.
+
+  Conclusion
+
+  Unix's history is a remarkable story of how a modest, almost accidental side
+  project — built originally so its creators could play a space simulation game
+  — grew into one of the most influential pieces of software ever written. Its
+  journey through corporate research labs, academic institutions,
+  standardization bodies, commercial vendors, and ultimately a global community
+  of volunteer open-source developers illustrates how ideas about simplicity,
+  modularity, and portability can outlast any single implementation or company.
+  Though the specific commercial products called "UNIX" have faded from
+  prominence, the philosophy and architecture born in that small room at Bell
+  Labs in 1969 continues to run much of the world's computing infrastructure
+  today, from smartphones in people's pockets to the servers underpinning the
+  modern internet.
+
+✻ Sautéed for 46s · done 7:58 AM
+                                      ✘ Auto-update failed · Run claude doctor
+────────────────────────────────────────────────────────────────────────────────
+❯ write a 2000 word essay about the history of git
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · gh auth login for PR status · ← for agents

@@ -1,0 +1,24 @@
+  portable across different machine architectures. Existing high-level languages
+  of the era, like FORTRAN and COBOL, were designed for numerical or business
+  computing and were poorly suited to the kind of low-level manipulation of
+  memory, bytes, and hardware registers that operating system code demanded.
+  What was needed was a "systems programming language" — something that could be
+  used to write the guts of an operating system, yet still be recompiled
+  instead of rewritten when moving to new hardware.
+
+  The Precursors: BCPL and B
+
+  The lineage that led to C runs through two earlier languages. The first is
+  BCPL (Basic Combined Programming Language), created by Martin Richards at
+  Cambridge University in 1966. BCPL was itself designed as a simplified,
+  portable systems language, stripped of most high-level abstractions like data
+  types beyond the machine word. It was intentionally minimal, treating memory
+  largely as an undifferentiated sequence of words that the programmer could
+  manipulate directly — a philosophy that would echo forward into C's approach
+  to pointers and memory.
+
+                                      ✘ Auto-update failed · Run claude doctor
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · gh auth login for PR status · esc to interrupt · ← for a…

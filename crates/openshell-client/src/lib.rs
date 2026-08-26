@@ -491,16 +491,31 @@ impl CliClient {
     /// until it exits. Returned rather than run so the caller can tear down its
     /// own terminal handling first.
     pub fn interactive_exec(&self, sandbox: &str, argv: &[&str]) -> Command {
-        let mut cmd = Command::new(&self.bin);
+        let argv = self.interactive_exec_argv(sandbox, argv);
+        let mut cmd = Command::new(&argv[0]);
+        cmd.args(&argv[1..]);
+        cmd
+    }
+
+    /// The same invocation as [`Self::interactive_exec`], as an argv.
+    ///
+    /// For callers that cannot use a [`Command`] -- spawning under a pty needs
+    /// the program and its arguments separately. Kept as the one definition of
+    /// what an interactive exec *is*, so the embedded terminal and `sbx attach`
+    /// cannot end up talking to the gateway differently.
+    pub fn interactive_exec_argv(&self, sandbox: &str, argv: &[&str]) -> Vec<String> {
+        let mut out = vec![self.bin.display().to_string()];
         if let Some(g) = &self.gateway {
-            cmd.arg("--gateway").arg(g);
+            out.push("--gateway".into());
+            out.push(g.clone());
         }
         if let Some(w) = &self.workspace {
-            cmd.arg("--workspace").arg(w);
+            out.push("--workspace".into());
+            out.push(w.clone());
         }
-        cmd.args(["sandbox", "exec", "-n", sandbox, "--tty", "--"]);
-        cmd.args(argv);
-        cmd
+        out.extend(["sandbox", "exec", "-n", sandbox, "--tty", "--"].map(String::from));
+        out.extend(argv.iter().map(|a| (*a).to_string()));
+        out
     }
 }
 

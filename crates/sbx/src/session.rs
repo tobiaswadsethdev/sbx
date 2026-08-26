@@ -48,6 +48,16 @@ const PREFIX: &str = "sbx-";
 /// the real constraint - far tighter than the 63-character label limit.
 const MAX_NAME: usize = MAX_SANDBOX_NAME - PREFIX.len();
 
+/// The sandbox a session of this name owns.
+///
+/// The convention, in one place. Deleting and adopting both have to name a
+/// sandbox without a record to read it from -- that is the whole point of
+/// having a convention -- and two copies of this `format!` would be two things
+/// to keep in step with [`Session::new`].
+pub fn sandbox_name(name: &str) -> String {
+    format!("{PREFIX}{name}")
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum NameError {
     #[error("name is empty")]
@@ -239,7 +249,7 @@ pub fn humanize_age(created_at: u64, now: u64) -> String {
 impl Session {
     pub fn new(name: String, repo: String, task: String) -> Self {
         Session {
-            sandbox: format!("{PREFIX}{name}"),
+            sandbox: sandbox_name(&name),
             tmux: TMUX_SESSION.to_string(),
             work_branch: format!("sbx/{name}"),
             name,

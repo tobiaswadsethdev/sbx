@@ -1,6 +1,6 @@
 //! Operations shared by the CLI and the TUI.
 
-use openshell_client::{CreateOpts, OpenShell, PolicyRevision, PolicyUpdate};
+use openshell_client::{CreateOpts, Error as OsError, OpenShell, PolicyRevision, PolicyUpdate};
 
 use crate::events;
 use crate::forge;
@@ -39,7 +39,7 @@ pub fn refresh(client: &dyn OpenShell) -> Result<Refreshed, Box<dyn std::error::
     };
 
     for orphan in &rec.orphans {
-        let sandbox = format!("sbx-{orphan}");
+        let sandbox = session::sandbox_name(orphan);
         match seed::read_meta(client, &sandbox) {
             Ok(s) => {
                 out.adopted.push(s.name.clone());
@@ -443,6 +443,53 @@ pub fn publish(
             store.save().map_err(|e| e.to_string())?;
         }
     }
+    Ok(outcome)
+}
+
+/// What destroying a session did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destroyed {
+    /// The gateway deleted the sandbox.
+    Sandbox,
+    /// There was no sandbox left to delete; only the record went.
+    RecordOnly,
+}
+
+/// Delete a session's sandbox and drop its record.
+///
+/// Shared by `sbx rm` and the TUI, so destroying means one thing wherever it is
+/// asked for -- and so the TUI cannot leave behind a record the CLI would then
+/// report as a session whose sandbox has died.
+///
+/// A sandbox the gateway has never heard of is the desired end state rather than
+/// a failure: that is the case for a session left behind by a create that died
+/// before provisioning, and refusing to remove the record would make it
+/// permanent. The name is resolved through the cache with a fall back to the
+/// naming convention, so a session the cache has lost is still removable.
+///
+/// Deletion itself is asynchronous. The sandbox stays listed as `Deleting` for
+/// a while afterwards, which `store::reconcile` already reads as dead, so a
+/// caller that refreshes immediately sees the row go rather than come back.
+pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> {
+    let mut store = Store::load().map_err(|e| format!("could not read the session cache: {e}"))?;
+    let sandbox = store
+        .get(name)
+        .map(|s| s.sandbox.clone())
+        .unwrap_or_else(|| session::sandbox_name(name));
+
+    let outcome = match client.delete(&sandbox) {
+        Ok(()) => Destroyed::Sandbox,
+        Err(OsError::NotFound(_)) => Destroyed::RecordOnly,
+        Err(e) => return Err(format!("could not delete {sandbox}: {e}")),
+    };
+
+    // Only after the gateway has accepted the deletion: dropping the record
+    // first would lose the sandbox name on a failure, leaving a sandbox running
+    // that nothing knows how to name.
+    store.remove(name);
+    store
+        .save()
+        .map_err(|e| format!("deleted {sandbox}, but could not update the cache: {e}"))?;
     Ok(outcome)
 }
 

@@ -161,7 +161,30 @@ fn check_image() -> Check {
                 "sbx image build",
             );
         }
-        Check::ok("image", format!("{} built", crate::session::IMAGE))
+        // The agent's own version. The base image freezes whatever Claude Code
+        // was current when it was published, and the agent cannot upgrade itself
+        // from inside a sandbox -- so without this an image built months ago
+        // looks perfectly healthy while running an agent that is months behind.
+        match (
+            crate::image::claude_version(),
+            crate::image::latest_claude_version(),
+        ) {
+            (Some(built), Some(latest)) if crate::image::is_older(&built, &latest) => Check::warn(
+                "image",
+                format!(
+                    "{} carries claude {built}; {latest} is out",
+                    crate::session::IMAGE
+                ),
+                "sbx image build",
+            ),
+            (Some(built), _) => Check::ok(
+                "image",
+                format!("{} built, claude {built}", crate::session::IMAGE),
+            ),
+            // Nothing to compare: an image whose `claude --version` cannot be
+            // read is odd, but it is not what doctor is here to diagnose.
+            (None, _) => Check::ok("image", format!("{} built", crate::session::IMAGE)),
+        }
     } else {
         Check::warn(
             "image",

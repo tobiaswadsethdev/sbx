@@ -15,3 +15,6 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 ratatui = "0.30.2"
+tui-term = "0.3"
+portable-pty = "0.9"
+vt100 = "0.16"

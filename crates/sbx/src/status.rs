@@ -28,6 +28,16 @@
 //! screen, so it decides, and the file supplies what the screen does not say
 //! cleanly -- the name of the tool in play -- plus an answer for a sandbox with
 //! no agent pane to read at all.
+//!
+//! **What 2.1.246 changed.** The footer under the input box is no longer a
+//! fixed hint. It is a list -- permission mode, then a rotating tip, then
+//! whatever else applies -- truncated with an ellipsis to the pane width, and
+//! `? for shortcuts` is only one of the tips that slot can hold. An idle agent
+//! therefore often shows no idle marker at all, which is why the input box is
+//! now recognised by its shape rather than by the words under it. `esc to
+//! interrupt` survived, as an entry in the same list; it is checked first, so a
+//! running agent is never read as idle merely for having an input box on screen.
+//! The specimens for both are committed next to the older ones.
 
 use serde::Deserialize;
 
@@ -51,8 +61,20 @@ const HOOK_STALE_SECS: u64 = 120;
 const WAITING_FOOTER: &str = "Esc to cancel";
 /// Shown while the agent is working.
 const RUNNING_HINT: &str = "esc to interrupt";
-/// Shown under the input box when the agent is waiting on a new instruction.
+/// One of the tips that can appear under the input box. Present in 2.1.143's
+/// idle screen, and still a valid signal, but by 2.1.246 it shares that slot
+/// with several others -- so its absence means nothing. See [`has_input_box`].
 const IDLE_HINT: &str = "? for shortcuts";
+/// The rule drawn above and below the input box. A different character from the
+/// dashed rule (`╌`) an edit confirmation draws, which is what keeps a permission
+/// prompt from looking like an input box.
+const BOX_RULE: char = '─';
+/// How long a run of [`BOX_RULE`] counts as the box. Long enough that a rule an
+/// agent happens to print inside its own output is not mistaken for one.
+const BOX_RULE_MIN: usize = 20;
+/// How many lines may sit between the two rules. The prompt wraps, so the box
+/// grows with what has been typed into it.
+const BOX_MAX_HEIGHT: usize = 8;
 /// Selection cursor. On its own this means nothing: the idle input box uses the
 /// same glyph (`❯ commit this`). Only a cursor sitting on a *numbered option*
 /// indicates an open menu.
@@ -120,6 +142,28 @@ fn has_numbered_cursor(pane: &str) -> bool {
     })
 }
 
+/// Whether the agent's input box is on screen: two rules with the prompt
+/// between them.
+///
+/// Recognised by shape because the words under the box are not dependable -- see
+/// the module comment. Only ever consulted after the waiting and running
+/// markers, since a permission prompt is drawn over the box and a working agent
+/// keeps it on screen.
+fn has_input_box(pane: &str) -> bool {
+    let lines: Vec<&str> = pane.lines().collect();
+    let rules: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.chars().filter(|c| *c == BOX_RULE).count() >= BOX_RULE_MIN)
+        .map(|(i, _)| i)
+        .collect();
+
+    rules.windows(2).any(|pair| {
+        let (top, bottom) = (pair[0], pair[1]);
+        bottom - top <= BOX_MAX_HEIGHT && lines[top + 1..bottom].iter().any(|l| l.contains(CURSOR))
+    })
+}
+
 /// Read the agent's state off its screen.
 pub fn scrape_pane(pane: &str) -> Option<PaneSignal> {
     if pane.trim().is_empty() {
@@ -133,7 +177,9 @@ pub fn scrape_pane(pane: &str) -> Option<PaneSignal> {
     if pane.contains(RUNNING_HINT) {
         return Some(PaneSignal::Running);
     }
-    if pane.contains(IDLE_HINT) {
+    // The box last: a waiting prompt covers it and a running agent still has
+    // one, so it only means idle once neither of those matched.
+    if pane.contains(IDLE_HINT) || has_input_box(pane) {
         return Some(PaneSignal::Idle);
     }
     None
@@ -216,6 +262,12 @@ mod tests {
     const WAITING_BASH: &str = include_str!("../tests/panes/waiting-bash-permission.txt");
     const RUNNING: &str = include_str!("../tests/panes/running-tool-use.txt");
     const IDLE: &str = include_str!("../tests/panes/idle-input-box.txt");
+    // The same two states under 2.1.246, where the footer became a truncated
+    // list of hints. The idle capture carries neither `? for shortcuts` nor
+    // anything else the older markers looked for, which is the whole reason the
+    // input box is now matched by shape.
+    const IDLE_ROTATED: &str = include_str!("../tests/panes/idle-rotated-hint.txt");
+    const RUNNING_TRUNCATED: &str = include_str!("../tests/panes/running-truncated-hint.txt");
 
     #[test]
     fn every_specimen_is_classified_correctly() {
@@ -223,6 +275,56 @@ mod tests {
         assert_eq!(scrape_pane(WAITING_BASH), Some(PaneSignal::Waiting));
         assert_eq!(scrape_pane(RUNNING), Some(PaneSignal::Running));
         assert_eq!(scrape_pane(IDLE), Some(PaneSignal::Idle));
+        assert_eq!(scrape_pane(IDLE_ROTATED), Some(PaneSignal::Idle));
+        assert_eq!(scrape_pane(RUNNING_TRUNCATED), Some(PaneSignal::Running));
+    }
+
+    /// The specimen has to be the awkward case it was collected for, or the
+    /// test above proves nothing about the newer version.
+    #[test]
+    fn the_rotated_idle_specimen_carries_none_of_the_old_markers() {
+        assert!(
+            !IDLE_ROTATED.contains(IDLE_HINT),
+            "the tip slot held something else in this capture"
+        );
+        assert!(!IDLE_ROTATED.contains(RUNNING_HINT));
+        assert!(!IDLE_ROTATED.contains(WAITING_FOOTER));
+        assert!(has_input_box(IDLE_ROTATED), "so only the shape is left");
+    }
+
+    /// A working agent keeps its input box, so the box must never outvote the
+    /// running marker. This is the ordering the whole structural check rests on.
+    #[test]
+    fn a_running_agent_is_not_read_as_idle_for_having_an_input_box() {
+        assert!(has_input_box(RUNNING_TRUNCATED));
+        assert!(has_input_box(RUNNING));
+        assert_eq!(scrape_pane(RUNNING_TRUNCATED), Some(PaneSignal::Running));
+        assert_eq!(scrape_pane(RUNNING), Some(PaneSignal::Running));
+    }
+
+    /// And a permission prompt outranks both: it is drawn over the box, and it
+    /// is the one state the tool exists to surface.
+    #[test]
+    fn a_permission_prompt_outranks_the_input_box() {
+        let pane = format!("{IDLE_ROTATED}\n Do you want to proceed?\n ❯ 1. Yes\n\n Esc to cancel");
+        assert_eq!(scrape_pane(&pane), Some(PaneSignal::Waiting));
+    }
+
+    #[test]
+    fn the_input_box_is_not_found_where_there_is_none() {
+        assert!(!has_input_box(""));
+        assert!(!has_input_box("sandbox@sbx:/sandbox/repo$ "));
+        // A rule with no prompt between the two: the agent printing a divider.
+        let dividers = format!("{r}\nsome output\n{r}", r = "─".repeat(80));
+        assert!(!has_input_box(&dividers));
+        // An edit confirmation draws a dashed rule, not this one, and a `❯` on a
+        // numbered option. Matching it here would read every permission prompt
+        // as an idle input box.
+        assert!(!has_input_box(WAITING_EDIT));
+        assert!(!has_input_box(WAITING_BASH));
+        // A short run is something inside the agent's own output, not the box.
+        let short = format!("{r}\n❯ hello\n{r}", r = "─".repeat(5));
+        assert!(!has_input_box(&short));
     }
 
     #[test]

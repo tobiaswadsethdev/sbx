@@ -18,7 +18,7 @@ mod tui;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use openshell_client::{CliClient, Error as OsError, OpenShell};
+use openshell_client::{CliClient, OpenShell};
 
 use session::{Session, State};
 use store::Store;
@@ -428,31 +428,22 @@ fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
 }
 
 fn cmd_rm(client: &dyn OpenShell, names: Vec<String>) -> Fallible {
-    let mut store = Store::load()?;
     let mut failures = 0;
 
     for name in names {
-        // Fall back to the naming convention so a sandbox can still be removed
-        // when the cache has lost the session.
-        let sandbox = store
-            .get(&name)
-            .map(|s| s.sandbox.clone())
-            .unwrap_or_else(|| format!("sbx-{name}"));
-
-        match client.delete(&sandbox) {
-            Ok(()) => println!("deleted {sandbox}"),
-            // Already gone is the desired end state, not a failure.
-            Err(OsError::NotFound(_)) => println!("{sandbox} was already gone"),
+        // One name at a time, each persisting as it goes: `sbx rm a b` that
+        // fails on `b` must still have forgotten `a`, or a retry would try to
+        // delete a sandbox that is already gone and call that the failure.
+        match ops::destroy(client, &name) {
+            Ok(ops::Destroyed::Sandbox) => println!("deleted {name}"),
+            Ok(ops::Destroyed::RecordOnly) => println!("{name} was already gone"),
             Err(e) => {
-                eprintln!("sbx: could not delete {sandbox}: {e}");
+                eprintln!("sbx: {e}");
                 failures += 1;
-                continue;
             }
         }
-        store.remove(&name);
     }
 
-    store.save()?;
     if failures > 0 {
         return Err(format!("{failures} session(s) could not be removed").into());
     }
