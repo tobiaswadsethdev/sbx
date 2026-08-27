@@ -986,6 +986,61 @@ Increments 0-21 are done. What is left is the unscheduled list below.
   path showing as its own chooser entry, `sbx doctor` warning about
   `ghost-token`, and every error path above from the command line.
 
+- **22. Acting on a denial from the events feed** — DONE. The feed showed what
+  the agent had tried and gave you nothing to do about it; `w`/`t` was the only
+  answer and it is one fixed preset. The feed now carries a cursor -- `j`/`k`
+  move it, the pane scrolls to follow -- and `e` on the selected event opens a
+  four-way question about the endpoint it names: `a` allow here, `b` block here,
+  `A` allow always, `B` block always. Lowercase goes through the same live
+  `policy update` as `w`; uppercase does that *and* records the endpoint in
+  `~/.config/sbx/endpoints.json`, which `ops::create` imposes on every new
+  sandbox in one call before the clone starts.
+
+  **A block is a removal, not a veto, and the pane says so.** OpenShell denies by
+  default and has no deny-that-outranks-an-allow at L4, so a block list can only
+  mean `--remove-endpoint`: blocking `pastebin.com` is a no-op and blocking
+  `platform.claude.com` is real, because `feature-work.yaml` grants it. Each list
+  row therefore carries a third column read from the live policy -- `NOT in this
+  policy`, `STILL in this policy`, `gone from this policy` -- because an entry
+  describes what a *new* session gets and the session in front of you may predate
+  it. Phrased as the outcome rather than as an absence for blocks: for those,
+  absent is what was asked for, and "not in this policy" would make the healthy
+  case read as the alarming one.
+
+  **An allow binds to the binary the event named**, which is the whole premise of
+  the tool and the one thing a host-level check would get wrong. `github.com:443`
+  is granted to git under `feature-work` and denied to curl; answering "already
+  reachable" on the strength of git's rule would refuse to fix the exact case the
+  feed exists to show. So `App::reachable_by` is binary-aware and
+  `App::endpoint_present` is not -- the first is what an allow acts on, the second
+  what a block does. An L7 decision names no binary and cannot be allowed at all:
+  an endpoint rule with no binaries grants nothing, and the pane says that rather
+  than issuing a rule that would quietly do nothing.
+
+  **Asymmetric failure at create time.** A block that will not apply fails the
+  create; an allow that will not apply is a warning. A missing allow announces
+  itself the moment the agent tries and the feed prints the denial; a missing
+  block leaves a session reaching something its owner asked to be unreachable and
+  never mentions itself again. Applied after `sandbox create` and before the
+  seeder, so the window in which the template's rules are in force is real and
+  empty.
+
+  **The cursor is anchored to an event, not to a row.** The feed grows at the top
+  and refetches on a timer, so an index is not a handle: two arrivals between two
+  keystrokes and `e` acts on something else. `Update::Events` re-finds the
+  selected event by `Event::key` -- the same identity the kept file dedupes on --
+  and falls back to the newest when it has aged out.
+
+  Measured against 0.0.110 with `policy update --dry-run` rather than assumed:
+  `--remove-endpoint` on an endpoint that is not there exits zero and changes
+  nothing, so a block never needs a guarding read; an `--add-endpoint` that
+  overlaps an existing rule becomes a rule of its own and the CLI says
+  `would grant binary '/usr/bin/curl' undeclared authorization for github.com`,
+  which is why the pane re-reads the policy afterwards rather than reporting what
+  it asked for; a binary-less `--add-endpoint` produces a rule with no `binaries:`
+  key at all. Verified live: `sbx policy does-the` rendering the three list states
+  against a real `feature-work` sandbox.
+
 ### Later, unscheduled
 
 - **Warm pool** — less urgent than expected: sandbox creation is ~1s with the
@@ -1025,6 +1080,15 @@ Increments 0-21 are done. What is left is the unscheduled list below.
   `openshell logs` has no JSON output. Mitigated the same way as the pane
   scraping: one module, real captured specimens in its tests, and lines that
   fail to parse are dropped rather than crashing the pane.
+
+  Increment 22 raised the stakes: a subject is now turned back into an endpoint
+  and one keystroke away from a rule at the gateway. `Event::target` is therefore
+  strict rather than forgiving -- an authority needs a dotted host and a real
+  port, an L7 subject needs exactly two words with an uppercase method first, a
+  binary needs an absolute path -- so a log line whose shape has changed yields
+  *nothing* and the pane says the event is not about an endpoint. A loose parse
+  here would be a policy change nobody asked for, which is worse than a feed that
+  has stopped being actionable.
 - **Overlap with `openshell term`** — that is a k9s-style resource browser.
   Stay out of its lane: `sbx` orchestrates tasks, not resources.
 
@@ -1044,7 +1108,7 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-21 done, `main` at a clean tree, 323 tests, clippy
+Current state: increments 0-22 done, `main` at a clean tree, 338 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
@@ -1057,6 +1121,7 @@ sbx new --repo <url> --task "..." --policy feature-work \
 sbx            # or start one here: n, pick a repo, fill the form, enter
                # Enter to attach, Ctrl-b d to detach, q to quit
                # Tab cycles preview/diff/policy/events; w/t widen/tighten egress
+               # in the feed, j/k pick an event and e allows or blocks its endpoint
                # P publishes (asks first)
 sbx publish <name>
 sbx rm <name>

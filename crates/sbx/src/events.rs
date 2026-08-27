@@ -133,7 +133,7 @@ pub fn merge_kept(session: &str, fetched: Vec<Event>) -> Vec<Event> {
 /// What makes two events the same event. The gateway's own line, in effect: a
 /// timestamp plus what it was about.
 fn identity(e: &Event) -> (u64, String, String) {
-    (e.at, e.class.clone(), e.subject.clone())
+    e.key()
 }
 
 fn newest_first(mut events: Vec<Event>) -> Vec<Event> {
@@ -170,6 +170,113 @@ fn write_kept(path: &Path, events: &[Event]) -> std::io::Result<()> {
 /// Forget a session's kept events. Called when the session is destroyed.
 pub fn forget_kept(session: &str) {
     let _ = fs::remove_file(kept_path(session));
+}
+
+/// The endpoint an event was about, when it was about one.
+///
+/// This is what makes the feed actionable rather than only readable: a denial
+/// names a host, a port and usually the binary that reached for it, which is
+/// exactly the shape `policy update` takes. Everything else in the pane is
+/// prose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Target {
+    /// `pastebin.com:443`. The unit `--add-endpoint` and `--remove-endpoint`
+    /// both address, so the whole feature is expressed in these.
+    pub endpoint: String,
+    /// The kernel-resolved path the connection came from, when the decision was
+    /// an L4 one. Absent for an L7 rule, which judges a method and a path and
+    /// never names a binary -- and absent is load-bearing: an endpoint rule with
+    /// no binaries grants nothing, so an allow with nothing to bind to is
+    /// refused rather than issued.
+    pub binary: Option<String>,
+}
+
+impl Event {
+    /// What this event was about, as an endpoint.
+    ///
+    /// Three shapes come back on one feed and all three have to be read:
+    ///
+    /// ```text
+    /// /usr/bin/curl(79) -> pastebin.com:443     an L4 decision, with a binary
+    /// GET httpbin.org:443/ip                    an L7 decision, with a path
+    /// host.openshell.internal:17670             a bare authority
+    /// ```
+    ///
+    /// Anything else -- a `CONFIG:VALIDATED` warning is a whole English
+    /// sentence -- is not about an endpoint, and says so rather than being
+    /// coerced into one. That is why the L7 arm insists on exactly two words
+    /// with an uppercase method first: a sentence ending in something that
+    /// happens to parse as `host:port` must not become a policy change.
+    pub fn target(&self) -> Option<Target> {
+        let subject = self.subject.trim();
+
+        // `/usr/bin/curl(79) -> pastebin.com:443`
+        if let Some((left, right)) = subject.split_once(" -> ") {
+            return Some(Target {
+                endpoint: host_port(right)?,
+                binary: binary_path(left),
+            });
+        }
+
+        // `GET httpbin.org:443/ip`
+        let mut words = subject.split_whitespace();
+        if let (Some(method), Some(rest), None) = (words.next(), words.next(), words.next())
+            && !method.is_empty()
+            && method.chars().all(|c| c.is_ascii_uppercase())
+        {
+            let authority = rest.split('/').next().unwrap_or(rest);
+            return Some(Target {
+                endpoint: host_port(authority)?,
+                binary: None,
+            });
+        }
+
+        Some(Target {
+            endpoint: host_port(subject)?,
+            binary: None,
+        })
+    }
+
+    /// What makes two events the same event, for anything that has to keep hold
+    /// of one across a refetch.
+    ///
+    /// The feed grows at the top, so a row index is not a handle: three arrivals
+    /// between two keystrokes and it points at something else. See the events
+    /// pane's cursor.
+    pub fn key(&self) -> (u64, String, String) {
+        (self.at, self.class.clone(), self.subject.clone())
+    }
+}
+
+/// `host:port`, or nothing.
+///
+/// Strict on purpose. This decides whether a line in a feed can be turned into
+/// a policy change, so a loose match is a change to an endpoint nobody named.
+fn host_port(s: &str) -> Option<String> {
+    let (host, port) = s.trim().rsplit_once(':')?;
+    // A hostname, not a sentence: the dot requirement is what keeps
+    // `deprecated: 443` out, and there is no single-label host worth reaching
+    // from a sandbox.
+    if host.is_empty()
+        || !host.contains('.')
+        || !host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return None;
+    }
+    let port: u16 = port.parse().ok()?;
+    (port != 0).then(|| format!("{host}:{port}"))
+}
+
+/// `/usr/bin/curl(79)` -> `/usr/bin/curl`.
+///
+/// Absolute paths only: the policy matches on the kernel-resolved `/proc/<pid>/exe`,
+/// so anything that is not one is not a path the gateway would accept.
+fn binary_path(s: &str) -> Option<String> {
+    let path = s.trim();
+    let path = path.rsplit_once('(').map_or(path, |(p, _)| p).trim();
+    path.starts_with('/').then(|| path.to_string())
 }
 
 impl Event {
@@ -643,6 +750,122 @@ mod tests {
             ..e.clone()
         };
         assert_eq!(midnight.clock_utc(), "00:00:00");
+    }
+
+    /// The feed is only actionable if a line can be turned back into the
+    /// endpoint it was about. Both decision shapes have to yield one, and the
+    /// L4 shape has to yield the binary too -- an endpoint rule with no
+    /// binaries grants nothing.
+    #[test]
+    fn a_decision_yields_the_endpoint_it_was_about() {
+        let events = parse(LOG);
+
+        let denial = events
+            .iter()
+            .find(|e| e.subject.contains("pastebin"))
+            .unwrap();
+        assert_eq!(
+            denial.target(),
+            Some(Target {
+                endpoint: "pastebin.com:443".into(),
+                binary: Some("/usr/bin/curl".into()),
+            })
+        );
+
+        let allow = events
+            .iter()
+            .find(|e| e.subject.contains("git-remote-http"))
+            .unwrap();
+        assert_eq!(
+            allow.target(),
+            Some(Target {
+                endpoint: "github.com:443".into(),
+                binary: Some("/usr/lib/git-core/git-remote-http".into()),
+            })
+        );
+
+        // An L7 decision judges a method and a path, so it names no binary --
+        // which is the case the pane has to refuse an allow for.
+        let l7 = events
+            .iter()
+            .find(|e| e.subject.contains("httpbin"))
+            .unwrap();
+        assert_eq!(
+            l7.target(),
+            Some(Target {
+                endpoint: "httpbin.org:443".into(),
+                binary: None,
+            })
+        );
+    }
+
+    /// A bare authority is how the supervisor's own connections are logged, and
+    /// it is a perfectly good endpoint.
+    #[test]
+    fn a_bare_authority_is_an_endpoint() {
+        let e = ev(1, "host.openshell.internal:17670");
+        assert_eq!(
+            e.target(),
+            Some(Target {
+                endpoint: "host.openshell.internal:17670".into(),
+                binary: None,
+            })
+        );
+    }
+
+    /// The whole risk of this parse: a subject that is prose must not become a
+    /// policy change. `CONFIG:VALIDATED` carries an English sentence with
+    /// colons in it, and there is exactly one keystroke between a match here
+    /// and a rule at the gateway.
+    #[test]
+    fn prose_is_never_mistaken_for_an_endpoint() {
+        let warning = &parse(LOG)[0];
+        assert!(warning.subject.contains("deprecated"));
+        assert_eq!(warning.target(), None, "{}", warning.subject);
+
+        for subject in [
+            "",
+            "sleep(56)",
+            "applied policy revision",
+            // A single-label host: nothing worth reaching from a sandbox, and
+            // allowing it would be allowing a word.
+            "localhost:443",
+            // A port that is not one.
+            "pastebin.com:https",
+            "pastebin.com:0",
+            "pastebin.com:99999",
+            // A lowercase first word is not an HTTP method, so this is prose.
+            "get httpbin.org:443/ip",
+            // Three words is prose too, whatever the last one looks like.
+            "denied reaching pastebin.com:443",
+        ] {
+            assert_eq!(ev(1, subject).target(), None, "{subject:?}");
+        }
+    }
+
+    /// A relative path is not what the gateway matches on -- the policy is
+    /// checked against the kernel-resolved `/proc/<pid>/exe` -- so a subject
+    /// carrying one yields the endpoint without a binary rather than a binary
+    /// the gateway would reject.
+    #[test]
+    fn only_an_absolute_path_counts_as_a_binary() {
+        let e = ev(1, "curl(79) -> pastebin.com:443");
+        let t = e.target().unwrap();
+        assert_eq!(t.endpoint, "pastebin.com:443");
+        assert_eq!(t.binary, None);
+    }
+
+    /// The pane holds on to a selected event across a refetch, and the feed
+    /// grows at the top, so the handle cannot be a row index.
+    #[test]
+    fn the_key_identifies_an_event_across_a_refetch() {
+        let a = ev(100, "curl -> a");
+        let b = ev(100, "curl -> b");
+        assert_ne!(a.key(), b.key(), "same second, different subject");
+        assert_eq!(a.key(), a.clone().key());
+        // And it is the same notion of sameness the kept file dedupes on, or
+        // the cursor would follow an event the merge had discarded.
+        assert_eq!(a.key(), identity(&a));
     }
 
     #[test]

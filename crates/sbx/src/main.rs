@@ -3,6 +3,7 @@
 mod ansi;
 mod config;
 mod doctor;
+mod endpoints;
 mod events;
 mod forge;
 mod image;
@@ -477,9 +478,15 @@ fn require_session(name: &str) -> Result<Session, Box<dyn std::error::Error>> {
 fn cmd_policy(client: &dyn OpenShell, name: &str) -> Fallible {
     let session = require_session(name)?;
     let rev = ops::policy(client, &session)?;
+    // Empty on a read failure rather than fatal: the reason to run this command
+    // is the sandbox's own rules, and losing them to an unreadable convenience
+    // file would be the wrong trade. The section is omitted when the lists are
+    // empty, so a failure reads the same as never having used the feature --
+    // which is why the TUI, where the lists are edited, reports it instead.
+    let lists = endpoints::Lists::load().unwrap_or_default();
     print!(
         "{}",
-        pane::to_plain(&policy::render(&rev, session.policy.as_deref()))
+        pane::to_plain(&policy::render(&rev, session.policy.as_deref(), &lists))
     );
     Ok(())
 }

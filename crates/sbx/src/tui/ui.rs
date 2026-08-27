@@ -548,8 +548,17 @@ fn draw_right(frame: &mut Frame, app: &mut App, area: Rect) {
     app.right_height = inner_h;
 
     // Content can shrink between renders, so clamp rather than trust the stored
-    // offset.
-    let offset = app.right_scroll().min(app.max_scroll());
+    // offset -- and in the feed the offset is derived rather than stored at all,
+    // because there the keys move a cursor and the view follows it.
+    let wanted = match view {
+        RightView::Events => follow_cursor(
+            app.right_scroll(),
+            event_cursor_rows(app, &session),
+            inner_h,
+        ),
+        _ => app.right_scroll(),
+    };
+    let offset = wanted.min(app.max_scroll());
     if offset != app.right_scroll() {
         app.scroll
             .entry(session.name.clone())
@@ -817,7 +826,7 @@ fn policy_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
         Err(e) => return vec![Line::from(e.clone()).style(Style::default().fg(Color::Red))],
     };
 
-    let body = crate::policy::render(rev, session.policy.as_deref());
+    let body = crate::policy::render(rev, session.policy.as_deref(), app.lists());
     body.lines().map(marked_line).collect()
 }
 
@@ -852,11 +861,19 @@ fn marked_line(line: &str) -> Line<'static> {
 /// Width `pane::field` pads its label to.
 const FIELD_LABEL_W: usize = 12;
 
+/// Width of the cursor gutter, which every row of the feed carries.
+const GUTTER: &str = "  ";
+
 /// The allow/deny feed, newest first.
 ///
 /// A denial is the event worth seeing, so it is the only one that gets a filled
 /// badge -- the same reasoning as `Waiting` in the list. An allow is routine and
 /// stays quiet; making both loud would make neither legible.
+///
+/// The cursor is a bar in a gutter rather than a highlighted row, unlike the
+/// session list. A row here already carries a filled red badge and a coloured
+/// verdict, and a background across all of it either fights those or wins and
+/// hides them; a bar in the margin says the same thing and leaves the row alone.
 fn event_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
     let Some(result) = app.events(&session.name) else {
         return vec![Line::from("  reading log ...").style(Style::default().fg(Color::DarkGray))];
@@ -877,8 +894,17 @@ fn event_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
         ];
     }
 
+    let cursor = app.event_cursor(&session.name);
     let mut lines = Vec::with_capacity(events.len() * 2);
-    for e in events {
+    for (i, e) in events.iter().enumerate() {
+        let here = i == cursor;
+        let gutter = || {
+            if here {
+                Span::styled("\u{258c} ", Style::default().fg(ACCENT))
+            } else {
+                Span::raw(GUTTER)
+            }
+        };
         let (badge, badge_style) = match e.verdict {
             Verdict::Denied => (
                 " DENY  ",
@@ -898,9 +924,10 @@ fn event_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
             ),
         };
         let mut spans = vec![
+            gutter(),
             Span::styled(
                 format!("{} ", e.clock_utc()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(if here { ACCENT } else { Color::DarkGray }),
             ),
             Span::styled(badge, badge_style),
             Span::raw(" "),
@@ -918,13 +945,57 @@ fn event_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
         // pane: "endpoint pastebin.com:443 is not allowed by any policy" is the
         // sentence the user came here to read.
         if let Some(reason) = &e.reason {
-            lines.push(Line::from(Span::styled(
-                format!("             {reason}"),
-                Style::default().fg(Color::DarkGray),
-            )));
+            lines.push(Line::from(vec![
+                gutter(),
+                Span::styled(
+                    format!("           {reason}"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
         }
     }
     lines
+}
+
+/// How many rows one event occupies in the feed above.
+///
+/// The one place the two have to agree: the scroll that keeps the cursor in
+/// view is computed from this, and a reason line the arithmetic did not know
+/// about is a denial's reason falling off the bottom of the pane.
+fn event_rows(e: &crate::events::Event) -> usize {
+    1 + usize::from(e.reason.is_some())
+}
+
+/// Where the cursor sits in the drawn feed, as `(first row, rows)`.
+///
+/// Computed rather than returned by [`event_lines`], because the offset it
+/// produces is what the paragraph is then scrolled by.
+fn event_cursor_rows(app: &App, session: &Session) -> Option<(usize, usize)> {
+    let events = match app.events(&session.name)? {
+        Ok(e) if !e.is_empty() => e,
+        _ => return None,
+    };
+    let cursor = app.event_cursor(&session.name);
+    let row = events.iter().take(cursor).map(event_rows).sum();
+    Some((row, events.get(cursor).map_or(1, event_rows)))
+}
+
+/// The smallest scroll that keeps the cursor on screen.
+///
+/// `max(offset)` rather than a recentre: scrolling only when the cursor would
+/// otherwise leave the pane is what makes `j` feel like moving a selection
+/// rather than dragging the whole feed.
+fn follow_cursor(offset: u16, cursor: Option<(usize, usize)>, height: usize) -> u16 {
+    let Some((row, rows)) = cursor else {
+        return offset;
+    };
+    let top = u16::try_from(row).unwrap_or(u16::MAX);
+    if top < offset {
+        return top;
+    }
+    let bottom = u16::try_from(row + rows.max(1) - 1).unwrap_or(u16::MAX);
+    let height = u16::try_from(height.max(1)).unwrap_or(u16::MAX);
+    offset.max(bottom.saturating_sub(height - 1))
 }
 
 /// What the agent is doing, and which source said so.
@@ -1005,6 +1076,20 @@ const KEYS_POLICY: &[Group] = &[
     &[("w", "widen"), ("t", "tighten")],
     &[("h", "list"), ("tab", "view"), ("q", "quit")],
 ];
+/// The feed's own keys. `j/k` moves a cursor here rather than scrolling, so it
+/// is worth saying which.
+const KEYS_EVENTS: &[Group] = &[
+    &[("j/k", "select"), ("e", "allow/block")],
+    &[("h", "list"), ("tab", "view"), ("q", "quit")],
+];
+/// The four answers to one question, and no other key does anything while it is
+/// up. Spelled out rather than abbreviated: this is the only place in the TUI
+/// where a keystroke changes what *every future session* may reach.
+const KEYS_CHOICE: &[Group] = &[
+    &[("a", "allow here"), ("b", "block here")],
+    &[("A", "allow always"), ("B", "block always")],
+    &[("esc", "cancel")],
+];
 const KEYS_AGENT_VIEW: &[Group] = &[
     &[("enter", "attach to it"), ("shift-↑/↓", "scroll")],
     &[("1-9", "jump"), ("D", "destroy")],
@@ -1072,9 +1157,41 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         _ if app.selected().is_none() => KEYS_EMPTY,
         (_, _, RightView::Agent) => KEYS_AGENT_VIEW,
         (_, _, RightView::Policy) => KEYS_POLICY,
+        (_, _, RightView::Events) => KEYS_EVENTS,
         (_, Focus::List, _) => KEYS_LIST,
         (_, Focus::Right, _) => KEYS_RIGHT,
     };
+
+    // The endpoint chooser outranks everything, for the reason a confirm does:
+    // it is the only thing the keyboard will respond to. Its keys go beside the
+    // question rather than in the hint line, because four answers to one
+    // question read as one thing and a question with its answers elsewhere reads
+    // as two.
+    if let Some((long, short)) = app.pending_choice() {
+        let badge = Span::styled(
+            " endpoint ",
+            Style::default()
+                .bg(ACCENT)
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        );
+        let width = area.width as usize;
+        // In order of what is worth losing first, and it is never the keys: the
+        // binary is already on screen in the row the cursor is on, whereas the
+        // four descriptions are on screen nowhere else -- and this is the one
+        // prompt in the TUI where a wrong key changes what every *future*
+        // session may reach.
+        let mut chosen = Vec::new();
+        for (subject, described) in [(&long, true), (&short, true), (&short, false)] {
+            chosen = vec![badge.clone(), Span::raw(format!(" {subject}   "))];
+            chosen.extend(hint_spans(KEYS_CHOICE, described));
+            if span_width(&chosen) <= width {
+                break;
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(chosen)), area);
+        return;
+    }
 
     // A pending question outranks both the hints and any status message: it is
     // the only thing the keyboard will respond to.
@@ -1981,6 +2098,122 @@ diff --git a/b b/b
     }
 
     /// A hint line that does not fit is clipped mid-word, which reads as broken.
+    fn denial(at: u64, subject: &str, reason: Option<&str>) -> crate::events::Event {
+        crate::events::Event {
+            at,
+            class: "NET:OPEN".into(),
+            severity: crate::events::Severity::Medium,
+            verdict: crate::events::Verdict::Denied,
+            subject: subject.into(),
+            policy: None,
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    /// The feed's rows are acted on, not just read, so which one is selected has
+    /// to be visible -- and the feed's own keys have to be the ones offered.
+    #[test]
+    fn the_feed_draws_a_cursor_and_offers_its_own_keys() {
+        let mut app = app_with_session();
+        app.views
+            .insert("readme-fix".into(), crate::tui::RightView::Events);
+        app.events.insert(
+            "readme-fix".into(),
+            crate::tui::Cached::new(Ok(vec![
+                denial(
+                    1,
+                    "/usr/bin/curl(9) -> pastebin.com:443",
+                    Some("not allowed"),
+                ),
+                denial(2, "/usr/bin/git(9) -> github.com:443", None),
+            ])),
+        );
+
+        let body = render(&mut app, 120, 24).join("\n");
+        assert!(body.contains("pastebin.com:443"), "{body}");
+        // The bar sits against the selected row and nothing else.
+        let bar: Vec<&str> = body.lines().filter(|l| l.contains('\u{258c}')).collect();
+        assert_eq!(bar.len(), 2, "the row and its reason, one block: {bar:?}");
+        assert!(bar[0].contains("pastebin.com:443"), "{bar:?}");
+        assert!(bar[1].contains("not allowed"), "{bar:?}");
+        assert!(
+            !body.contains("\u{258c} 00:00:02"),
+            "not the other row: {body}"
+        );
+
+        // And the hints say what j/k does here, which is not what it does
+        // anywhere else.
+        assert!(body.contains("j/k select"), "{body}");
+        assert!(body.contains("e allow/block"), "{body}");
+    }
+
+    /// Four answers to one question, beside the question. A question whose
+    /// answers are somewhere else reads as two things.
+    #[test]
+    fn the_chooser_puts_its_four_keys_beside_the_endpoint() {
+        let mut app = app_with_session();
+        app.views
+            .insert("readme-fix".into(), crate::tui::RightView::Events);
+        app.events.insert(
+            "readme-fix".into(),
+            crate::tui::Cached::new(Ok(vec![denial(
+                1,
+                "/usr/bin/curl(9) -> pastebin.com:443",
+                None,
+            )])),
+        );
+        app.on_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('e'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+
+        let footer = |app: &mut App, w: u16| -> String {
+            let rows = render(app, w, 24);
+            for row in &rows {
+                assert!(row.chars().count() <= w as usize, "overflowed: {row}");
+            }
+            rows.iter()
+                .find(|r| r.contains("endpoint "))
+                .unwrap_or_else(|| panic!("no chooser: {}", rows.join("\n")))
+                .clone()
+        };
+
+        // Wide: everything, including which binary was denied and what all four
+        // keys do.
+        let wide = footer(&mut app, 160);
+        assert!(wide.contains("pastebin.com:443"), "{wide}");
+        assert!(wide.contains("/usr/bin/curl"), "{wide}");
+        for k in [
+            "a allow here",
+            "b block here",
+            "A allow always",
+            "B block always",
+            "esc cancel",
+        ] {
+            assert!(wide.contains(k), "{k} missing: {wide}");
+        }
+
+        // The shedding order, asserted as a property rather than at a tuned
+        // width: the binary goes before the descriptions do. It is on screen in
+        // the row the cursor is on; what `B` means is on screen nowhere else.
+        for w in (40..=180).step_by(2) {
+            let f = footer(&mut app, w);
+            assert!(
+                f.contains("pastebin.com:443"),
+                "{w}: lost the endpoint: {f}"
+            );
+            assert!(
+                !f.contains("/usr/bin/curl") || f.contains("B block always"),
+                "{w}: kept the binary and dropped what the keys mean: {f}"
+            );
+        }
+
+        // And the keys themselves are the last thing standing.
+        let tiny = footer(&mut app, 60);
+        assert!(!tiny.contains("block always"), "{tiny}");
+        assert!(tiny.contains('B'), "{tiny}");
+    }
+
     /// The descriptions go first; the keys are the part worth having.
     #[test]
     fn the_hints_shed_their_descriptions_before_they_overflow() {

@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use openshell_client::{CreateOpts, Error as OsError, OpenShell, PolicyRevision, PolicyUpdate};
 
+use crate::endpoints;
 use crate::events;
 use crate::forge;
 use crate::policy;
@@ -213,6 +214,59 @@ pub struct Created {
     pub warnings: Vec<String>,
 }
 
+/// Apply the global allow and block lists to a sandbox that has just been made.
+///
+/// A failed *block* fails the create. The two directions are not symmetric and
+/// pretending they are would be the worst kind of bug this tool can have: an
+/// allow that did not land leaves a session that cannot reach something, which
+/// the events pane will say out loud the moment the agent tries; a block that
+/// did not land leaves a session that *can* reach something the user asked to be
+/// unreachable, and nothing will ever mention it again. So the first is a
+/// warning and the second is fatal.
+///
+/// Costs one `policy update --wait` -- about six seconds -- and only when the
+/// lists are not empty, which is the common case for anyone who has never
+/// touched them.
+fn impose_lists(
+    client: &dyn OpenShell,
+    sandbox: &str,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let lists = match endpoints::Lists::load() {
+        Ok(l) => l,
+        // An unreadable list is not a reason to refuse to create a session, but
+        // it is a reason to say so: the session will not have the rules its
+        // owner thinks every session has.
+        Err(e) => {
+            warnings.push(format!(
+                "could not read the global endpoint lists, so none were applied: {e}"
+            ));
+            return Ok(());
+        }
+    };
+    let updates = lists.updates();
+    if updates.is_empty() {
+        return Ok(());
+    }
+
+    for update in &updates {
+        let Err(e) = client.policy_update(sandbox, update) else {
+            continue;
+        };
+        if !update.remove_endpoints.is_empty() {
+            return Err(format!(
+                "the global block list could not be applied, so {} would have been reachable: {e}",
+                update.remove_endpoints.join(", ")
+            ));
+        }
+        warnings.push(format!(
+            "the global allow list could not be applied, so {} is not reachable: {e}",
+            update.add_endpoints.join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Create a sandbox, clone the repository, cut the work branch, start the agent.
 ///
 /// The order matters and is the reason this is one function rather than steps a
@@ -283,6 +337,19 @@ pub fn create(
         s.state = State::Failed;
         save(s, &mut warnings);
         return Err(e.to_string());
+    }
+
+    // The global lists, imposed before anything runs inside the sandbox.
+    //
+    // Here rather than by editing the policy before `sandbox create`, because
+    // `--policy` may be the user's own YAML file and this has to work whatever
+    // shape it is in. The window between the sandbox existing and the rules
+    // landing is real, and it is empty: nothing is launched in it until the
+    // seeder below.
+    if let Err(e) = impose_lists(client, &s.sandbox, &mut warnings) {
+        s.state = State::Failed;
+        save(s, &mut warnings);
+        return Err(e);
     }
 
     s.state = State::Seeding;

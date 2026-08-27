@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use openshell_client::{Policy, PolicyRevision, PolicyUpdate};
 
+use crate::endpoints::Lists;
 use crate::pane;
 
 /// A policy shipped with the binary, selectable by name.
@@ -243,7 +244,7 @@ pub fn preset_rule_names(policy: &Policy, preset: &Preset) -> Vec<String> {
 /// Network first: it is the section that can be changed while the agent runs,
 /// and the one worth reading. Filesystem and process come last, under a notice,
 /// because they are frozen at creation -- and the gateway does not say so.
-pub fn render(rev: &PolicyRevision, template: Option<&str>) -> String {
+pub fn render(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> String {
     let mut out = String::new();
 
     pane::section(&mut out, "policy");
@@ -300,8 +301,72 @@ pub fn render(rev: &PolicyRevision, template: Option<&str>) -> String {
     };
 
     render_network(&mut out, policy);
+    render_lists(&mut out, policy, lists);
     render_locked(&mut out, policy);
     out
+}
+
+/// The global allow and block lists, and whether this sandbox reflects them.
+///
+/// Drawn here because this is the pane someone opens to answer "what may this
+/// reach?", and a standing decision that is applied to every new session but
+/// visible in no pane is exactly the kind of state that turns into a bug report
+/// about the gateway. Omitted entirely when the lists are empty, which is the
+/// common case and does not need a heading saying so.
+///
+/// The third column is the one worth having. A list entry only describes what a
+/// *new* session gets; this session may have been created before the entry
+/// existed, or moved since with `e`, `w` or `t` -- so each row says whether the
+/// policy above actually agrees.
+fn render_lists(out: &mut String, policy: &Policy, lists: &Lists) {
+    if lists.is_empty() {
+        return;
+    }
+    let present = |endpoint: &str| {
+        policy
+            .network_policies
+            .values()
+            .any(|r| r.endpoints.iter().any(|e| e.host_port() == endpoint))
+    };
+
+    out.push('\n');
+    pane::section(out, "global lists - applied to every new session");
+
+    for a in &lists.allow {
+        let state = if present(&a.endpoint) {
+            "in this policy"
+        } else {
+            "NOT in this policy"
+        };
+        pane::field(out, "allow", format!("{}  {state}", a.endpoint));
+        for b in &a.binaries {
+            pane::field(out, "", b.clone());
+        }
+    }
+    for e in &lists.block {
+        // Reversed, and deliberately not "not in this policy": for a block,
+        // absent is the outcome asked for, and phrasing it as a negative would
+        // make the healthy case read as the alarming one.
+        let state = if present(e) {
+            "STILL in this policy"
+        } else {
+            "gone from this policy"
+        };
+        pane::field(out, "block", format!("{e}  {state}"));
+    }
+
+    // The thing "blacklist" invites people to assume, said once where it will
+    // be read. There is no deny-overrides-allow layer at L4: an endpoint is
+    // unreachable unless a rule names it, so a block is a removal and blocking
+    // something no template grants changes nothing.
+    pane::notice(
+        out,
+        "a block removes an endpoint; it is not a deny that outranks an allow, so",
+    );
+    pane::notice(
+        out,
+        "blocking something no policy grants was already the case and does nothing",
+    );
 }
 
 fn render_network(out: &mut String, policy: &Policy) {
@@ -429,6 +494,13 @@ mod tests {
     use super::*;
     use openshell_client::{Binary, Endpoint, MethodPath, NetworkPolicy, Rule};
 
+    /// Every test here but [`the_global_lists_are_shown_against_this_policy`] is
+    /// about the sandbox's own rules, so the lists go through a shim rather than
+    /// a third argument at twenty call sites.
+    fn render(rev: &PolicyRevision, template: Option<&str>) -> String {
+        super::render(rev, template, &Lists::default())
+    }
+
     fn revision(policy: Option<Policy>) -> PolicyRevision {
         serde_json::from_value(serde_json::json!({
             "version": 1,
@@ -442,6 +514,54 @@ mod tests {
             r
         })
         .unwrap()
+    }
+
+    /// A standing decision applied to every new session but visible in no pane
+    /// is the kind of state that turns into a bug report about the gateway. The
+    /// third column is the point: a list entry describes what a *new* session
+    /// gets, and this session may predate it or have moved since.
+    #[test]
+    fn the_global_lists_are_shown_against_this_policy() {
+        let mut lists = Lists::default();
+        lists.allow("pastebin.com:443", vec!["/usr/bin/curl".into()]);
+        // One the policy still grants, and one it never did.
+        lists.block("registry.npmjs.org:443");
+        lists.block("nowhere.example.com:443");
+
+        let body = pane::to_plain(&super::render(
+            &revision(Some(policy_with("npm", "registry.npmjs.org"))),
+            Some("net-open"),
+            &lists,
+        ));
+
+        assert!(body.contains("global lists"), "{body}");
+        // Asked for and not there: the allow entry postdates this sandbox.
+        assert!(
+            body.contains("pastebin.com:443  NOT in this policy"),
+            "{body}"
+        );
+        assert!(body.contains("/usr/bin/curl"), "{body}");
+        // Asked to go and still here, which is the row worth noticing.
+        assert!(
+            body.contains("registry.npmjs.org:443  STILL in this policy"),
+            "{body}"
+        );
+        // Asked to go and gone. Phrased as the outcome, not as an absence: for a
+        // block, absent is what was wanted, and "not in this policy" would make
+        // the healthy case read as the alarming one.
+        assert!(
+            body.contains("nowhere.example.com:443  gone from this policy"),
+            "{body}"
+        );
+        // And the thing "blacklist" invites people to assume, said out loud.
+        assert!(body.contains("not a deny that outranks an allow"), "{body}");
+    }
+
+    /// Empty lists are the common case and do not need a heading saying so.
+    #[test]
+    fn empty_global_lists_add_nothing_to_the_pane() {
+        let body = render(&revision(Some(Policy::default())), Some("net-open"));
+        assert!(!body.contains("global lists"), "{body}");
     }
 
     #[test]

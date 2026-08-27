@@ -14,6 +14,8 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::widgets::ListState;
 
 use crate::config::Config;
+use crate::endpoints::{self, Listed, Lists};
+use crate::events::Target;
 use crate::ops;
 use crate::policy;
 use crate::repos::{self, LocalRepo};
@@ -263,6 +265,11 @@ pub struct App {
     /// tick, it should keep saying why.
     policies: HashMap<String, Cached<Result<PolicyRevision, String>>>,
     events: HashMap<String, Cached<Result<Vec<crate::events::Event>, String>>>,
+    /// Which event the feed's cursor is on, per session. An index rather than a
+    /// key because that is what the renderer needs; kept pointing at the same
+    /// *event* across a refetch by [`App::on_update`], since the feed grows at
+    /// the top.
+    event_cursor: HashMap<String, usize>,
     /// Sessions whose content is currently being fetched, so the same request
     /// is not queued repeatedly while the worker is busy. One per kind, so a
     /// slow diff does not stall the stat column.
@@ -308,6 +315,19 @@ pub struct App {
     /// policy does not ask: it is reversible with `t`, and its effect is
     /// confined to the sandbox.
     confirm: Option<(String, Confirm)>,
+    /// A decision about one endpoint, waiting on a keystroke.
+    choice: Option<Choice>,
+    /// The global allow and block lists, as they are on disk. Held rather than
+    /// re-read, because the policy pane draws them on every frame and they only
+    /// change when this process changes them -- see [`App::decide`], which
+    /// writes the file and this copy together.
+    lists: Lists,
+    /// Where those lists live. A field rather than a call to
+    /// [`Lists::default_path`] at the point of writing, so a test that exercises
+    /// a global decision writes to a temporary file instead of to the
+    /// developer's own configuration -- which is what the first version of that
+    /// test did.
+    lists_path: PathBuf,
     publish_request: Option<Session>,
     publishing: Option<String>,
     /// Set by the key handler; sent by the event loop, which owns the worker.
@@ -342,6 +362,29 @@ pub struct App {
     create_request: Option<Box<ops::Draft>>,
 }
 
+/// A decision about one endpoint, waiting on a keystroke.
+///
+/// Not a [`Confirm`]. That is a yes-or-no about an action already chosen; this
+/// is the choice itself, and it has four answers -- allow or block, here or
+/// everywhere. Asking it as two questions in a row would be worse than asking it
+/// as one, because the first answer would have no visible consequence.
+#[derive(Debug, Clone)]
+struct Choice {
+    session: Session,
+    target: Target,
+    /// Whether the endpoint is in this sandbox's policy at all, which is what a
+    /// block acts on. `None` when the policy has not been read, which is what
+    /// keeps "it was not reachable anyway" an observation rather than a guess.
+    present: Option<bool>,
+    /// Whether it is reachable *by the binary this event named*, which is what
+    /// an allow acts on. Not the same question: `github.com:443` is reachable by
+    /// git under `feature-work` and denied to curl, and the whole reason this
+    /// tool exists is that those are different facts.
+    reachable: Option<bool>,
+    /// Which global list already names it, if either.
+    listed: Option<Listed>,
+}
+
 /// An action held pending confirmation.
 #[derive(Debug, Clone)]
 enum Confirm {
@@ -358,13 +401,28 @@ enum Confirm {
 impl App {
     fn new(cfg: Config) -> Self {
         let intervals = Intervals::from_config(&cfg);
-        App {
+        // Read once, here, rather than on every frame that draws them. A file
+        // that will not parse is reported and treated as empty: the lists are a
+        // convenience, and refusing to open the TUI over them would be refusing
+        // to show the sessions too.
+        let (lists, unreadable) = match Lists::load() {
+            Ok(l) => (l, None),
+            Err(e) => (
+                Lists::default(),
+                Some(format!(
+                    "could not read {}: {e}",
+                    Lists::default_path().display()
+                )),
+            ),
+        };
+        let mut app = App {
             sessions: Vec::new(),
             list_state: ListState::default(),
             diffs: HashMap::new(),
             polls: HashMap::new(),
             policies: HashMap::new(),
             events: HashMap::new(),
+            event_cursor: HashMap::new(),
             diff_in_flight: None,
             poll_in_flight: None,
             policy_in_flight: None,
@@ -390,6 +448,9 @@ impl App {
             attach_request: None,
             repolicy_request: None,
             confirm: None,
+            choice: None,
+            lists,
+            lists_path: Lists::default_path(),
             publish_request: None,
             publishing: None,
             destroy_request: None,
@@ -405,7 +466,11 @@ impl App {
             providers_request: false,
             inspect_request: None,
             create_request: None,
+        };
+        if let Some(why) = unreadable {
+            app.fail(why);
         }
+        app
     }
 
     fn selected(&self) -> Option<&Session> {
@@ -472,11 +537,21 @@ impl App {
         u16::try_from(self.right_lines.saturating_sub(self.right_height)).unwrap_or(u16::MAX)
     }
 
-    /// Scroll the right pane, clamped to the measured content.
+    /// Move within the right pane: the cursor in the events feed, the scroll
+    /// offset in every other view.
+    ///
+    /// One rule rather than a second set of keys. The feed is the one pane whose
+    /// rows are *acted on* rather than only read, so what `j` moves there is the
+    /// selection; the renderer scrolls to keep it in sight, which makes the two
+    /// indistinguishable until the feed is longer than the pane.
     ///
     /// `isize` rather than `i16` so callers can pass a saturating "to the top"
     /// or "to the bottom" without knowing the content height.
     fn scroll_by(&mut self, delta: isize) {
+        if self.right_view() == RightView::Events {
+            self.move_event_cursor(delta);
+            return;
+        }
         let Some(name) = self.selected_name() else {
             return;
         };
@@ -573,6 +648,281 @@ impl App {
         }
     }
 
+    /// The global allow and block lists, for the pane that draws them.
+    pub fn lists(&self) -> &Lists {
+        &self.lists
+    }
+
+    /// Which row of the feed the cursor is on.
+    ///
+    /// Clamped on read rather than on write, because the feed can shrink
+    /// underneath a stored index -- a session destroyed and recreated under the
+    /// same name starts its history again -- and an index past the end would
+    /// draw a highlight on nothing.
+    pub fn event_cursor(&self, name: &str) -> usize {
+        let stored = self.event_cursor.get(name).copied().unwrap_or(0);
+        match self.feed(name) {
+            Some(events) if !events.is_empty() => stored.min(events.len() - 1),
+            _ => 0,
+        }
+    }
+
+    /// A session's feed, if it has come back and was readable.
+    fn feed(&self, name: &str) -> Option<&[crate::events::Event]> {
+        match self.events(name)? {
+            Ok(events) => Some(events),
+            Err(_) => None,
+        }
+    }
+
+    /// The event the cursor is on.
+    fn selected_event(&self, name: &str) -> Option<&crate::events::Event> {
+        self.feed(name)?.get(self.event_cursor(name))
+    }
+
+    fn move_event_cursor(&mut self, delta: isize) {
+        let Some(name) = self.selected_name() else {
+            return;
+        };
+        let Some(len) = self.feed(&name).map(<[_]>::len).filter(|n| *n > 0) else {
+            return;
+        };
+        let at = (self.event_cursor(&name) as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.event_cursor.insert(name, at);
+    }
+
+    /// Whether a sandbox's policy names an endpoint at all.
+    ///
+    /// What a block acts on: `--remove-endpoint` takes it away from every binary
+    /// at once, because `host:port` is the only granularity it has.
+    fn endpoint_present(&self, name: &str, endpoint: &str) -> Option<bool> {
+        match self.policy(name)? {
+            Ok(rev) => rev.policy.as_ref().map(|p| {
+                p.network_policies
+                    .values()
+                    .any(|r| r.endpoints.iter().any(|e| e.host_port() == endpoint))
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// Whether an endpoint is reachable by the binary an event named.
+    ///
+    /// What an allow acts on, and a different question from
+    /// [`App::endpoint_present`]: a rule grants its endpoints to *its* binaries,
+    /// so `github.com:443` being in the policy says nothing about whether curl
+    /// may reach it. Reporting the endpoint as already allowed on the strength
+    /// of git's rule is exactly the bug this pane exists to make visible.
+    fn reachable_by(&self, name: &str, target: &Target) -> Option<bool> {
+        match self.policy(name)? {
+            Ok(rev) => rev.policy.as_ref().map(|p| {
+                p.network_policies.values().any(|r| {
+                    r.endpoints.iter().any(|e| e.host_port() == target.endpoint)
+                        && match &target.binary {
+                            Some(b) => r.binaries.iter().any(|rb| rb.path == *b),
+                            // Nothing to check against; the endpoint being there
+                            // is all that can be said.
+                            None => true,
+                        }
+                })
+            }),
+            Err(_) => None,
+        }
+    }
+
+    /// What the endpoint chooser is asking, at two widths.
+    ///
+    /// `(long, short)`. The footer has one line and three things competing for
+    /// it -- the endpoint, the binary and what the four keys mean -- so it needs
+    /// to know what may be dropped rather than being handed a string it can only
+    /// clip. The binary goes first: it is already on screen in the row the
+    /// cursor is on, and the key descriptions are on screen nowhere else.
+    pub fn pending_choice(&self) -> Option<(String, String)> {
+        let c = self.choice.as_ref()?;
+        let short = c.target.endpoint.clone();
+
+        let mut long = short.clone();
+        if let Some(b) = &c.target.binary {
+            long.push_str(&format!(" for {b}"));
+        }
+        // What is already true, so the four keys are a choice between outcomes
+        // rather than a guess. Silent when the policy has not come back: saying
+        // nothing is better than saying something unfounded about egress.
+        match (c.reachable, c.present) {
+            (Some(true), _) => long.push_str("  -- reachable now"),
+            (Some(false), Some(true)) => long.push_str("  -- endpoint present, this binary denied"),
+            (Some(false), _) => long.push_str("  -- denied now"),
+            (None, _) => {}
+        }
+        if let Some(l) = c.listed {
+            long.push_str(&format!("  -- {}", l.label()));
+        }
+        Some((long, short))
+    }
+
+    /// Offer the four decisions about the event under the cursor.
+    fn open_choice(&mut self) {
+        let Some(session) = self.selected().cloned() else {
+            return;
+        };
+        if self.repolicy_in_flight.is_some() {
+            self.fail("a policy change is already in flight");
+            return;
+        }
+        let Some(event) = self.selected_event(&session.name) else {
+            self.fail("nothing to act on: the feed is empty");
+            return;
+        };
+        // A `CONFIG:VALIDATED` warning is a sentence, not a decision about an
+        // endpoint, and there is one keystroke between a wrong answer here and a
+        // rule at the gateway. See `Event::target`.
+        let Some(target) = event.target() else {
+            self.fail("that event is not about an endpoint");
+            return;
+        };
+        self.choice = Some(Choice {
+            present: self.endpoint_present(&session.name, &target.endpoint),
+            reachable: self.reachable_by(&session.name, &target),
+            listed: self.lists.verdict(&target.endpoint),
+            target,
+            session,
+        });
+    }
+
+    fn on_choice_key(&mut self, key: KeyEvent) {
+        let Some(choice) = self.choice.take() else {
+            return;
+        };
+        // Lowercase is this session, uppercase is every session -- the same
+        // shape as `P` and `D`, where the capital is the one that reaches
+        // further than the keystroke.
+        let (allow, global) = match key.code {
+            KeyCode::Char('a') => (true, false),
+            KeyCode::Char('b') => (false, false),
+            KeyCode::Char('A') => (true, true),
+            KeyCode::Char('B') => (false, true),
+            _ => {
+                self.note("cancelled");
+                return;
+            }
+        };
+        self.repolicy_request = self.decide(choice, allow, global);
+    }
+
+    /// Act on a decision: write the global list if it was a global one, and
+    /// return the live change to make, if there is one to make.
+    fn decide(
+        &mut self,
+        choice: Choice,
+        allow: bool,
+        global: bool,
+    ) -> Option<(Session, Box<PolicyUpdate>, String)> {
+        let Choice {
+            session,
+            target,
+            present,
+            reachable,
+            ..
+        } = choice;
+        let endpoint = target.endpoint;
+
+        // An endpoint rule with no binaries grants nothing, so an allow needs
+        // one. An L7 decision names none -- and does not need to: the proxy
+        // could only inspect that request because the endpoint was already
+        // reachable, so what it denied was the *path*, which is not something
+        // this key changes. Saying that is better than issuing a rule that
+        // quietly does nothing.
+        let binaries: Vec<String> = match (&target.binary, allow) {
+            (Some(b), true) => vec![b.clone()],
+            (None, true) => {
+                self.fail(format!(
+                    "{endpoint} was decided by a rule that names no binary, so there is nothing to bind an allow to"
+                ));
+                return None;
+            }
+            (_, false) => Vec::new(),
+        };
+
+        // The global list is written first, and a failure to write it stops
+        // everything. "Always" that silently turned out to be "here, once" is
+        // the worse outcome: only the refusal is visible.
+        if global {
+            let (ep, bins) = (endpoint.clone(), binaries.clone());
+            let written = endpoints::update_at(
+                &self.lists_path,
+                self.lists_path.with_extension("lock"),
+                move |l| {
+                    if allow {
+                        l.allow(&ep, bins);
+                    } else {
+                        l.block(&ep);
+                    }
+                },
+            );
+            if let Err(e) = written {
+                self.fail(format!("could not write the global endpoint lists: {e}"));
+                return None;
+            }
+            // The copy the pane draws, kept in step with the file rather than
+            // re-read from it.
+            if allow {
+                self.lists.allow(&endpoint, binaries.clone());
+            } else {
+                self.lists.block(&endpoint);
+            }
+        }
+
+        let also = if global {
+            match allow {
+                true => "; on the global allow list from now on",
+                false => "; on the global block list from now on",
+            }
+        } else {
+            ""
+        };
+
+        // Two round trips that would change nothing, named rather than made.
+        // Both come *after* the write, because "already true here" is no reason
+        // not to record it for every session after this one.
+        if allow && reachable == Some(true) {
+            self.note(format!(
+                "{endpoint} is already reachable from {}{also}",
+                session.name
+            ));
+            return None;
+        }
+        if !allow && present == Some(false) {
+            self.note(format!(
+                "{endpoint} was not in {}'s policy anyway{also}",
+                session.name
+            ));
+            return None;
+        }
+
+        let (update, label) = if allow {
+            (
+                endpoints::allow_update(&endpoint, &binaries),
+                format!("allowed: {endpoint} for {}{also}", binaries.join(", ")),
+            )
+        } else {
+            (
+                endpoints::block_update(&endpoint),
+                format!("blocked: {endpoint}{also}"),
+            )
+        };
+
+        self.repolicy_in_flight = Some(session.name.clone());
+        // Switching to the policy pane makes the consequence visible, which is
+        // the only reason a change to egress is safe to bind to one key -- the
+        // same bargain `w` and `t` make.
+        self.views.insert(session.name.clone(), RightView::Policy);
+        self.note(format!(
+            "{} ... the gateway takes a few seconds to load a revision",
+            if allow { "allowing" } else { "blocking" }
+        ));
+        Some((session, Box::new(update), label))
+    }
+
     /// Widen or tighten the selected session's egress.
     ///
     /// Only the network section, and deliberately so: the filesystem and
@@ -631,6 +981,7 @@ impl App {
         self.polls.remove(name);
         self.policies.remove(name);
         self.events.remove(name);
+        self.event_cursor.remove(name);
     }
 
     /// Drop a session from the list, along with everything cached for it.
@@ -957,6 +1308,13 @@ impl App {
             }
             return;
         }
+        // Then the endpoint chooser, for the same reason: `a` is attach
+        // everywhere else in the TUI, and it must not both answer this and open
+        // a terminal.
+        if self.choice.is_some() {
+            self.on_choice_key(key);
+            return;
+        }
         // Then the create flow, for the same reason: a character typed into the
         // task must not also move the session list.
         if self.create.is_some() {
@@ -997,6 +1355,16 @@ impl App {
             }
             (KeyCode::Char('t'), _) if self.right_view() == RightView::Policy => {
                 self.repolicy_request = self.request_repolicy(false);
+            }
+            // Act on the endpoint the feed's cursor is on. Bound only while the
+            // events pane is showing, for the reason `w` and `t` are bound only
+            // in the policy pane: the thing being decided about is on screen
+            // when the key is pressed.
+            //
+            // Not `enter`, which hands the whole terminal to the agent from
+            // every pane and is worth keeping unambiguous.
+            (KeyCode::Char('e'), _) if self.right_view() == RightView::Events => {
+                self.open_choice();
             }
             // Entering a session hands the whole terminal over to its agent,
             // full width and with no key routing in between -- the pane shows
@@ -1085,6 +1453,18 @@ impl App {
             Update::Events { session, result } => {
                 if self.events_in_flight.as_deref() == Some(session.as_str()) {
                     self.events_in_flight = None;
+                }
+                // The feed grows at the top, so a row index is not a handle on
+                // an event: a couple of arrivals between two keystrokes and the
+                // cursor is on something else, which is intolerable for a pane
+                // whose keys act on whatever it is pointing at. Re-anchored by
+                // identity -- the same notion of sameness the kept file dedupes
+                // on, so the cursor cannot follow an event the merge discarded.
+                if let Some(was) = self.selected_event(&session).map(crate::events::Event::key)
+                    && let Ok(now) = &*result
+                {
+                    let at = now.iter().position(|e| e.key() == was).unwrap_or(0);
+                    self.event_cursor.insert(session.clone(), at);
                 }
                 self.events.insert(session, Cached::new(*result));
             }
@@ -1243,6 +1623,7 @@ impl App {
         self.polls.retain(|name, _| live.contains(name));
         self.policies.retain(|name, _| live.contains(name));
         self.events.retain(|name, _| live.contains(name));
+        self.event_cursor.retain(|name, _| live.contains(name));
         self.views.retain(|name, _| live.contains(name));
         self.scroll.retain(|name, _| live.contains(name));
 
@@ -1745,25 +2126,332 @@ mod tests {
         assert_eq!(app.right_scroll(), 5);
     }
 
-    /// Every view keeps its own offset, not just the first two. A shared one
-    /// would drop the user halfway down a policy after reading a long diff.
+    /// Every scrolling view keeps its own offset, not just the first two. A
+    /// shared one would drop the user halfway down a policy after reading a long
+    /// diff.
+    ///
+    /// The events feed is not one of them: there the keys move a cursor and the
+    /// renderer derives the offset from it, which the test below covers.
     #[test]
-    fn all_four_views_scroll_independently() {
+    fn every_scrolling_view_scrolls_independently() {
         let mut app = app_with(&["a"]);
         app.focus = Focus::Right;
         app.right_lines = 500;
         app.right_height = 10;
 
-        for (i, _) in RightView::ORDER.iter().enumerate() {
+        let scrolling: Vec<RightView> = RightView::ORDER
+            .into_iter()
+            .filter(|v| *v != RightView::Events)
+            .collect();
+        assert_eq!(scrolling.len(), 3);
+
+        for (i, view) in scrolling.iter().enumerate() {
+            app.views.insert("a".into(), *view);
             app.scroll_by(i as isize + 1);
-            app.cycle_right_view(RightView::next);
         }
-        // Back at the start after a full cycle, with each offset intact.
-        for (i, view) in RightView::ORDER.iter().enumerate() {
-            assert_eq!(app.right_view(), *view);
+        for (i, view) in scrolling.iter().enumerate() {
+            app.views.insert("a".into(), *view);
             assert_eq!(app.right_scroll(), i as u16 + 1, "{view:?}");
-            app.cycle_right_view(RightView::next);
         }
+    }
+
+    // ---- the events feed's cursor, and the four decisions it offers ----
+
+    fn event(at: u64, subject: &str, reason: Option<&str>) -> crate::events::Event {
+        crate::events::Event {
+            at,
+            class: "NET:OPEN".into(),
+            severity: crate::events::Severity::Medium,
+            verdict: crate::events::Verdict::Denied,
+            subject: subject.into(),
+            policy: None,
+            reason: reason.map(str::to_string),
+        }
+    }
+
+    /// An app on the events pane of session "a", with a feed and a policy.
+    ///
+    /// The global lists are pointed at a temporary file, so a test that presses
+    /// `A` or `B` cannot write to the developer's own configuration. Named by
+    /// thread as well as process, because the suite runs these in parallel.
+    fn app_on_feed(feed: Vec<crate::events::Event>, rev: Option<PolicyRevision>) -> App {
+        let mut app = app_with(&["a"]);
+        app.lists_path = std::env::temp_dir().join(format!(
+            "sbx-test-endpoints-{}-{:?}.json",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_file(&app.lists_path);
+        app.focus = Focus::Right;
+        app.views.insert("a".into(), RightView::Events);
+        app.events.insert("a".into(), Cached::new(Ok(feed)));
+        if let Some(rev) = rev {
+            app.policies.insert("a".into(), Cached::new(Ok(rev)));
+        }
+        app
+    }
+
+    /// A revision granting `host:port` to `binary`, which is the shape every
+    /// question about reachability is asked against.
+    fn policy_granting(host: &str, port: u16, binary: &str) -> PolicyRevision {
+        let mut rev: PolicyRevision = serde_json::from_value(serde_json::json!({
+            "version": 1, "active_version": 1, "hash": "abc",
+        }))
+        .unwrap();
+        let mut p = openshell_client::Policy::default();
+        p.network_policies.insert(
+            "r".into(),
+            openshell_client::NetworkPolicy {
+                name: Some("r".into()),
+                endpoints: vec![openshell_client::Endpoint {
+                    host: host.into(),
+                    port,
+                    ..Default::default()
+                }],
+                binaries: vec![openshell_client::Binary {
+                    path: binary.into(),
+                }],
+            },
+        );
+        rev.policy = Some(p);
+        rev
+    }
+
+    /// In the feed the movement keys move a selection, not the viewport, and it
+    /// clamps at both ends like the session list does.
+    #[test]
+    fn the_feed_moves_a_cursor_rather_than_a_scroll_offset() {
+        let mut app = app_on_feed(
+            vec![
+                event(3, "/usr/bin/curl(1) -> c.com:443", None),
+                event(2, "/usr/bin/curl(1) -> b.com:443", None),
+                event(1, "/usr/bin/curl(1) -> a.com:443", None),
+            ],
+            None,
+        );
+        app.right_lines = 3;
+        app.right_height = 10;
+
+        assert_eq!(app.event_cursor("a"), 0, "the newest, which is the top");
+        app.on_key(key(KeyCode::Char('k')));
+        assert_eq!(app.event_cursor("a"), 0, "must not wrap past the top");
+
+        app.on_key(key(KeyCode::Char('j')));
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.event_cursor("a"), 2);
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.event_cursor("a"), 2, "must not wrap past the end");
+
+        assert_eq!(
+            app.right_scroll(),
+            0,
+            "the offset is the renderer's, derived from the cursor"
+        );
+
+        // `G` and `g` are the same movement writ large.
+        app.on_key(key(KeyCode::Char('g')));
+        assert_eq!(app.event_cursor("a"), 0);
+        app.on_key(key(KeyCode::Char('G')));
+        assert_eq!(app.event_cursor("a"), 2);
+    }
+
+    /// The feed grows at the top, so a row index is not a handle on an event.
+    /// Without re-anchoring, pressing `e` after a refetch acts on whatever
+    /// happened to land under the cursor in between.
+    #[test]
+    fn the_cursor_follows_its_event_when_the_feed_grows() {
+        let older = event(2, "/usr/bin/curl(1) -> b.com:443", None);
+        let oldest = event(1, "/usr/bin/curl(1) -> a.com:443", None);
+        let mut app = app_on_feed(vec![older.clone(), oldest.clone()], None);
+
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.selected_event("a").unwrap().subject, oldest.subject);
+
+        // Two arrivals, newest first, pushing everything down two rows.
+        app.on_update(Update::Events {
+            session: "a".into(),
+            result: Box::new(Ok(vec![
+                event(4, "/usr/bin/curl(1) -> d.com:443", None),
+                event(3, "/usr/bin/curl(1) -> c.com:443", None),
+                older,
+                oldest.clone(),
+            ])),
+        });
+        assert_eq!(app.event_cursor("a"), 3, "moved with its event");
+        assert_eq!(app.selected_event("a").unwrap().subject, oldest.subject);
+
+        // And an event that has fallen out of the history entirely puts the
+        // cursor back on the newest rather than on an arbitrary neighbour.
+        app.on_update(Update::Events {
+            session: "a".into(),
+            result: Box::new(Ok(vec![event(9, "/usr/bin/curl(1) -> z.com:443", None)])),
+        });
+        assert_eq!(app.event_cursor("a"), 0);
+    }
+
+    /// `e` is bound only in the feed, for the reason `w` and `t` are bound only
+    /// in the policy pane: the thing being decided about has to be on screen.
+    #[test]
+    fn the_chooser_opens_only_from_the_feed_and_only_on_an_endpoint() {
+        let denial = event(1, "/usr/bin/curl(9) -> pastebin.com:443", None);
+
+        // Not the feed: `e` does nothing at all.
+        let mut app = app_on_feed(vec![denial.clone()], None);
+        app.views.insert("a".into(), RightView::Diff);
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(app.pending_choice().is_none());
+
+        // The feed, on a decision: it opens, and says what it is about.
+        let mut app = app_on_feed(vec![denial], None);
+        app.on_key(key(KeyCode::Char('e')));
+        let (q, short) = app.pending_choice().expect("the chooser");
+        assert!(q.contains("pastebin.com:443"), "{q}");
+        assert!(q.contains("/usr/bin/curl"), "{q}");
+        assert_eq!(
+            short, "pastebin.com:443",
+            "the form a narrow footer falls back to"
+        );
+
+        // Anything else takes it down without acting.
+        app.on_key(key(KeyCode::Char('x')));
+        assert!(app.pending_choice().is_none());
+        assert!(app.repolicy_request.is_none());
+
+        // The feed, on a `CONFIG:VALIDATED` warning, which is a sentence rather
+        // than a decision about an endpoint.
+        let mut warning = event(1, "'tls: terminate' is deprecated; use 'tls: skip'", None);
+        warning.class = "CONFIG:VALIDATED".into();
+        warning.verdict = crate::events::Verdict::Neutral;
+        let mut app = app_on_feed(vec![warning], None);
+        app.on_key(key(KeyCode::Char('e')));
+        assert!(app.pending_choice().is_none());
+        assert!(app.status_is_error, "and it says why");
+    }
+
+    /// The chooser owns the keyboard while it is up. `a` is attach everywhere
+    /// else in the TUI, and answering a question about egress must not also
+    /// hand the terminal to the agent.
+    #[test]
+    fn the_chooser_owns_the_keyboard() {
+        let mut app = app_on_feed(
+            vec![event(1, "/usr/bin/curl(9) -> pastebin.com:443", None)],
+            None,
+        );
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(app.attach_request.is_none(), "no terminal was handed over");
+        let (session, update, label) = app.repolicy_request.take().expect("a policy change");
+        assert_eq!(session.name, "a");
+        assert_eq!(update.add_endpoints, ["pastebin.com:443:full:rest:enforce"]);
+        assert_eq!(update.binaries, ["/usr/bin/curl"]);
+        assert!(update.remove_endpoints.is_empty());
+        assert!(label.contains("pastebin.com:443"), "{label}");
+        assert!(
+            !label.contains("global"),
+            "`a` is this session only: {label}"
+        );
+        // And the consequence is put on screen, which is what makes one key
+        // safe here.
+        assert_eq!(app.right_view(), RightView::Policy);
+    }
+
+    /// `b` removes the endpoint. There is no deny that outranks an allow at L4,
+    /// so a removal is the whole of what blocking can mean.
+    #[test]
+    fn blocking_removes_the_endpoint() {
+        let mut app = app_on_feed(
+            vec![event(1, "/usr/bin/git(9) -> github.com:443", None)],
+            Some(policy_granting("github.com", 443, "/usr/bin/git")),
+        );
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('b')));
+        let (_, update, label) = app.repolicy_request.take().expect("a policy change");
+        assert_eq!(update.remove_endpoints, ["github.com:443"]);
+        assert!(update.add_endpoints.is_empty());
+        assert!(update.binaries.is_empty(), "a removal is not per-binary");
+        assert!(label.contains("blocked"), "{label}");
+    }
+
+    /// An endpoint being in the policy says nothing about whether *this* binary
+    /// may reach it -- that difference is the whole premise of the tool, and
+    /// reporting "already reachable" on the strength of another rule's binaries
+    /// would refuse to fix the exact case the feed exists to show.
+    #[test]
+    fn an_allow_is_judged_against_the_binary_not_just_the_host() {
+        // github.com:443 is granted, but to git. curl was denied.
+        let mut app = app_on_feed(
+            vec![event(1, "/usr/bin/curl(9) -> github.com:443", None)],
+            Some(policy_granting("github.com", 443, "/usr/bin/git")),
+        );
+        app.on_key(key(KeyCode::Char('e')));
+        let (q, _) = app.pending_choice().unwrap();
+        assert!(q.contains("this binary denied"), "{q}");
+        app.on_key(key(KeyCode::Char('a')));
+        let (_, update, _) = app.repolicy_request.take().expect("a real change");
+        assert_eq!(update.binaries, ["/usr/bin/curl"]);
+
+        // Whereas the binary that already has it is told so, and nothing is
+        // sent.
+        let mut app = app_on_feed(
+            vec![event(1, "/usr/bin/git(9) -> github.com:443", None)],
+            Some(policy_granting("github.com", 443, "/usr/bin/git")),
+        );
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(app.repolicy_request.is_none());
+        assert!(
+            app.status.as_deref().unwrap().contains("already reachable"),
+            "{:?}",
+            app.status
+        );
+    }
+
+    /// An L7 decision names a method and a path, never a binary -- and an
+    /// endpoint rule with no binaries grants nothing. Issuing one anyway would
+    /// report a change that did nothing, which is the failure mode this whole
+    /// pane exists to prevent.
+    #[test]
+    fn an_allow_with_no_binary_to_bind_to_is_refused() {
+        let mut app = app_on_feed(vec![event(1, "GET httpbin.org:443/ip", None)], None);
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('a')));
+        assert!(app.repolicy_request.is_none());
+        assert!(app.status_is_error);
+        assert!(
+            app.status.as_deref().unwrap().contains("no binary"),
+            "{:?}",
+            app.status
+        );
+
+        // Blocking it is still perfectly meaningful: the endpoint goes.
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('b')));
+        let (_, update, _) = app.repolicy_request.take().expect("a removal");
+        assert_eq!(update.remove_endpoints, ["httpbin.org:443"]);
+    }
+
+    /// A round trip that would change nothing is named rather than made -- but
+    /// only after the global list has been written, because "already true here"
+    /// is no reason not to record it for every session after this one.
+    #[test]
+    fn a_change_that_would_do_nothing_here_is_still_recorded_globally() {
+        let mut app = app_on_feed(
+            vec![event(1, "/usr/bin/curl(9) -> pastebin.com:443", None)],
+            // pastebin is in no rule, so blocking it here is a no-op.
+            Some(policy_granting("github.com", 443, "/usr/bin/git")),
+        );
+        app.on_key(key(KeyCode::Char('e')));
+        app.on_key(key(KeyCode::Char('B')));
+
+        assert!(app.repolicy_request.is_none(), "nothing to send");
+        let note = app.status.clone().unwrap();
+        assert!(note.contains("not in a's policy anyway"), "{note}");
+        assert!(note.contains("global block list"), "{note}");
+        assert_eq!(
+            app.lists().verdict("pastebin.com:443"),
+            Some(Listed::Blocked),
+            "and it is on the list for every session after this one"
+        );
     }
 
     fn policy_with_registries(applied: bool) -> PolicyRevision {
