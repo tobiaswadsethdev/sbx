@@ -153,7 +153,10 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn spawn(client: CliClient) -> Self {
+    /// `roots` is where a repository scan looks. Resolved by the caller rather
+    /// than here: it depends on the config file and the working directory, and
+    /// neither is the worker's business to go and read between requests.
+    pub fn spawn(client: CliClient, roots: Vec<repos::Root>) -> Self {
         let (req_tx, req_rx) = channel::<Request>();
         let (up_tx, up_rx) = channel::<Update>();
 
@@ -202,7 +205,7 @@ impl Worker {
                         result: Box::new(ops::destroy(&client, &name)),
                         session: name,
                     },
-                    Request::ScanRepos => Update::Repos(repos::discover()),
+                    Request::ScanRepos => Update::Repos(repos::discover_in(&roots)),
                     Request::Inspect { path, branch } => Update::Inspected {
                         facts: Box::new(repos::inspect(&path, branch.as_deref())),
                         path,

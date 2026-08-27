@@ -67,7 +67,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-20 are done. What is left is the unscheduled list below.
+Increments 0-21 are done. What is left is the unscheduled list below.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -928,6 +928,64 @@ Increments 0-20 are done. What is left is the unscheduled list below.
   increment 17 did, 400 to 1500) buys time linearly and loses to the poll rate
   immediately. Keeping what has been seen is the only thing that scales.
 
+- **21. A config file** — DONE. `~/.config/sbx/config.toml`, beside the session
+  cache and the events history, holding the seven things that were flags on every
+  command: `gateway`, `repo`, `base`, `policy`, `providers`, `repo_roots` and
+  `refresh`. Everything optional, everything a *default* -- a flag wins, and so
+  does an explicit choice in the create form. `sbx config` shows what is in force
+  and marks each line `*` (from the file) or `-` (built in); `sbx config --init`
+  writes a commented starter file with every key commented out, so creating it
+  changes nothing.
+
+  **A file that cannot be read stops the command.** Unknown keys are rejected by
+  name (`unknown field 'polciy', expected one of ...`), a `policy` that is neither
+  a template nor a path is rejected against the template list, an empty
+  `providers = []` is rejected rather than read as "no credentials", and a blank
+  string is unset rather than a value. Every command refuses to run until it is
+  fixed -- except `sbx doctor`, which is the command you reach for when something
+  is wrong, so it reports the error as a failed check and carries on with the
+  built-in defaults. Silently ignoring a config someone wrote is the same failure
+  as the gateway reporting a policy it is not enforcing.
+
+  **`refresh` is one number, not six.** The five measured intervals from
+  increment 17 are related to each other -- the selected session polls faster
+  than the rest, the floor keeps a long list from becoming a stream of execs, a
+  diff has to keep up with the agent editing under it -- so `Intervals::scaled`
+  multiplies all of them by `refresh / 1s` and the relationships hold by
+  construction. `the_poll_budget_is_coherent` now runs over every value the
+  parser accepts rather than only the tuned set. The floor is 250ms because
+  `TICK` is the one interval that does *not* scale: below that the 100ms input
+  poll becomes the limit and the extra `git status` inside every sandbox buys
+  nothing. Measured against a live session: 41 execs in a 30s window at the
+  default, 13 at `refresh = "4s"`.
+
+  **Where a default replaces a heuristic, and where it does not.** `providers`
+  replaces the create form's guesswork outright, because an explicit list is a
+  better answer than any heuristic and merging the two would attach a credential
+  nobody asked for -- and a name the gateway does not have is a `warn` in
+  `sbx doctor`, which is the only command that both reads the file and can ask.
+  `base` goes the other way: the branch a checkout is sitting on is evidence about
+  *that* repository and a config entry is a guess about all of them, so it only
+  fills a detached HEAD. `repo` moves the picker's *cursor* rather than its
+  filter, so every other repository is still one keystroke away, and typing drops
+  the preference for good -- the background rescan calls `scanned` again, and
+  reapplying it then would pull the cursor off whatever was just filtered for.
+  `repo_roots` replaces the conventional places rather than adding to them, and
+  `SBX_REPO_ROOTS` still wins over it.
+
+  **A policy that is a path had to be offered in the TUI too.** The form's policy
+  field cycled `policy::TEMPLATES`, which cannot represent
+  `policy = "./strict.yaml"` -- and a form that quietly fell back to
+  `feature-work` would have created sessions under a different policy from
+  `sbx new`. The chooser now holds `PolicyOption`s, with a configured path
+  prepended and labelled `from your config file`.
+
+  Verified under tmux against a live gateway: the picker opening with the cursor
+  on `~/dev/sbx` out of fifteen repositories, the form showing
+  `< readonly-explore >` with only the configured provider ticked, a configured
+  path showing as its own chooser entry, `sbx doctor` warning about
+  `ghost-token`, and every error path above from the command line.
+
 ### Later, unscheduled
 
 - **Warm pool** — less urgent than expected: sandbox creation is ~1s with the
@@ -935,8 +993,6 @@ Increments 0-20 are done. What is left is the unscheduled list below.
   than prewarming the sandbox.
 - **Port forwarding** — `openshell forward` and `openshell service` for dev
   servers an agent starts.
-- **Config file** — default policy, default provider, default repo, refresh
-  interval. Everything is flags today.
 - **Recovering a wedged sandbox** — after an abruptly killed attach, exec hangs
   forever for that sandbox. `sbx doctor <session>` could detect it (exec with a
   short timeout) and offer `sandbox stop && sandbox start` as a repair before
@@ -988,13 +1044,14 @@ Claude Code will not all support a setup-token equivalent.
 
 ## Picking this up again
 
-Current state: increments 0-9 done, `main` at a clean tree, 234 tests, clippy
+Current state: increments 0-21 done, `main` at a clean tree, 323 tests, clippy
 and rustfmt clean. `sbx doctor` should be all green; if the gateway is down,
 `systemctl --user status openshell-gateway`.
 
 The loop that works today, end to end:
 
 ```sh
+sbx config --init   # optional: put the flags below in a file and stop typing them
 sbx new --repo <url> --task "..." --policy feature-work \
         --provider claude-oauth --provider azure-pat
 sbx            # or start one here: n, pick a repo, fill the form, enter
@@ -1022,6 +1079,12 @@ Things a future session should know that are not obvious from the code:
   that sandbox permanently.
 * The local cache is disposable by design. To test that, delete
   `~/.config/sbx/sessions.json` and run `sbx ls`.
+* **`XDG_CONFIG_HOME` cannot be used to isolate `sbx` in a test.** `openshell`
+  reads it too, so pointing it at a temp directory hides the registered gateway
+  and `sbx doctor` fails with `could not parse ... missing field 'gateway'` --
+  which looks like the gateway being down and is not. Fine for exercising
+  `sbx config` and its error paths, which need no gateway; for anything else,
+  write the real `~/.config/sbx/config.toml` and delete it afterwards.
 * Live tests need a gateway and are behind `#[ignore]`:
   `cargo test -p openshell-client -- --ignored`.
 * The TUI is testable without a human: run it under tmux and use

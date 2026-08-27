@@ -1,0 +1,44 @@
+# sbx defaults. Everything here is optional, and everything here is a *default*:
+# a flag on the command line always wins, and so does an explicit choice in the
+# create form. Delete a key to go back to the built-in behaviour.
+#
+# Written by `sbx config --init`. `sbx config` shows what is in force.
+
+# Gateway to talk to. Unset means the active one, as `openshell gateway list`
+# reports it. `--gateway` overrides this.
+# gateway = "default"
+
+# Repository a `sbx new` with no --repo clones. The TUI's picker opens on this
+# one too, when it finds it -- a filter away from anything else, rather than a
+# scroll.
+# repo = "https://github.com/octocat/Hello-World"
+
+# Branch to clone from. Unset means the remote's default branch, which is almost
+# always what you want; set it for a repository that develops off something else.
+# base = "develop"
+
+# Policy applied to a new session: a template name, or a path to a YAML file.
+# `sbx policies` lists the templates.
+# policy = "feature-work"
+
+# Credential providers attached to a new session, by name; `openshell provider
+# list` shows what exists. Providers are per organisation, not per forge, so a
+# work repository and a personal one need one each.
+#
+# Setting this replaces the create form's guesswork with your answer: the form
+# normally ticks the agent's credential and the repository host's when the type
+# names exactly one, and this says so outright instead.
+# providers = ["claude-oauth", "azure-pat"]
+
+# Where the create form's picker looks for repositories, replacing the usual
+# places (the working directory and its parent, ~/dev, ~/src, ~/code, ~/projects,
+# ~/work, ~/repos, ~/git, and ~ itself one level deep) rather than adding to
+# them. `SBX_REPO_ROOTS` still wins over this.
+# repo_roots = ["~/dev", "~/work"]
+
+# How often the TUI reads the sandboxes. One number, because the intervals
+# underneath it are measured and related to each other: this scales all of them,
+# so 2s polls half as often as the 1s default and 500ms twice as often. The cost
+# is `git status` inside every live sandbox, so raise it on a large repository or
+# a long list, and lower it if the diff pane feels behind the agent. 250ms to 60s.
+# refresh = "1s"

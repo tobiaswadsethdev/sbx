@@ -7,6 +7,8 @@ use std::process::Command;
 
 use openshell_client::OpenShell;
 
+use crate::config::{self, Config};
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Level {
     Ok,
@@ -197,15 +199,69 @@ fn check_image() -> Check {
     }
 }
 
-pub fn run(client: &dyn OpenShell) -> Vec<Check> {
-    vec![
+/// `config` is the load result rather than a [`Config`], because a file that
+/// cannot be read is exactly the kind of thing this command exists to say out
+/// loud -- every other command refuses to run until it is fixed, so this is the
+/// only place the error can be shown next to its fix.
+pub fn run(client: &dyn OpenShell, config: &Result<Config, config::Error>) -> Vec<Check> {
+    let mut checks = vec![
+        check_config(config),
         check_openshell(),
         check_gateway(client),
         check_docker(),
         check_tmux(),
         check_linger(),
         check_image(),
-    ]
+    ];
+    // Only when the file names some, since the check is about the file being
+    // right rather than about providers existing.
+    if let Ok(cfg) = config
+        && !cfg.providers().is_empty()
+    {
+        checks.push(check_config_providers(client, cfg.providers()));
+    }
+    checks
+}
+
+fn check_config(config: &Result<Config, config::Error>) -> Check {
+    match config {
+        Err(e) => Check::fail(
+            "config",
+            e.to_string(),
+            "fix the file, or delete it to go back to the defaults",
+        ),
+        Ok(c) if c.present => Check::ok("config", c.path.display().to_string()),
+        Ok(c) => Check::ok("config", format!("{} (defaults)", c.path.display())),
+    }
+}
+
+/// Whether the providers the config file names still exist at the gateway.
+///
+/// A name that does not is the quietest failure sbx has: the create form simply
+/// does not tick it, the sandbox comes up without the credential, and the clone
+/// fails for what looks like an authentication problem several steps later.
+/// Here is the only place that can be said before it happens, because it is the
+/// one command that both reads the file and asks the gateway.
+fn check_config_providers(client: &dyn OpenShell, named: &[String]) -> Check {
+    let existing = match client.providers() {
+        Ok(list) => list,
+        // The gateway check above already says so; repeating it here would be
+        // two failures for one cause.
+        Err(_) => return Check::ok("providers", "not checked: the gateway is unreachable"),
+    };
+    let missing: Vec<&str> = named
+        .iter()
+        .map(String::as_str)
+        .filter(|n| !existing.iter().any(|p| p.name == *n))
+        .collect();
+    if missing.is_empty() {
+        return Check::ok("providers", named.join(", "));
+    }
+    Check::warn(
+        "providers",
+        format!("no provider named {}", missing.join(", ")),
+        "openshell provider list; fix `providers` in the config file",
+    )
 }
 
 /// Print the report. Returns the process exit code.

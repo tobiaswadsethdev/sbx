@@ -13,9 +13,10 @@ use openshell_client::{CliClient, PolicyRevision, PolicyUpdate, Provider};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
+use crate::config::Config;
 use crate::ops;
 use crate::policy;
-use crate::repos::LocalRepo;
+use crate::repos::{self, LocalRepo};
 use crate::session::{Session, State};
 use crate::status;
 use crate::tui::attach::attach;
@@ -47,6 +48,12 @@ const REFRESH_EVERY: Duration = Duration::from_millis(1000);
 const STATUS_LINGER: Duration = Duration::from_secs(4);
 /// Input poll interval. Short enough to feel immediate, long enough to idle.
 const TICK: Duration = Duration::from_millis(100);
+/// How long a fetched policy is trusted.
+///
+/// A policy changes only when someone changes it, and `w`/`t` hand the new
+/// revision straight to the pane, so refetching it often would spend a
+/// subprocess on an answer that is never different.
+const POLICY_TTL: Duration = Duration::from_secs(30);
 /// How long right-pane content -- a diff, an events feed -- is trusted before it
 /// is fetched again.
 ///
@@ -79,6 +86,60 @@ const POLL_SELECTED_TTL: Duration = Duration::from_millis(500);
 /// diffs and policies to fetch. With N sessions a full round takes at worst N
 /// times this, so the list stays under [`POLL_TTL`] up to ten of them.
 const POLL_MIN_GAP: Duration = Duration::from_millis(200);
+
+/// The intervals above, scaled by one number from the config file.
+///
+/// One knob rather than six, because the six are related: the selected session
+/// polls faster than the rest, the floor is what keeps a long list from becoming
+/// a stream of execs, and a diff has to keep up with the agent editing under it.
+/// An absolute interval per constant would let those relationships be set to
+/// nonsense; a ratio cannot. The [`TUNED`](Intervals::TUNED) values are the
+/// measured ones, and `refresh` names the only one a person has an opinion
+/// about -- how live the list feels -- with the rest following it.
+///
+/// [`TICK`] and [`STATUS_LINGER`] are deliberately not in here. The first is
+/// keyboard responsiveness and the second is how long a human needs to read a
+/// line; neither has anything to do with how hard the sandboxes are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Intervals {
+    pub refresh: Duration,
+    pub pane_ttl: Duration,
+    pub poll_ttl: Duration,
+    pub poll_selected_ttl: Duration,
+    pub poll_min_gap: Duration,
+    pub policy_ttl: Duration,
+}
+
+impl Intervals {
+    /// What the measurements at the top of this module say.
+    pub const TUNED: Intervals = Intervals {
+        refresh: REFRESH_EVERY,
+        pane_ttl: PANE_TTL,
+        poll_ttl: POLL_TTL,
+        poll_selected_ttl: POLL_SELECTED_TTL,
+        poll_min_gap: POLL_MIN_GAP,
+        policy_ttl: POLICY_TTL,
+    };
+
+    /// The tuned set, stretched or compressed so the list reconciles every
+    /// `refresh`.
+    pub fn scaled(refresh: Duration) -> Intervals {
+        let factor = refresh.as_secs_f64() / REFRESH_EVERY.as_secs_f64();
+        let scale = |d: Duration| d.mul_f64(factor);
+        Intervals {
+            refresh,
+            pane_ttl: scale(PANE_TTL),
+            poll_ttl: scale(POLL_TTL),
+            poll_selected_ttl: scale(POLL_SELECTED_TTL),
+            poll_min_gap: scale(POLL_MIN_GAP),
+            policy_ttl: scale(POLICY_TTL),
+        }
+    }
+
+    pub fn from_config(cfg: &Config) -> Intervals {
+        cfg.refresh.map_or(Intervals::TUNED, Intervals::scaled)
+    }
+}
 
 /// What the right-hand pane is showing.
 ///
@@ -135,13 +196,13 @@ impl RightView {
     /// policy only changes when someone changes it, and refetching it every few
     /// seconds would spend a subprocess on an answer that is never different.
     /// The events feed is the fastest, because it is a feed.
-    fn ttl(self) -> Duration {
+    fn ttl(self, iv: &Intervals) -> Duration {
         match self {
-            RightView::Diff => PANE_TTL,
-            RightView::Policy => Duration::from_secs(30),
+            RightView::Diff => iv.pane_ttl,
+            RightView::Policy => iv.policy_ttl,
             // A gateway call rather than an exec, so it contends with nothing;
             // see `crate::events`.
-            RightView::Events => PANE_TTL,
+            RightView::Events => iv.pane_ttl,
             // Drawn from the poll, which has its own schedule; see
             // [`next_poll_target`]. The value is never read.
             RightView::Agent => Duration::MAX,
@@ -230,6 +291,10 @@ pub struct App {
     repaired: bool,
     last_refresh: Instant,
     should_quit: bool,
+    /// Defaults from the config file: what the create form starts with, and how
+    /// often the sandboxes are read.
+    cfg: Config,
+    intervals: Intervals,
     /// Set by the key handler; acted on by the event loop, which is the only
     /// place with access to the terminal.
     attach_request: Option<Session>,
@@ -291,7 +356,8 @@ enum Confirm {
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(cfg: Config) -> Self {
+        let intervals = Intervals::from_config(&cfg);
         App {
             sessions: Vec::new(),
             list_state: ListState::default(),
@@ -305,7 +371,7 @@ impl App {
             events_in_flight: None,
             repolicy_in_flight: None,
             // Force an immediate first poll.
-            last_poll_request: Instant::now() - POLL_MIN_GAP,
+            last_poll_request: Instant::now() - intervals.poll_min_gap,
             views: HashMap::new(),
             scroll: HashMap::new(),
             focus: Focus::default(),
@@ -317,7 +383,9 @@ impl App {
             refreshing: false,
             repaired: false,
             // Force an immediate first refresh.
-            last_refresh: Instant::now() - REFRESH_EVERY,
+            last_refresh: Instant::now() - intervals.refresh,
+            cfg,
+            intervals,
             should_quit: false,
             attach_request: None,
             repolicy_request: None,
@@ -727,7 +795,7 @@ impl App {
             self.fail("a session is already being created");
             return;
         }
-        let mut picker = Picker::new();
+        let mut picker = Picker::preferring(self.cfg.repo.clone());
         if let Some(repos) = &self.repos {
             picker.scanned(repos.clone());
         }
@@ -739,6 +807,15 @@ impl App {
         // so a gateway hiccup does not leave the form unable to offer
         // credentials for the rest of the session.
         self.providers_request = !matches!(self.providers, Some(Ok(_)));
+    }
+
+    /// The config file's answers, in the shape the create form wants them.
+    fn defaults(&self) -> create::Defaults {
+        create::Defaults {
+            base: self.cfg.base.clone(),
+            policy: self.cfg.policy.clone(),
+            providers: self.cfg.providers.clone(),
+        }
     }
 
     /// What the existing sessions have to say about a new one in this repository.
@@ -799,6 +876,7 @@ impl App {
                     *repo,
                     self.providers.as_ref(),
                     history,
+                    &self.defaults(),
                 ))));
             }
             create::Action::Back => {
@@ -943,7 +1021,7 @@ impl App {
             }
             (KeyCode::Char('r'), _) => {
                 // Make the next tick refresh immediately.
-                self.last_refresh = Instant::now() - REFRESH_EVERY;
+                self.last_refresh = Instant::now() - self.intervals.refresh;
                 self.diffs.clear();
                 self.polls.clear();
                 self.note("refreshing");
@@ -1043,7 +1121,7 @@ impl App {
                         self.note(msg);
                         // The state comes back on the next refresh, which reads
                         // it from the store the worker just wrote.
-                        self.last_refresh = Instant::now() - REFRESH_EVERY;
+                        self.last_refresh = Instant::now() - self.intervals.refresh;
                     }
                     Err(e) => self.fail(e.clone()),
                 }
@@ -1069,7 +1147,7 @@ impl App {
                     }
                     Err(e) => self.fail(e),
                 }
-                self.last_refresh = Instant::now() - REFRESH_EVERY;
+                self.last_refresh = Instant::now() - self.intervals.refresh;
             }
             Update::Repos(repos) => {
                 self.scan_in_flight = false;
@@ -1125,7 +1203,7 @@ impl App {
                         self.pending = None;
                     }
                 }
-                self.last_refresh = Instant::now() - REFRESH_EVERY;
+                self.last_refresh = Instant::now() - self.intervals.refresh;
             }
             Update::Failed(e) => {
                 self.refreshing = false;
@@ -1184,12 +1262,15 @@ impl App {
     }
 }
 
-pub fn run(client: CliClient) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(client: CliClient, cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
     // The worker owns its client; attaching needs a second handle because it
     // runs on this thread with the terminal handed over.
     let attach_client = client.clone();
-    let worker = Worker::spawn(client);
-    let mut app = App::new();
+    // Resolved once, on this thread: the roots depend on the working directory,
+    // which is fixed for the life of the process, and the worker should not be
+    // reading config files between requests.
+    let worker = Worker::spawn(client, repos::roots(cfg.repo_roots.as_deref()));
+    let mut app = App::new(cfg);
 
     // Installs a panic hook that restores the terminal, so a crash cannot
     // leave the user in raw mode with no echo.
@@ -1268,7 +1349,7 @@ fn event_loop(
             app.on_update(update);
         }
 
-        if !app.refreshing && app.last_refresh.elapsed() >= REFRESH_EVERY {
+        if !app.refreshing && app.last_refresh.elapsed() >= app.intervals.refresh {
             app.refreshing = true;
             app.last_refresh = Instant::now();
             // The first one repairs records left mid-create -- by a create that
@@ -1296,7 +1377,7 @@ fn event_loop(
 /// deliberately separate:
 ///
 /// * the **right pane**, for the selected session only, refetched every
-///   [`PANE_TTL`] so a diff under the user's eyes stays current;
+///   [`Intervals::pane_ttl`] so a diff under the user's eyes stays current;
 /// * the **stat column**, which every row needs, round-robined over the whole
 ///   list at no more than one request per [`STAT_MIN_GAP`].
 ///
@@ -1308,7 +1389,7 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
     let selected = app.selected().cloned().filter(|s| app.is_live(s));
     if let Some(session) = selected {
         let view = app.right_view();
-        let ttl = view.ttl();
+        let ttl = view.ttl(&app.intervals);
         let name = session.name.clone();
         // Each arm asks the same three questions -- is it stale, is one already
         // in flight, and if not, fetch -- of a different map, so the shapes are
@@ -1346,7 +1427,8 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
         }
     }
 
-    if app.poll_in_flight.is_some() || app.last_poll_request.elapsed() < POLL_MIN_GAP {
+    if app.poll_in_flight.is_some() || app.last_poll_request.elapsed() < app.intervals.poll_min_gap
+    {
         return;
     }
     if let Some(session) = next_poll_target(app) {
@@ -1368,12 +1450,15 @@ fn next_poll_target(app: &App) -> Option<Session> {
     // screen are all drawn from this one capture, and all three are things the
     // user is looking at. It is one session however many there are, so the floor
     // between polls is what bounds the cost, not this.
-    if let Some(s) = app.selected().filter(|s| due(s, POLL_SELECTED_TTL)) {
+    if let Some(s) = app
+        .selected()
+        .filter(|s| due(s, app.intervals.poll_selected_ttl))
+    {
         return Some(s.clone());
     }
     app.sessions
         .iter()
-        .filter(|s| due(s, POLL_TTL))
+        .filter(|s| due(s, app.intervals.poll_ttl))
         // Never polled sorts before any polled one, so no session starves.
         .max_by_key(|s| {
             app.polls
@@ -1392,7 +1477,7 @@ mod tests {
     }
 
     fn app_with(names: &[&str]) -> App {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         app.sessions = names
             .iter()
             .map(|n| Session::new((*n).to_string(), "r".into(), "t".into()))
@@ -1839,7 +1924,7 @@ mod tests {
     }
 
     fn app_with_repo(repo: &str) -> App {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         app.sessions = vec![Session::new("a".into(), repo.into(), "t".into())];
         app.list_state.select(Some(0));
         app
@@ -1888,7 +1973,7 @@ mod tests {
     /// as a movement key and the question stays on screen.
     #[test]
     fn a_pending_question_swallows_every_other_key() {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         app.sessions = ["a", "b"]
             .iter()
             .map(|n| Session::new((*n).to_string(), ADO.into(), "t".into()))
@@ -2219,23 +2304,74 @@ mod tests {
     /// session must be served sooner than the rest, the floor between polls must
     /// leave a list of a useful size inside its own TTL, and nothing may be
     /// slower than the refresh that reconciles the list.
-    #[test]
-    fn the_poll_budget_is_coherent() {
+    ///
+    /// Asserted for every `refresh` the config file will accept, not just the
+    /// tuned set. That is the argument for scaling one number instead of
+    /// exposing six: the relationships are the design, and a ratio cannot break
+    /// them. `TICK` is the one thing that does not scale, which is exactly why
+    /// `config::REFRESH_MIN` is where it is.
+    fn assert_coherent(iv: Intervals) {
         assert!(
-            POLL_SELECTED_TTL < POLL_TTL,
+            iv.poll_selected_ttl < iv.poll_ttl,
             "what is on screen comes first"
         );
         assert!(
-            POLL_MIN_GAP < POLL_SELECTED_TTL,
+            iv.poll_min_gap < iv.poll_selected_ttl,
             "the floor must not be the thing that decides the interval"
         );
-        // Up to this many sessions, a full round still lands inside POLL_TTL, so
+        // Up to this many sessions, a full round still lands inside poll_ttl, so
         // no session waits longer than its own interval to be looked at.
-        let round = POLL_TTL.as_millis() / POLL_MIN_GAP.as_millis();
+        let round = iv.poll_ttl.as_millis() / iv.poll_min_gap.as_millis();
         assert!(round >= 10, "only {round} sessions fit the round trip");
         // And the redraw has to be quicker than anything it draws, or fresh data
         // waits for the next frame.
-        assert!(TICK < POLL_SELECTED_TTL);
+        assert!(TICK < iv.poll_selected_ttl, "{iv:?}");
+    }
+
+    #[test]
+    fn the_poll_budget_is_coherent() {
+        assert_coherent(Intervals::TUNED);
+    }
+
+    #[test]
+    fn the_poll_budget_survives_every_refresh_the_config_accepts() {
+        for ms in [250, 500, 1000, 1500, 3000, 10_000, 60_000] {
+            assert_coherent(Intervals::scaled(Duration::from_millis(ms)));
+        }
+    }
+
+    #[test]
+    fn refresh_scales_the_rest_and_nothing_else() {
+        let iv = Intervals::scaled(Duration::from_secs(2));
+        assert_eq!(iv.refresh, Duration::from_secs(2));
+        assert_eq!(
+            iv.poll_ttl,
+            POLL_TTL * 2,
+            "twice the default is twice as slow"
+        );
+        assert_eq!(iv.pane_ttl, PANE_TTL * 2);
+        assert_eq!(iv.poll_min_gap, POLL_MIN_GAP * 2);
+
+        // An unset `refresh` leaves the measured numbers exactly as measured.
+        assert_eq!(Intervals::from_config(&Config::default()), Intervals::TUNED);
+        assert_eq!(
+            Intervals::scaled(REFRESH_EVERY),
+            Intervals::TUNED,
+            "the default value is the identity"
+        );
+    }
+
+    /// The pane TTLs come from the same set, so a slower config slows the diff
+    /// and the events feed too rather than leaving them at the tuned rate.
+    #[test]
+    fn the_pane_ttls_follow_the_config() {
+        let app = App::new(Config {
+            refresh: Some(Duration::from_secs(3)),
+            ..Config::default()
+        });
+        assert_eq!(RightView::Diff.ttl(&app.intervals), PANE_TTL * 3);
+        assert_eq!(RightView::Events.ttl(&app.intervals), PANE_TTL * 3);
+        assert_eq!(RightView::Policy.ttl(&app.intervals), POLICY_TTL * 3);
     }
 
     /// The poll is the one read that scales with the number of sessions, so the

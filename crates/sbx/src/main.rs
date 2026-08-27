@@ -1,6 +1,7 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
 
 mod ansi;
+mod config;
 mod doctor;
 mod events;
 mod forge;
@@ -21,6 +22,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use openshell_client::{CliClient, OpenShell};
 
+use config::Config;
 use session::{Session, State};
 use store::Store;
 
@@ -78,6 +80,17 @@ enum Command {
     /// List the policy templates shipped with this binary.
     Policies,
 
+    /// Show the defaults read from the config file, and where they came from.
+    Config {
+        /// Write a commented starter file. Refuses to overwrite one.
+        #[arg(long)]
+        init: bool,
+
+        /// Print the file's path and nothing else.
+        #[arg(long)]
+        path: bool,
+    },
+
     /// Push a session's branch and open a pull request.
     Publish {
         /// Session name.
@@ -121,9 +134,10 @@ enum Command {
 
 #[derive(clap::Args)]
 struct NewArgs {
-    /// Repository to clone inside the sandbox.
+    /// Repository to clone inside the sandbox. Defaults to `repo` in the
+    /// config file.
     #[arg(long)]
-    repo: String,
+    repo: Option<String>,
 
     /// Session name. Derived from the task when omitted.
     #[arg(long)]
@@ -133,18 +147,21 @@ struct NewArgs {
     #[arg(long, default_value = "")]
     task: String,
 
-    /// Branch to clone from. Defaults to the remote's default branch.
+    /// Branch to clone from. Defaults to `base` in the config file, else the
+    /// remote's default branch.
     #[arg(long)]
     base: Option<String>,
 
     /// Policy to apply: a template name, or a path to a YAML file.
     ///
-    /// Defaults to `feature-work`. See `sbx policies` for the templates; a spec
-    /// containing a `/` or ending in `.yaml` is always read as a path.
+    /// Defaults to `policy` in the config file, else `feature-work`. See
+    /// `sbx policies` for the templates; a spec containing a `/` or ending in
+    /// `.yaml` is always read as a path.
     #[arg(long)]
     policy: Option<String>,
 
-    /// Credential provider to attach. Repeatable.
+    /// Credential provider to attach. Repeatable. Any given here replace
+    /// `providers` in the config file rather than adding to them.
     #[arg(long = "provider")]
     providers: Vec<String>,
 
@@ -162,22 +179,38 @@ enum ImageAction {
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
+    // Before anything else, because a file that cannot be read has to stop the
+    // command rather than be quietly replaced by the built-in defaults -- the
+    // one exception being `doctor`, whose job is to say what is wrong.
+    let loaded = Config::load();
+    let cfg = match (&loaded, &cli.command) {
+        (Ok(c), _) => c.clone(),
+        (Err(_), Some(Command::Doctor)) => Config::default(),
+        (Err(e), _) => {
+            eprintln!("sbx: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
     let mut client = CliClient::new();
-    if let Some(g) = cli.gateway {
+    // The flag first, the file second: a gateway named on the command line is
+    // about this command, and the file is about every other one.
+    if let Some(g) = cli.gateway.clone().or_else(|| cfg.gateway.clone()) {
         client = client.with_gateway(g);
     }
 
     let result = match cli.command {
         // No subcommand: the TUI is the point of the tool.
-        None => tui::run(client),
+        None => tui::run(client, cfg),
         Some(Command::Doctor) => {
-            let checks = doctor::run(&client);
+            let checks = doctor::run(&client, &loaded);
             return match doctor::report(&checks) {
                 0 => ExitCode::SUCCESS,
                 _ => ExitCode::FAILURE,
             };
         }
-        Some(Command::New(args)) => cmd_new(&client, args),
+        Some(Command::Config { init, path }) => cmd_config(&cfg, init, path),
+        Some(Command::New(args)) => cmd_new(&client, args, &cfg),
         Some(Command::Ls) => cmd_ls(&client),
         Some(Command::Attach { name }) => cmd_attach(&client, &name),
         Some(Command::Diff { name }) => cmd_diff(&client, &name),
@@ -222,23 +255,35 @@ fn main() -> ExitCode {
 
 type Fallible = Result<(), Box<dyn std::error::Error>>;
 
-fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
+fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
+    let repo = args.repo.or_else(|| cfg.repo.clone()).ok_or_else(|| {
+        format!(
+            "no repository: pass --repo, or set `repo` in {}",
+            cfg.path.display()
+        )
+    })?;
+
     // A name from --name, else the task, else the repo's last path segment.
     let name = match args.name {
         Some(n) => n,
-        None => session::derive_name(&args.task, &args.repo)
+        None => session::derive_name(&args.task, &repo)
             .ok_or("could not derive a session name; pass --name")?,
     };
 
     let draft = ops::Draft {
         name,
-        repo: args.repo,
+        repo,
         task: args.task,
-        base: args.base,
-        policy: args
-            .policy
-            .unwrap_or_else(|| policy::DEFAULT_TEMPLATE.to_string()),
-        providers: args.providers,
+        base: args.base.or_else(|| cfg.base.clone()),
+        policy: args.policy.unwrap_or_else(|| cfg.policy().to_string()),
+        // Replace rather than merge: `--provider` on the command line is the
+        // whole answer for this session, and a config entry silently added to it
+        // would attach a credential nobody asked for.
+        providers: if args.providers.is_empty() {
+            cfg.providers().to_vec()
+        } else {
+            args.providers
+        },
         start: !args.no_start,
     };
 
@@ -272,6 +317,96 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
     println!("policy   {}", s.policy.as_deref().unwrap_or("-"));
     println!("branch   {}", s.work_branch);
     println!("workdir  {}", session::REPO_PATH);
+    Ok(())
+}
+
+/// Show, or create, the config file.
+///
+/// The effective value and where it came from, rather than the file's contents:
+/// what a person wants to know is what the next `sbx new` will do, and the
+/// answer is a mix of the file and the built-in defaults.
+fn cmd_config(cfg: &Config, init: bool, path_only: bool) -> Fallible {
+    if path_only {
+        println!("{}", cfg.path.display());
+        return Ok(());
+    }
+
+    if init {
+        if cfg.path.exists() {
+            return Err(format!(
+                "{} already exists; edit it, or delete it first",
+                cfg.path.display()
+            )
+            .into());
+        }
+        if let Some(dir) = cfg.path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&cfg.path, config::EXAMPLE)?;
+        println!("wrote {}", cfg.path.display());
+        println!("every key is commented out, so nothing has changed yet");
+        return Ok(());
+    }
+
+    println!("{}", cfg.path.display());
+    if !cfg.present {
+        println!("  (no file; create one with: sbx config --init)");
+    }
+    println!();
+
+    // `-` for a default and `*` for something the file says, so the two are
+    // distinguishable at a glance -- which is the whole question this command
+    // answers.
+    let row = |key: &str, set: bool, value: String| {
+        println!("{} {:<12} {}", if set { "*" } else { "-" }, key, value);
+    };
+    row(
+        "gateway",
+        cfg.gateway.is_some(),
+        cfg.gateway
+            .clone()
+            .unwrap_or_else(|| "(the active one)".into()),
+    );
+    row(
+        "repo",
+        cfg.repo.is_some(),
+        cfg.repo
+            .clone()
+            .unwrap_or_else(|| "(--repo each time)".into()),
+    );
+    row(
+        "base",
+        cfg.base.is_some(),
+        cfg.base
+            .clone()
+            .unwrap_or_else(|| "(the remote's default branch)".into()),
+    );
+    row("policy", cfg.policy.is_some(), cfg.policy().to_string());
+    row(
+        "providers",
+        cfg.providers.is_some(),
+        if cfg.providers().is_empty() {
+            "(none; the create form guesses)".into()
+        } else {
+            cfg.providers().join(", ")
+        },
+    );
+    row(
+        "repo_roots",
+        cfg.repo_roots.is_some(),
+        repos::roots(cfg.repo_roots.as_deref())
+            .iter()
+            .map(|r| r.path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
+    row(
+        "refresh",
+        cfg.refresh.is_some(),
+        format!("{}ms", tui::Intervals::from_config(cfg).refresh.as_millis()),
+    );
+    println!();
+    println!("* set here, - built-in default");
     Ok(())
 }
 

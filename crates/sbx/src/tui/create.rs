@@ -188,16 +188,31 @@ pub struct Picker {
     /// Indices into `repos`, best match first.
     matches: Vec<usize>,
     cursor: usize,
+    /// `repo` from the config file: the row to open on, if the scan finds it.
+    /// Dropped as soon as anything is typed, since a filter is a better
+    /// statement of intent than a file is.
+    prefer: Option<String>,
     error: Option<String>,
 }
 
 impl Picker {
     pub fn new() -> Self {
+        Picker::preferring(None)
+    }
+
+    /// A picker that opens on `prefer` -- a clone URL or a repository name --
+    /// when the scan turns it up.
+    ///
+    /// The cursor rather than the filter: prefilling the query would hide every
+    /// other repository behind a backspace, and the point of the picker is that
+    /// the other ones are one keystroke away.
+    pub fn preferring(prefer: Option<String>) -> Self {
         Picker {
             repos: None,
             query: Input::default(),
             matches: Vec::new(),
             cursor: 0,
+            prefer,
             error: None,
         }
     }
@@ -206,6 +221,28 @@ impl Picker {
     pub fn scanned(&mut self, repos: Vec<LocalRepo>) {
         self.repos = Some(repos);
         self.refilter();
+        self.prefer();
+    }
+
+    /// Put the cursor on the preferred repository, once, if it is there.
+    ///
+    /// By origin URL first, since that is what the config file naturally holds
+    /// and what identifies a repository unambiguously; by name second, so
+    /// `repo = "sbx"` works too.
+    fn prefer(&mut self) {
+        let (Some(wanted), Some(repos)) = (self.prefer.as_deref(), self.repos.as_ref()) else {
+            return;
+        };
+        let at = |f: &dyn Fn(&LocalRepo) -> bool| {
+            self.matches
+                .iter()
+                .position(|i| repos.get(*i).is_some_and(f))
+        };
+        if let Some(row) = at(&|r: &LocalRepo| r.origin.as_deref() == Some(wanted))
+            .or_else(|| at(&|r: &LocalRepo| r.name == wanted))
+        {
+            self.cursor = row;
+        }
     }
 
     pub fn scanning(&self) -> bool {
@@ -300,6 +337,7 @@ impl Picker {
             _ => {
                 if self.query.on_key(key) {
                     self.error = None;
+                    self.prefer = None;
                     self.refilter();
                 }
             }
@@ -352,6 +390,54 @@ pub struct Choice {
     pub selected: bool,
 }
 
+/// What the config file has to say about a new session.
+///
+/// Passed in rather than read here, like everything else in this module: a form
+/// is built on a keystroke, and reading a file on the render thread is the same
+/// mistake as running a subprocess on it. `None` on a field means the file is
+/// silent and the form's own answer stands.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Defaults {
+    /// Only used when the checkout is on a detached HEAD. The branch a
+    /// repository is actually sitting on is evidence about *that* repository;
+    /// a config entry is a guess about all of them, and the evidence wins.
+    pub base: Option<String>,
+    /// A template name or a path to a YAML file.
+    pub policy: Option<String>,
+    /// Ticked instead of the guesswork in [`preselect`], not as well as it: an
+    /// explicit list is a better answer than any heuristic, and merging the two
+    /// would attach credentials nobody asked for.
+    pub providers: Option<Vec<String>>,
+}
+
+/// One entry of the form's policy chooser.
+///
+/// A [`policy::Template`] for all but one case: a config file may name a YAML
+/// file instead, and that has to be offered too or the TUI would quietly create
+/// sessions under a different policy from `sbx new`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyOption {
+    /// What goes into the draft: a template name, or a path.
+    pub spec: String,
+    pub summary: String,
+}
+
+/// The templates, with a configured path in front of them when there is one.
+fn policy_options(configured: Option<&str>) -> Vec<PolicyOption> {
+    let mut out: Vec<PolicyOption> = Vec::new();
+    if let Some(spec) = configured.filter(|s| policy::find(s).is_none()) {
+        out.push(PolicyOption {
+            spec: spec.to_string(),
+            summary: "from your config file".to_string(),
+        });
+    }
+    out.extend(policy::TEMPLATES.iter().map(|t| PolicyOption {
+        spec: t.name.to_string(),
+        summary: t.summary.to_string(),
+    }));
+    out
+}
+
 /// The fields of a session about to be created.
 pub struct Form {
     pub repo: LocalRepo,
@@ -366,9 +452,13 @@ pub struct Form {
     /// which is what makes the common case a single field to fill in.
     name_edited: bool,
     base: Input,
+    policies: Vec<PolicyOption>,
     policy: usize,
     providers: Vec<Choice>,
     provider_cursor: usize,
+    /// The config file's provider list, kept because the gateway's own list may
+    /// arrive after the form is open and has to be ticked the same way then.
+    configured_providers: Option<Vec<String>>,
     /// Why the provider list is empty, when the gateway could not be asked.
     providers_error: Option<String>,
     field: Field,
@@ -391,13 +481,25 @@ impl Form {
         repo: LocalRepo,
         providers: Option<&Result<Vec<Provider>, String>>,
         history: History,
+        defaults: &Defaults,
     ) -> Self {
-        let base = repo.branch.clone().unwrap_or_default();
+        let base = repo
+            .branch
+            .clone()
+            .or_else(|| defaults.base.clone())
+            .unwrap_or_default();
         let (choices, providers_error) = match providers {
-            Some(Ok(list)) => (preselect(list, &repo, &history.providers), None),
+            Some(Ok(list)) => (
+                match &defaults.providers {
+                    Some(named) => chosen(list, named),
+                    None => preselect(list, &repo, &history.providers),
+                },
+                None,
+            ),
             Some(Err(e)) => (Vec::new(), Some(e.clone())),
             None => (Vec::new(), Some("still reading the provider list".into())),
         };
+        let policies = policy_options(defaults.policy.as_deref());
 
         let derived = session::derive_name("", &repo.name).unwrap_or_default();
 
@@ -410,9 +512,11 @@ impl Form {
             task: Input::default(),
             name_edited: false,
             base: Input::new(base),
-            policy: default_policy_index(),
+            policy: default_policy_index(&policies, defaults.policy.as_deref()),
+            policies,
             providers: choices,
             provider_cursor: 0,
+            configured_providers: defaults.providers.clone(),
             providers_error,
             history,
             field: Field::Task,
@@ -442,7 +546,10 @@ impl Form {
         }
         match providers {
             Ok(list) => {
-                self.providers = preselect(list, &self.repo, &self.history.providers);
+                self.providers = match &self.configured_providers {
+                    Some(named) => chosen(list, named),
+                    None => preselect(list, &self.repo, &self.history.providers),
+                };
                 self.providers_error = None;
             }
             Err(e) => self.providers_error = Some(e.clone()),
@@ -466,8 +573,8 @@ impl Form {
         }
     }
 
-    pub fn policy(&self) -> &'static policy::Template {
-        &policy::TEMPLATES[self.policy.min(policy::TEMPLATES.len() - 1)]
+    pub fn policy(&self) -> &PolicyOption {
+        &self.policies[self.policy.min(self.policies.len() - 1)]
     }
 
     pub fn providers(&self) -> &[Choice] {
@@ -493,7 +600,7 @@ impl Form {
     }
 
     fn cycle_policy(&mut self, delta: isize) {
-        let len = policy::TEMPLATES.len() as isize;
+        let len = self.policies.len() as isize;
         self.policy = ((self.policy as isize + delta).rem_euclid(len)) as usize;
     }
 
@@ -523,7 +630,7 @@ impl Form {
             repo: self.repo.origin.clone().unwrap_or_default(),
             task: self.task.text().trim().to_string(),
             base: (!base.is_empty()).then(|| base.to_string()),
-            policy: self.policy().name.to_string(),
+            policy: self.policy().spec.clone(),
             providers: self
                 .providers
                 .iter()
@@ -678,11 +785,30 @@ fn preselect(providers: &[Provider], repo: &LocalRepo, used_before: &[String]) -
         .collect()
 }
 
-fn default_policy_index() -> usize {
-    policy::TEMPLATES
+/// Which entry the chooser opens on: the configured one, else the default
+/// template.
+fn default_policy_index(options: &[PolicyOption], configured: Option<&str>) -> usize {
+    let wanted = configured.unwrap_or(policy::DEFAULT_TEMPLATE);
+    options
         .iter()
-        .position(|t| t.name == policy::DEFAULT_TEMPLATE)
-        .unwrap_or(0)
+        .position(|o| o.spec == wanted)
+        .unwrap_or_default()
+}
+
+/// Tick exactly the providers the config file names, and nothing else.
+///
+/// A name that no longer exists at the gateway simply does not appear, which is
+/// the only thing that can be done from here -- `sbx doctor` is where a stale
+/// name gets said out loud, because it is the command that can ask.
+fn chosen(providers: &[Provider], named: &[String]) -> Vec<Choice> {
+    providers
+        .iter()
+        .map(|p| Choice {
+            selected: named.iter().any(|n| n == &p.name),
+            name: p.name.clone(),
+            kind: p.kind.clone(),
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -816,6 +942,65 @@ mod tests {
         assert_eq!(p.cursor(), 0, "must not run past the top");
     }
 
+    /// The config file's `repo` moves the cursor, not the filter: prefilling
+    /// the query would hide every other repository behind a backspace.
+    #[test]
+    fn picker_opens_on_the_configured_repository() {
+        let mut p = Picker::preferring(Some("https://github.com/o/web".into()));
+        p.scanned(vec![
+            repo("api", Some("https://github.com/o/api"), Some("main")),
+            repo("web", Some("https://github.com/o/web"), Some("main")),
+        ]);
+        assert_eq!(p.selected().map(|r| r.name.as_str()), Some("web"));
+        assert_eq!(p.rows().len(), 2, "the others are still one keystroke away");
+
+        // By name too, since that is how anyone would write it by hand.
+        let mut p = Picker::preferring(Some("web".into()));
+        p.scanned(vec![
+            repo("api", Some("https://github.com/o/api"), Some("main")),
+            repo("web", Some("https://github.com/o/web"), Some("main")),
+        ]);
+        assert_eq!(p.selected().map(|r| r.name.as_str()), Some("web"));
+
+        // A preference the scan did not turn up changes nothing.
+        let mut p = Picker::preferring(Some("nowhere".into()));
+        p.scanned(vec![repo("api", Some("u"), Some("main"))]);
+        assert_eq!(p.selected().map(|r| r.name.as_str()), Some("api"));
+    }
+
+    /// The picker opens on the cached scan and a fresh one lands behind it,
+    /// calling `scanned` again -- possibly after a query has been typed.
+    /// Reapplying the preference then would pull the cursor off whatever was
+    /// just filtered for, so typing drops it: a filter is a more specific
+    /// statement of intent than a config file.
+    #[test]
+    fn a_rescan_reapplies_the_preference_until_something_is_typed() {
+        let found = || {
+            vec![
+                repo("api", Some("https://github.com/o/api"), Some("main")),
+                repo("web", Some("https://github.com/o/web"), Some("main")),
+            ]
+        };
+        let mut p = Picker::preferring(Some("web".into()));
+        p.scanned(found());
+
+        // A rescan with nothing typed still lands on the configured repository.
+        p.on_key(key(KeyCode::Up));
+        p.scanned(found());
+        assert_eq!(p.selected().map(|r| r.name.as_str()), Some("web"));
+
+        // Once there is a query, the preference is gone for good -- including
+        // for every later rescan, which is the case it exists to survive.
+        p.on_key(key(KeyCode::Char('e')));
+        assert!(p.prefer.is_none(), "typing is the more specific answer");
+        p.scanned(found());
+        assert_eq!(
+            p.selected().map(|r| r.name.to_string()),
+            p.rows().first().map(|r| r.name.to_string()),
+            "the cursor belongs to the filter now"
+        );
+    }
+
     #[test]
     fn picker_refuses_a_repository_with_no_origin() {
         let mut p = Picker::new();
@@ -872,6 +1057,7 @@ mod tests {
             repo("api", Some("https://github.com/o/api.git"), Some("main")),
             Some(&providers),
             History::default(),
+            &Defaults::default(),
         )
     }
 
@@ -921,14 +1107,14 @@ mod tests {
     #[test]
     fn the_policy_field_cycles_the_templates() {
         let mut f = form();
-        assert_eq!(f.policy().name, policy::DEFAULT_TEMPLATE);
+        assert_eq!(f.policy().spec, policy::DEFAULT_TEMPLATE);
         while f.field() != Field::Policy {
             f.on_key(key(KeyCode::Tab));
         }
         f.on_key(key(KeyCode::Right));
-        assert_ne!(f.policy().name, policy::DEFAULT_TEMPLATE);
+        assert_ne!(f.policy().spec, policy::DEFAULT_TEMPLATE);
         f.on_key(key(KeyCode::Left));
-        assert_eq!(f.policy().name, policy::DEFAULT_TEMPLATE);
+        assert_eq!(f.policy().spec, policy::DEFAULT_TEMPLATE);
         // And the arrows must not leave the field.
         assert_eq!(f.field(), Field::Policy);
     }
@@ -976,7 +1162,12 @@ mod tests {
 
         // Nothing to go on: the type alone cannot say which organisation was
         // meant, and the wrong PAT fails three steps later.
-        let f = Form::new(azure(), Some(&providers), History::default());
+        let f = Form::new(
+            azure(),
+            Some(&providers),
+            History::default(),
+            &Defaults::default(),
+        );
         assert_eq!(ticked(&f), vec!["claude-oauth".to_string()]);
 
         // With a session for this host already using one, that is the answer.
@@ -984,12 +1175,159 @@ mod tests {
             taken: vec!["api".into()],
             providers: vec!["azure-pat-personal".into(), "claude-oauth".into()],
         };
-        let f = Form::new(azure(), Some(&providers), history);
+        let f = Form::new(azure(), Some(&providers), history, &Defaults::default());
         assert_eq!(
             ticked(&f),
             vec!["claude-oauth".to_string(), "azure-pat-personal".to_string()],
             "the credential the last session for this host was given"
         );
+    }
+
+    /// The config file is an explicit answer, so it replaces the guesswork
+    /// entirely rather than adding to it. Merging the two would attach a
+    /// credential nobody asked for, which is the failure `preselect` is careful
+    /// to avoid.
+    #[test]
+    fn configured_providers_replace_the_guesswork() {
+        let providers = Ok(vec![
+            provider("claude-oauth", "claude-code-oauth"),
+            provider("azure-pat", "azure-devops-pat"),
+            provider("gh-token", "github-pat"),
+        ]);
+        let ticked = |f: &Form| -> Vec<String> {
+            f.providers()
+                .iter()
+                .filter(|c| c.selected)
+                .map(|c| c.name.clone())
+                .collect()
+        };
+        let defaults = Defaults {
+            providers: Some(vec!["gh-token".into(), "not-a-provider".into()]),
+            ..Defaults::default()
+        };
+
+        // `claude-oauth` is the only provider of the agent's type and would be
+        // ticked by `preselect`; the config says otherwise, so it is not.
+        let f = Form::new(
+            repo(
+                "api",
+                Some("https://dev.azure.com/org/proj/_git/api"),
+                Some("main"),
+            ),
+            Some(&providers),
+            History::default(),
+            &defaults,
+        );
+        assert_eq!(ticked(&f), vec!["gh-token".to_string()]);
+
+        // A name the gateway does not have simply is not offered. `sbx doctor`
+        // is where that gets said out loud.
+        assert!(f.providers().iter().all(|c| c.name != "not-a-provider"));
+    }
+
+    /// The gateway's provider list often lands after the form is already open,
+    /// and it has to be ticked by the same rule as one that was there first.
+    #[test]
+    fn a_late_provider_list_still_honours_the_config() {
+        let defaults = Defaults {
+            providers: Some(vec!["gh-token".into()]),
+            ..Defaults::default()
+        };
+        let mut f = Form::new(
+            repo(
+                "api",
+                Some("https://dev.azure.com/org/proj/_git/api"),
+                Some("main"),
+            ),
+            None,
+            History::default(),
+            &defaults,
+        );
+        assert!(f.providers().is_empty());
+        f.providers_arrived(&Ok(vec![
+            provider("claude-oauth", "claude-code-oauth"),
+            provider("gh-token", "github-pat"),
+        ]));
+        let ticked: Vec<&str> = f
+            .providers()
+            .iter()
+            .filter(|c| c.selected)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(ticked, ["gh-token"]);
+    }
+
+    #[test]
+    fn a_configured_policy_is_what_the_form_opens_on() {
+        let defaults = Defaults {
+            policy: Some("readonly-explore".into()),
+            ..Defaults::default()
+        };
+        let f = Form::new(
+            repo(
+                "api",
+                Some("https://dev.azure.com/org/proj/_git/api"),
+                Some("main"),
+            ),
+            None,
+            History::default(),
+            &defaults,
+        );
+        assert_eq!(f.policy().spec, "readonly-explore");
+    }
+
+    /// A policy that is a *path* is not one of the templates, so the chooser has
+    /// to carry it as an extra entry -- otherwise the TUI would quietly create
+    /// sessions under a different policy from `sbx new`.
+    #[test]
+    fn a_configured_policy_path_is_offered_alongside_the_templates() {
+        let defaults = Defaults {
+            policy: Some("/etc/sbx/strict.yaml".into()),
+            ..Defaults::default()
+        };
+        let mut f = Form::new(
+            repo(
+                "api",
+                Some("https://dev.azure.com/org/proj/_git/api"),
+                Some("main"),
+            ),
+            None,
+            History::default(),
+            &defaults,
+        );
+        assert_eq!(f.policy().spec, "/etc/sbx/strict.yaml");
+        assert_eq!(f.draft().unwrap().policy, "/etc/sbx/strict.yaml");
+
+        // And the templates are still reachable, in front of it and behind it.
+        f.field = Field::Policy;
+        f.on_key(key(KeyCode::Right));
+        assert_eq!(f.policy().spec, policy::TEMPLATES[0].name);
+        f.on_key(key(KeyCode::Left));
+        assert_eq!(f.policy().spec, "/etc/sbx/strict.yaml");
+        f.on_key(key(KeyCode::Left));
+        assert_eq!(
+            f.policy().spec,
+            policy::TEMPLATES[policy::TEMPLATES.len() - 1].name,
+            "the chooser wraps around the whole list, path included"
+        );
+    }
+
+    /// The branch a checkout is sitting on is evidence about *that* repository;
+    /// a config entry is a guess about all of them. The evidence wins, and the
+    /// guess is only reached for when there is none -- a detached HEAD.
+    #[test]
+    fn a_configured_base_only_fills_a_detached_head() {
+        let defaults = Defaults {
+            base: Some("develop".into()),
+            ..Defaults::default()
+        };
+        let on_a_branch = repo("api", Some("https://github.com/o/api.git"), Some("main"));
+        let f = Form::new(on_a_branch, None, History::default(), &defaults);
+        assert_eq!(f.input(Field::Base).unwrap().text(), "main");
+
+        let detached = repo("api", Some("https://github.com/o/api.git"), None);
+        let f = Form::new(detached, None, History::default(), &defaults);
+        assert_eq!(f.input(Field::Base).unwrap().text(), "develop");
     }
 
     /// A provider that was used before but is not of a type this session wants
@@ -1010,6 +1348,7 @@ mod tests {
             repo("api", Some("https://github.com/o/api.git"), Some("main")),
             Some(&providers),
             history,
+            &Defaults::default(),
         );
         let ticked: Vec<&str> = f
             .providers()
@@ -1038,6 +1377,7 @@ mod tests {
             repo("api", Some("https://github.com/o/api.git"), Some("main")),
             Some(&providers),
             history,
+            &Defaults::default(),
         );
         assert_eq!(f.input(Field::Name).unwrap().text(), "api-2");
 
@@ -1069,6 +1409,7 @@ mod tests {
             repo("api", Some("https://github.com/o/api.git"), None),
             None,
             History::default(),
+            &Defaults::default(),
         );
         assert!(f.providers().is_empty());
         assert!(f.providers_error().is_some());

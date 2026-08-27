@@ -83,25 +83,38 @@ const DEV_DEPTH: usize = 3;
 /// Depth for `$HOME`, which only has to catch `~/repo`.
 const HOME_DEPTH: usize = 1;
 
-/// Where to look when nothing says otherwise.
+/// Where to look, in order of who gets to say.
 ///
-/// `SBX_REPO_ROOTS` (colon-separated, like `PATH`) replaces the defaults
-/// entirely rather than adding to them, so someone who keeps repositories
-/// somewhere unusual pays nothing for scanning the conventional places.
-pub fn default_roots() -> Vec<Root> {
+/// `SBX_REPO_ROOTS` (colon-separated, like `PATH`) first, then `repo_roots` from
+/// the config file, then the conventional places. Each *replaces* the ones below
+/// it rather than adding to them, so someone who keeps repositories somewhere
+/// unusual pays nothing for scanning the usual ones -- and the environment wins,
+/// because a variable set for one command is the more specific statement.
+pub fn roots(configured: Option<&[PathBuf]>) -> Vec<Root> {
     if let Some(raw) = std::env::var_os("SBX_REPO_ROOTS") {
-        let roots: Vec<Root> = std::env::split_paths(&raw)
-            .filter(|p| !p.as_os_str().is_empty())
-            .map(|path| Root {
-                path,
-                depth: DEV_DEPTH,
-            })
-            .collect();
+        let roots = at_dev_depth(std::env::split_paths(&raw));
         if !roots.is_empty() {
             return dedupe_roots(roots);
         }
     }
+    if let Some(paths) = configured.filter(|p| !p.is_empty()) {
+        return dedupe_roots(at_dev_depth(paths.iter().cloned()));
+    }
+    default_roots()
+}
 
+fn at_dev_depth(paths: impl Iterator<Item = PathBuf>) -> Vec<Root> {
+    paths
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|path| Root {
+            path,
+            depth: DEV_DEPTH,
+        })
+        .collect()
+}
+
+/// The conventional places, when nothing says otherwise.
+pub fn default_roots() -> Vec<Root> {
     let mut roots = Vec::new();
     // The working directory first: running `sbx` from inside a checkout is the
     // most common way to want a session on it, and the parent catches its
@@ -152,11 +165,6 @@ fn dedupe_roots(roots: Vec<Root>) -> Vec<Root> {
 
 fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
-}
-
-/// Every repository under the default roots, best-guess order.
-pub fn discover() -> Vec<LocalRepo> {
-    discover_in(&default_roots())
 }
 
 /// Every repository under `roots`, depth-limited per root.
@@ -699,6 +707,28 @@ mod tests {
         ]);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0].depth, 3);
+    }
+
+    /// Configured roots replace the conventional ones rather than adding to
+    /// them, so a scan cannot quietly cost more than it was asked to.
+    #[test]
+    fn configured_roots_replace_the_defaults() {
+        // The environment outranks the config, and a developer with the
+        // variable set would otherwise see this fail for the right reason.
+        if std::env::var_os("SBX_REPO_ROOTS").is_some() {
+            return;
+        }
+        let t = Tree::new("configured");
+        let paths = vec![t.0.clone()];
+        let got = roots(Some(&paths));
+        assert_eq!(got.len(), 1, "only what was configured: {got:?}");
+        assert_eq!(got[0].path, t.0);
+        assert_eq!(got[0].depth, DEV_DEPTH);
+
+        // An absent list falls through to the usual places, which always
+        // include at least the working directory.
+        assert!(roots(None).len() > 1);
+        assert!(roots(Some(&[])).len() > 1, "an empty list is not a claim");
     }
 
     #[test]

@@ -1320,15 +1320,15 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
         lines.push(Line::from(spans));
     }
 
-    let template = form.policy();
+    let chosen = form.policy();
     lines.push(Line::from(vec![
         label(Field::Policy),
         Span::styled(
-            format!("< {} >", template.name),
+            format!("< {} >", chosen.spec),
             Style::default().fg(Color::Yellow),
         ),
         Span::styled(
-            format!("  {}", template.summary),
+            format!("  {}", chosen.summary),
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -1432,6 +1432,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
     use super::*;
+    use crate::config::Config;
 
     #[test]
     fn truncates_on_character_boundaries() {
@@ -1743,7 +1744,7 @@ diff --git a/b b/b
 
     /// An app with one session selected, for the layout tests.
     fn app_with_session() -> App {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         let mut session = Session::new(
             "readme-fix".into(),
             "https://github.com/octocat/Hello-World.git".into(),
@@ -2008,7 +2009,7 @@ diff --git a/b b/b
     /// to it` with nothing to attach to reads as a broken interface.
     #[test]
     fn an_empty_list_offers_only_what_works() {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         let body = render(&mut app, 100, 24).join("\n");
         assert!(body.contains("n new session"), "{body}");
         assert!(!body.contains("attach"), "{body}");
@@ -2061,7 +2062,7 @@ diff --git a/b b/b
     /// an empty bordered box under the list is just noise.
     #[test]
     fn no_facts_pane_without_a_session() {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         let rows = render(&mut app, 100, 24);
         let body = rows.join("\n");
         assert!(body.contains("no sessions yet"), "{body}");
@@ -2081,7 +2082,7 @@ diff --git a/b b/b
 
     /// An app with the create flow open on the picker, populated.
     fn app_picking() -> App {
-        let mut app = App::new();
+        let mut app = App::new(Config::default());
         app.repos = Some(vec![
             probe_repo("sbx", Some("https://github.com/o/sbx.git"), "main"),
             probe_repo(
