@@ -16,8 +16,12 @@ use crate::repos::{self, Facts, LocalRepo};
 use crate::session::Session;
 
 pub enum Request {
-    Refresh,
-    Preview(Box<Session>),
+    /// Reconcile the list against the gateway. `repair` re-reads the metadata of
+    /// anything stuck mid-create, which is worth doing once at startup and not
+    /// once a second; see [`ops::refresh_with`].
+    Refresh {
+        repair: bool,
+    },
     Diff(Box<Session>),
     Poll(Box<Session>),
     Policy(Box<Session>),
@@ -50,10 +54,6 @@ pub enum Request {
 
 pub enum Update {
     Sessions(Box<ops::Refreshed>),
-    Preview {
-        session: String,
-        body: String,
-    },
     Diff {
         session: String,
         body: String,
@@ -170,13 +170,9 @@ impl Worker {
                         spawn_create(client.clone(), up_tx.clone(), *draft);
                         continue;
                     }
-                    Request::Refresh => match ops::refresh(&client) {
+                    Request::Refresh { repair } => match ops::refresh_with(&client, repair) {
                         Ok(r) => Update::Sessions(Box::new(r)),
                         Err(e) => Update::Failed(e.to_string()),
-                    },
-                    Request::Preview(session) => Update::Preview {
-                        body: ops::repo_preview(&client, &session),
-                        session: session.name,
                     },
                     Request::Diff(session) => Update::Diff {
                         body: ops::repo_diff(&client, &session),

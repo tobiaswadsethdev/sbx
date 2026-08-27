@@ -1,5 +1,7 @@
 //! Operations shared by the CLI and the TUI.
 
+use std::time::{Duration, Instant};
+
 use openshell_client::{CreateOpts, Error as OsError, OpenShell, PolicyRevision, PolicyUpdate};
 
 use crate::events;
@@ -11,9 +13,14 @@ use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session, St
 use crate::status;
 use crate::store::{self, Store};
 
-/// How much of the agent's pane to capture. Every marker status detection looks
-/// for sits in the last few lines; the rest is transcript.
-const PANE_LINES: usize = 40;
+/// How much of the agent's pane to capture.
+///
+/// Was forty, when this was only feeding marker detection and every marker sits
+/// in the last few lines. The agent view draws the same capture, and forty lines
+/// of a fifty-row pane cut the top off the transcript -- the banner and the first
+/// exchange -- so it is now more than a window's worth. Still bounded: a pane
+/// left tall by an attach from a big terminal cannot turn a poll into a flood.
+const PANE_LINES: usize = 120;
 
 #[derive(Debug, Default)]
 pub struct Refreshed {
@@ -27,10 +34,37 @@ pub struct Refreshed {
 }
 
 /// Reconcile the cache against the gateway, adopt orphans, and persist.
-pub fn refresh(client: &dyn OpenShell) -> Result<Refreshed, Box<dyn std::error::Error>> {
-    let mut store = Store::load()?;
+/// [`refresh`], optionally repairing records left mid-lifecycle.
+///
+/// `repair` re-reads the metadata of any session whose record still says
+/// `creating` or `seeding` and takes the sandbox's word for it. Two things leave a
+/// record there: a create that died -- the thread is detached, so quitting the TUI
+/// mid-clone is enough -- and, before the cache was locked, a refresh writing an
+/// older state back over a finished one. Either way the sandbox knows what
+/// happened and the record does not.
+///
+/// One exec per such session, so it is asked for once when a tool starts rather
+/// than on every refresh: a create legitimately in flight has no metadata to read
+/// yet, which is exactly how a still-cloning session is told apart from an
+/// abandoned one, and asking it every second would spend an exec a second on the
+/// difference.
+pub fn refresh_with(
+    client: &dyn OpenShell,
+    repair: bool,
+) -> Result<Refreshed, Box<dyn std::error::Error>> {
+    // The gateway call first, outside the lock: it is the slow part, and holding
+    // a lock across it would stall a create in another process for no reason.
     let live = client.list(Some(SELECTOR_MANAGED))?;
-    let rec = store::reconcile(store.list().into_iter().cloned().collect(), &live);
+
+    // Reconciled against what is on disk *now*, not against a snapshot taken
+    // before the call above. A create walking a session through `seeding` to
+    // `ready` in another process finishes inside that window often enough that
+    // the difference is a session whose record disagrees with its own sandbox.
+    let rec = store::update(|store| {
+        let rec = store::reconcile(store.list().into_iter().cloned().collect(), &live);
+        store.merge(rec.sessions.clone());
+        rec
+    })?;
 
     let mut out = Refreshed {
         sessions: rec.sessions,
@@ -40,18 +74,68 @@ pub fn refresh(client: &dyn OpenShell) -> Result<Refreshed, Box<dyn std::error::
 
     for orphan in &rec.orphans {
         let sandbox = session::sandbox_name(orphan);
+        // An exec, so also outside the lock; the adopted record is written on its
+        // own once it is known.
         match seed::read_meta(client, &sandbox) {
             Ok(s) => {
                 out.adopted.push(s.name.clone());
+                let record = s.clone();
+                store::update(|store| store.upsert(record))?;
                 out.sessions.push(s);
             }
             Err(e) => out.warnings.push(format!("could not adopt {sandbox}: {e}")),
         }
     }
 
+    if repair {
+        // Only where the sandbox is there to be asked: a record whose sandbox has
+        // gone is already `dead`.
+        let stuck: Vec<Session> = out
+            .sessions
+            .iter()
+            .filter(|s| matches!(s.state, State::Creating | State::Seeding))
+            .filter(|s| live.iter().any(|sb| sb.name == s.sandbox))
+            .cloned()
+            .collect();
+
+        for s in stuck {
+            // The seeder's own report, which is the only thing that knows: it runs
+            // detached inside the sandbox, so "still cloning" and "gave up" look
+            // identical from out here.
+            let (state, note) = match seed::seed_state(client, &s) {
+                seed::SeedState::Done => (State::Ready, "seeding finished".to_string()),
+                seed::SeedState::Failed(why) => (State::Failed, format!("seeding failed: {why}")),
+                seed::SeedState::Running { step, alive: false } => {
+                    (State::Failed, format!("seeding stopped during `{step}`"))
+                }
+                // Genuinely still going, in the sandbox, whatever happened to the
+                // tool that started it. Leave it alone.
+                seed::SeedState::Running { .. } => continue,
+                // Nothing to read: a sandbox seeded by an older sbx, before the
+                // seeder reported anything. Fall back to the metadata, which is
+                // written once seeding is done.
+                seed::SeedState::Unknown => match seed::read_meta(client, &s.sandbox) {
+                    Ok(m) if m.state != s.state => (m.state, "sandbox metadata".to_string()),
+                    _ => continue,
+                },
+            };
+
+            if state == s.state {
+                continue;
+            }
+            out.warnings
+                .push(format!("{}: {} -> {state} ({note})", s.name, s.state));
+            let mut fixed = s.clone();
+            fixed.state = state;
+            let record = fixed.clone();
+            store::update(|store| store.upsert(record))?;
+            if let Some(slot) = out.sessions.iter_mut().find(|x| x.name == fixed.name) {
+                *slot = fixed;
+            }
+        }
+    }
+
     out.sessions.sort_by(|a, b| a.name.cmp(&b.name));
-    store.replace_all(out.sessions.clone());
-    store.save()?;
     Ok(out)
 }
 
@@ -93,6 +177,19 @@ impl Step {
             Step::Sandbox => "creating the sandbox",
             Step::Clone => "cloning the repository",
             Step::Agent => "starting the agent",
+        }
+    }
+
+    /// The step a seeder's own report corresponds to.
+    ///
+    /// The seeder names its steps (`clone`, `branch`, `meta`, `agent`) and this
+    /// maps them onto what the interface already shows. `branch` and `meta` are
+    /// part of cloning as far as anyone watching is concerned.
+    pub fn for_seed(step: &str) -> Option<Step> {
+        match step {
+            "clone" | "branch" | "meta" => Some(Step::Clone),
+            "agent" => Some(Step::Agent),
+            _ => None,
         }
     }
 
@@ -147,8 +244,13 @@ pub fn create(
         Err(e) => warnings.push(format!("{e}; publishing will not be available")),
     }
 
-    let mut store = Store::load().map_err(|e| e.to_string())?;
-    if store.contains(&draft.name) {
+    // A first look for a name clash, so an obvious mistake fails before a
+    // sandbox exists. Not a lock: the gateway refuses a duplicate sandbox name
+    // anyway, which is the check that actually holds.
+    if Store::load()
+        .map_err(|e| e.to_string())?
+        .contains(&draft.name)
+    {
         return Err(format!("session `{}` already exists", draft.name));
     }
 
@@ -179,34 +281,38 @@ pub fn create(
     // seeded, and without it that sandbox is invisible to `sbx rm`.
     if let Err(e) = client.create(&opts) {
         s.state = State::Failed;
-        save(&mut store, s, &mut warnings);
+        save(s, &mut warnings);
         return Err(e.to_string());
     }
 
     s.state = State::Seeding;
-    save(&mut store, s.clone(), &mut warnings);
+    save(s.clone(), &mut warnings);
 
     progress(Step::Clone);
-    if let Err(e) = seed::seed(client, &s) {
+    if let Err(e) = seed::launch(client, &s, draft.start) {
         s.state = State::Failed;
-        save(&mut store, s, &mut warnings);
+        save(s, &mut warnings);
         return Err(e.to_string());
     }
 
-    s.state = State::Ready;
-    save(&mut store, s.clone(), &mut warnings);
-    // Keep the in-sandbox record current: it is what adoption reads back, and a
-    // stale one leaves recovered sessions frozen mid-lifecycle.
-    if let Err(e) = seed::write_meta(client, &s) {
-        warnings.push(format!("could not refresh sandbox metadata: {e}"));
-    }
-
-    if draft.start {
-        progress(Step::Agent);
-        if let Err(e) = seed::start_agent(client, &s) {
-            // The session is usable even if the agent did not come up, so this
-            // is reported rather than treated as a failed create.
-            warnings.push(format!("could not start the agent: {e}"));
+    // From here the sandbox is doing the work and this is only watching. Quitting
+    // now costs the report, not the session: the seeder finishes on its own and
+    // the next `refresh_with(.., true)` catches the record up.
+    match watch_seed(client, &s, progress) {
+        Watched::Done => {
+            s.state = State::Ready;
+            save(s.clone(), &mut warnings);
+        }
+        Watched::Failed(why) => {
+            s.state = State::Failed;
+            save(s.clone(), &mut warnings);
+            return Err(why);
+        }
+        Watched::StillGoing => {
+            warnings.push(format!(
+                "{} is still seeding in its sandbox; it will be picked up on the next refresh",
+                s.name
+            ));
         }
     }
 
@@ -216,44 +322,68 @@ pub fn create(
     })
 }
 
-/// Write one lifecycle change through to the cache.
+/// How long to watch a seeder before leaving it to finish on its own.
 ///
-/// Reloaded and saved per step rather than held open, because the TUI refreshes
-/// on a timer on another thread and also writes this file. Worst case the two
-/// interleave and the record is lost, which costs one adoption round trip on
-/// the next refresh -- the sandbox carries its own metadata, which is the whole
-/// reason the cache is allowed to be lossy.
-fn save(store: &mut Store, session: Session, warnings: &mut Vec<String>) {
-    store.upsert(session);
-    if let Err(e) = store.save() {
-        warnings.push(format!("could not update the session cache: {e}"));
-    }
+/// Generous, because a large repository really does take minutes to clone, and
+/// running out of patience here costs nothing: the seeder is detached, so the
+/// only thing lost is the progress report.
+const SEED_WATCH_LIMIT: Duration = Duration::from_secs(15 * 60);
+/// How often to ask. One exec each, ~50ms, against a step that changes rarely --
+/// often enough that the create feels attended, cheap enough not to matter.
+const SEED_WATCH_EVERY: Duration = Duration::from_millis(400);
+
+enum Watched {
+    Done,
+    Failed(String),
+    StillGoing,
 }
 
-/// A snapshot of the repository inside a session's sandbox, for the preview
-/// pane. One exec, so the pane costs a single round trip per session.
-pub fn repo_preview(client: &dyn OpenShell, session: &Session) -> String {
-    let script = format!(
-        r#"cd {repo} 2>/dev/null || {{ echo "no repository at {repo}"; exit 0; }}
-echo "branch  $(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
-echo "commit  $(git --no-pager log --oneline -1 2>/dev/null)"
-changes=$(git status --porcelain 2>/dev/null)
-if [ -z "$changes" ]; then
-  echo "status  clean"
-else
-  echo "status  $(printf '%s\n' "$changes" | wc -l) file(s) changed"
-  echo
-  printf '%s\n' "$changes" | head -20
-fi
-"#,
-        repo = seed::sh_quote(REPO_PATH),
-    );
+/// Follow a detached seeder, reporting each step as it starts.
+fn watch_seed(
+    client: &dyn OpenShell,
+    session: &Session,
+    progress: &mut dyn FnMut(Step),
+) -> Watched {
+    let start = Instant::now();
+    let mut reported = String::new();
 
-    match client.exec(&session.sandbox, &["sh", "-c", &script]) {
-        Ok(out) if out.ok() => out.trimmed().to_string(),
-        // A preview is decoration: surface the problem, never fail the caller.
-        Ok(out) => format!("(could not read repository: {})", out.stderr.trim()),
-        Err(e) => format!("(sandbox unreachable: {e})"),
+    while start.elapsed() < SEED_WATCH_LIMIT {
+        match seed::seed_state(client, session) {
+            seed::SeedState::Done => return Watched::Done,
+            seed::SeedState::Failed(why) => {
+                return Watched::Failed(format!("seeding failed: {why}"));
+            }
+            seed::SeedState::Running { step, alive } => {
+                if !alive && !step.is_empty() {
+                    // The seeder is gone and never said `done` or `failed`, which
+                    // only happens if the sandbox itself went out from under it.
+                    return Watched::Failed(format!("seeding stopped during `{step}`"));
+                }
+                if step != reported {
+                    if let Some(s) = Step::for_seed(&step) {
+                        progress(s);
+                    }
+                    reported = step;
+                }
+            }
+            // Nothing written yet: the script is starting.
+            seed::SeedState::Unknown => {}
+        }
+        std::thread::sleep(SEED_WATCH_EVERY);
+    }
+    Watched::StillGoing
+}
+
+/// Write one lifecycle change through to the cache.
+///
+/// Reloaded under the lock and saved per step, rather than held open across the
+/// create: a create takes tens of seconds -- minutes on a large repository -- and
+/// a TUI refreshing every second writes this file the whole time. Holding a
+/// snapshot from the start meant the last write won, and the last write was
+/// usually the refresh, putting a `ready` session back to `seeding`.
+fn save(session: Session, warnings: &mut Vec<String>) {
+    if let Err(e) = store::update(|store| store.upsert(session)) {
+        warnings.push(format!("could not update the session cache: {e}"));
     }
 }
 
@@ -389,10 +519,13 @@ pub fn policy(client: &dyn OpenShell, session: &Session) -> Result<PolicyRevisio
 }
 
 /// How many log lines to ask for. The gateway returns the newest, so this is a
-/// window on the end of the log rather than a limit on what is kept. Large
-/// enough to survive the noise a busy session generates between refreshes,
-/// small enough that parsing it every few seconds costs nothing.
-const LOG_LINES: usize = 400;
+/// window on the end of the log rather than a limit on what is kept.
+///
+/// Raised when the poll interval came down: every exec sbx makes writes three
+/// events of its own, `events::parse` drops them, and the window has to be big
+/// enough that what is left still covers a useful stretch of time. The read
+/// itself is 14ms for 400 lines, so this is close to free.
+const LOG_LINES: usize = 1500;
 
 /// A session's recent policy decisions, newest first.
 ///
@@ -402,9 +535,11 @@ pub fn events(client: &dyn OpenShell, session: &Session) -> Result<Vec<events::E
     let raw = client
         .logs(&session.sandbox, LOG_LINES)
         .map_err(|e| format!("could not read the log: {e}"))?;
-    let mut parsed = events::parse(&raw);
-    parsed.reverse();
-    Ok(parsed)
+    // Merged into what this session has already shown rather than replacing it:
+    // the gateway's window is a couple of minutes wide at these poll intervals,
+    // and the feed is meant to be a record. Newest first comes back from the
+    // merge, so the pane still reads as a feed.
+    Ok(events::merge_kept(&session.name, events::parse(&raw)))
 }
 
 /// Apply an incremental policy change and report what the sandbox ended up
@@ -436,15 +571,60 @@ pub fn publish(
         // Published is a fact about the branch, not the sandbox, so it is
         // recorded even when the pull request could not be opened: the work has
         // left the sandbox either way, which is what the state means.
-        let mut store = Store::load().map_err(|e| e.to_string())?;
-        if let Some(mut s) = store.get(&session.name).cloned() {
-            s.state = session::State::Published;
-            store.upsert(s);
-            store.save().map_err(|e| e.to_string())?;
-        }
+        store::update(|store| {
+            if let Some(mut s) = store.get(&session.name).cloned() {
+                s.state = session::State::Published;
+                store.upsert(s);
+            }
+        })
+        .map_err(|e| e.to_string())?;
     }
     Ok(outcome)
 }
+
+/// The shell that attaches to a session's agent, for both `sbx attach` and the
+/// TUI.
+///
+/// One definition, because the two paths have to leave the sandbox in the same
+/// state. `attach -d` evicts a client left behind by an earlier crash; without it
+/// a stale client makes the new attach share a resized, confusing view. Falling
+/// through to `new-session` means attaching always lands somewhere useful even if
+/// the agent was never started or has been killed.
+///
+/// The resize afterwards is not cosmetic. tmux sizes a window to its latest
+/// client and *keeps* that size after the client leaves, and
+/// [`crate::status::scrape_pane`] reads that window -- so attaching from an
+/// 80-column terminal would otherwise leave the agent's pane 80 columns wide for
+/// the rest of its life, narrow enough to truncate the footer the running marker
+/// lives in. `window-size latest` goes straight back, so the next client resizes
+/// the window as usual; with nothing attached, tmux has no client size to apply
+/// and the wide one stands. Every part of it is best-effort: a session that has
+/// just been created by the fallback above is not worth failing an attach over.
+pub fn attach_script(session: &Session) -> String {
+    let (cols, rows) = session::SCRAPE_SIZE;
+    format!(
+        "{UTF8_ENV} \
+         tmux -u -f /etc/tmux.conf attach -d -t {tmux} 2>/dev/null \
+         || {UTF8_ENV} tmux -u -f /etc/tmux.conf new-session -s {tmux} -c {repo}; \
+         tmux -u resize-window -t {tmux} -x {cols} -y {rows} 2>/dev/null; \
+         tmux -u set -w -t {tmux} window-size latest 2>/dev/null; \
+         true",
+        tmux = seed::sh_quote(&session.tmux),
+        repo = seed::sh_quote(REPO_PATH),
+    )
+}
+
+/// The locale a tmux client needs, and the `-u` that does not depend on it.
+///
+/// The gateway does not pass the image's environment through to an exec, so a
+/// client started this way inherits no locale: tmux then assumes a terminal that
+/// is not UTF-8, draws box rules with the DEC line-drawing set and replaces every
+/// character it cannot map with `_`. That is what turned Claude Code's banner and
+/// its `⏸` and `❯` glyphs into underscores. `-u` says "this terminal is UTF-8"
+/// outright; the locale is exported as well because everything else in the
+/// sandbox reads it -- git for one -- and `COLORTERM` is how the agent decides it
+/// may use 24-bit colour.
+const UTF8_ENV: &str = "LANG=C.UTF-8 LC_ALL=C.UTF-8 COLORTERM=truecolor";
 
 /// What destroying a session did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -471,8 +651,8 @@ pub enum Destroyed {
 /// a while afterwards, which `store::reconcile` already reads as dead, so a
 /// caller that refreshes immediately sees the row go rather than come back.
 pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> {
-    let mut store = Store::load().map_err(|e| format!("could not read the session cache: {e}"))?;
-    let sandbox = store
+    let sandbox = Store::load()
+        .map_err(|e| format!("could not read the session cache: {e}"))?
         .get(name)
         .map(|s| s.sandbox.clone())
         .unwrap_or_else(|| session::sandbox_name(name));
@@ -486,10 +666,10 @@ pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> 
     // Only after the gateway has accepted the deletion: dropping the record
     // first would lose the sandbox name on a failure, leaving a sandbox running
     // that nothing knows how to name.
-    store.remove(name);
-    store
-        .save()
+    store::update(|store| store.remove(name))
         .map_err(|e| format!("deleted {sandbox}, but could not update the cache: {e}"))?;
+    // The kept events go with it: they are about a sandbox that no longer exists.
+    events::forget_kept(name);
     Ok(outcome)
 }
 
@@ -502,6 +682,12 @@ pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> 
 pub struct Poll {
     pub stat: Option<DiffStat>,
     pub status: Option<status::Report>,
+    /// The agent's screen as captured, for the pane that shows it.
+    ///
+    /// Kept rather than dropped after the markers have been read: the capture is
+    /// already paid for -- it is what decides the state column -- so showing it
+    /// costs nothing beyond the memory. Empty for a sandbox with no agent pane.
+    pub pane: Option<String>,
 }
 
 /// Read a session's diff stat and agent state in a single exec.
@@ -546,7 +732,7 @@ cat {status_path} 2>/dev/null
 printf '
 %s
 ' {pane_marker}
-tmux -f /etc/tmux.conf capture-pane -p -t {tmux} 2>/dev/null | tail -n {pane_lines}
+tmux -u -f /etc/tmux.conf capture-pane -pe -t {tmux} 2>/dev/null | tail -n {pane_lines}
 "#,
         repo = seed::sh_quote(REPO_PATH),
         resolve_base = resolve_base(session),
@@ -570,13 +756,22 @@ fn parse_poll(stdout: &str, now: u64) -> Poll {
     };
     let (hook_part, pane_part) = rest.split_once(status::PANE_MARKER).unwrap_or((rest, ""));
 
+    // The capture carries the colour it was drawn in, which the pane that shows
+    // it wants and the marker search must not see: a phrase with a colour change
+    // inside it is not findable. One strip, used for the search only.
+    let plain = crate::ansi::strip(pane_part);
+
     Poll {
         stat: DiffStat::parse(stat_part.trim()),
         status: status::combine(
             status::parse_hook(hook_part).as_ref(),
-            status::scrape_pane(pane_part),
+            status::scrape_pane(&plain),
             now,
         ),
+        // Kept as captured, escapes and all: the pane redraws it with the colour
+        // the agent chose. Emptiness is judged on the stripped copy, because a
+        // screen of nothing but colour changes is a blank screen.
+        pane: Some(pane_part.trim_end().to_string()).filter(|_| !plain.trim().is_empty()),
     }
 }
 
@@ -620,6 +815,66 @@ mod tests {
             .is_empty(),
             "an untracked file is a change even with no line edits"
         );
+    }
+
+    /// Both attach paths run this, and each clause is there for a reason that is
+    /// invisible until it is missing.
+    #[test]
+    fn the_attach_script_attaches_falls_back_and_puts_the_size_back() {
+        let script = attach_script(&session());
+        assert!(script.contains("attach -d"), "{script}");
+        // Without these the client draws Claude Code's glyphs as underscores.
+        assert!(
+            script.contains("tmux -u "),
+            "the client must be UTF-8: {script}"
+        );
+        assert!(script.contains("LANG=C.UTF-8"), "{script}");
+        assert!(script.contains("new-session"), "a killed agent still opens");
+        let (cols, rows) = session::SCRAPE_SIZE;
+        assert!(
+            script.contains(&format!("resize-window -t 'agent' -x {cols} -y {rows}")),
+            "the window has to go back to a scrapeable width: {script}"
+        );
+        assert!(
+            script.contains("window-size latest"),
+            "or the next attach cannot resize it: {script}"
+        );
+        assert!(
+            script.trim_end().ends_with("true"),
+            "the tidy-up must not fail the attach: {script}"
+        );
+    }
+
+    /// The capture is kept, because the pane that shows the agent is drawn from
+    /// it -- and because it is already paid for by the status column.
+    #[test]
+    fn the_captured_screen_is_kept_for_the_pane() {
+        let out = format!(
+            "12 3 1\n{}\n{{\"state\":\"running\",\"at\":100,\"detail\":\"Edit\"}}\n{}\n\
+             ● Read README.md\n❯ fix the typo\n  esc to interrupt\n\n\n",
+            status::STATUS_MARKER,
+            status::PANE_MARKER
+        );
+        let poll = parse_poll(&out, 100);
+        let pane = poll.pane.expect("the screen");
+        assert!(pane.contains("Read README.md"), "{pane}");
+        assert!(
+            !pane.ends_with('\n'),
+            "the blank tail is trimmed, or it pushes the screen out of view"
+        );
+        assert_eq!(poll.status.map(|r| r.state), Some(session::State::Running));
+    }
+
+    /// A sandbox with no agent pane has no screen to show, which is different
+    /// from an empty one.
+    #[test]
+    fn no_pane_means_none() {
+        let out = format!(
+            "0 0 0\n{}\n\n{}\n   \n\n",
+            status::STATUS_MARKER,
+            status::PANE_MARKER
+        );
+        assert!(parse_poll(&out, 100).pane.is_none());
     }
 
     fn session() -> Session {
@@ -726,7 +981,11 @@ mod tests {
             assert!(script.contains(needle), "missing {needle} in:\n{script}");
         };
         script_has(STATUS_PATH);
-        script_has("capture-pane");
+        // With the escapes, because the pane that shows the screen wants the
+        // colour, and `-u` so the capture is UTF-8 rather than mangled into
+        // underscores.
+        script_has("capture-pane -pe");
+        script_has("tmux -u ");
         script_has(status::STATUS_MARKER);
         script_has(status::PANE_MARKER);
         // `cd` failing must not skip the status read, so it is confined to a

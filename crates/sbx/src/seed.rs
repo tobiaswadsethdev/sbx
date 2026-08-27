@@ -1,12 +1,28 @@
-//! Preparing a fresh sandbox: clone the repo, cut the work branch, and write
-//! the metadata record that makes the sandbox self-describing.
+//! Preparing a fresh sandbox: clone the repo, cut the work branch, write the
+//! metadata record that makes the sandbox self-describing, and start the agent.
+//!
+//! **All of it runs inside the sandbox, detached from the command that asks for
+//! it.** It used to run as one long `exec`, which meant the clone was a child of
+//! the host process: quitting the TUI mid-clone -- and the create thread is
+//! detached, so quitting is enough -- killed it and left a sandbox holding 69MB
+//! of a 238MB repository, no `HEAD`, and a record that still said `seeding`.
+//! Nothing in the gateway log, because nothing failed; the client simply went
+//! away.
+//!
+//! Now the host writes a script into the sandbox, starts it with `setsid`, and
+//! watches [`SEED_STATE_PATH`]. The seeder finishes whatever happens to the tool
+//! that started it, which is the same principle as the agent's own tmux session,
+//! and the record is caught up either by the watcher or by the repair pass in
+//! [`crate::ops::refresh_with`] the next time anything runs.
 
 use std::process::Command;
 
 use openshell_client::OpenShell;
 
 use crate::forge;
-use crate::session::{META_PATH, REPO_PATH, Session, TASK_PATH};
+use crate::session::{
+    META_PATH, REPO_PATH, SEED_LOG_PATH, SEED_SCRIPT_PATH, SEED_STATE_PATH, Session, TASK_PATH,
+};
 
 /// Quote a value for safe interpolation into a `sh -c` script.
 ///
@@ -38,15 +54,14 @@ fn host_git_identity() -> (String, String) {
     )
 }
 
-/// The script run inside the sandbox to seed it.
+/// The clone-and-branch half of seeding, without a shebang or a `set`.
 ///
-/// Written to be idempotent: re-seeding an already-seeded sandbox re-uses the
-/// clone and switches to the existing branch instead of failing.
-pub fn seed_script(session: &Session) -> String {
+/// Idempotent: re-seeding an already-seeded sandbox re-uses the clone and
+/// switches to the existing branch instead of failing. Kept separate from
+/// [`detached_script`] so the tricky parts -- the credential prelude, the
+/// quoting -- have one home.
+fn clone_and_branch(session: &Session) -> String {
     let (name, email) = host_git_identity();
-
-    let meta =
-        serde_json::to_string_pretty(session).expect("Session is plain data and always serializes");
 
     let base_branch_arg = match &session.base_branch {
         Some(b) => format!("--branch {} ", sh_quote(b)),
@@ -69,9 +84,7 @@ pub fn seed_script(session: &Session) -> String {
     );
 
     format!(
-        r#"set -eu
-mkdir -p /sandbox/.sbx
-{prelude}if [ ! -d {repo}/.git ]; then
+        r#"{prelude}if [ ! -d {repo}/.git ]; then
   gitc clone --quiet {base}-- {url} {repo}
 fi
 cd {repo}
@@ -84,7 +97,6 @@ if [ -n "$git_auth" ]; then
   git config "http.extraHeader" "$auth_header"
 fi
 git switch --quiet -c {branch} 2>/dev/null || git switch --quiet {branch}
-{write_meta}
 "#,
         prelude = prelude,
         repo = sh_quote(REPO_PATH),
@@ -93,7 +105,6 @@ git switch --quiet -c {branch} 2>/dev/null || git switch --quiet {branch}
         gname = sh_quote(&name),
         gemail = sh_quote(&email),
         branch = sh_quote(&session.work_branch),
-        write_meta = meta_write_command(&meta),
     )
 }
 
@@ -116,10 +127,113 @@ pub enum SeedError {
     BadMeta(#[from] serde_json::Error),
 }
 
-/// Clone, branch and write metadata inside the sandbox.
-pub fn seed(client: &dyn OpenShell, session: &Session) -> Result<(), SeedError> {
-    let script = seed_script(session);
-    let out = client.exec(&session.sandbox, &["sh", "-c", &script])?;
+/// How far the seeder has got, as it reports itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SeedState {
+    /// Working, and the named step is what it is doing. `alive` is whether the
+    /// process is still there: a seeder that died mid-step -- the sandbox itself
+    /// restarting is the only way -- looks identical otherwise.
+    Running {
+        step: String,
+        alive: bool,
+    },
+    /// Everything done: cloned, branched, metadata written, agent started.
+    Done,
+    Failed(String),
+    /// Nothing has reported yet. The launcher has run but the script has not got
+    /// as far as its first write, or this sandbox was seeded by an older sbx.
+    Unknown,
+}
+
+/// The whole of seeding, as a script the sandbox runs on its own.
+///
+/// Every step announces itself into [`SEED_STATE_PATH`] before doing anything, so
+/// a watcher -- this run's, or a later one after the tool was closed -- can say
+/// what is happening. The trap turns any failure into `failed` with the last
+/// lines of the log attached, because the alternative is a state file that simply
+/// stops and a session that looks like it is still working.
+///
+/// The agent is started from in here rather than by the host for the same reason
+/// as everything else: if the host has gone, the session should still come up
+/// ready to work.
+///
+/// The failure handler takes no argument, deliberately. `/bin/sh` in the sandbox
+/// is dash, which has no `$LINENO`, and reaching for it under `set -u` makes the
+/// handler itself fail -- which is how a clone that could not authenticate came
+/// to write no reason at all into the state file, leaving the host to infer
+/// "stopped" from a missing process. The last lines of the log say more than a
+/// line number would.
+pub fn detached_script(session: &Session, start_agent: bool) -> String {
+    let meta =
+        serde_json::to_string_pretty(session).expect("Session is plain data and always serializes");
+
+    let agent = if start_agent {
+        // In a subshell: the agent script exits early when a session is already
+        // running, and that must not end the seeder before it reports `done`.
+        format!(
+            "step agent
+(
+{}
+)
+",
+            start_agent_script(session).trim_end()
+        )
+    } else {
+        String::new()
+    };
+
+    format!(
+        r#"set -eu
+mkdir -p /sandbox/.sbx
+state={state}
+say() {{ printf '%s
+' "$*" >> "$state"; }}
+step() {{ say "step $1"; }}
+fail() {{
+  say "failed $(tail -n 3 {log} 2>/dev/null | tr '\n' ' ')"
+  exit 1
+}}
+trap fail EXIT INT TERM
+: > "$state"
+say "pid $$"
+
+step clone
+{clone}
+step branch
+step meta
+{write_meta}
+{agent}trap - EXIT INT TERM
+say done
+"#,
+        state = sh_quote(SEED_STATE_PATH),
+        log = sh_quote(SEED_LOG_PATH),
+        clone = clone_and_branch(session).trim_end(),
+        write_meta = meta_write_command(&meta),
+        agent = agent,
+    )
+}
+
+/// Write the seeder into the sandbox and start it, detached.
+///
+/// Returns as soon as it is running. `setsid` is what makes it outlive this exec:
+/// without a session of its own the seeder is torn down with the exec's process
+/// group, which is exactly the failure this whole arrangement exists to remove.
+/// Its output goes to a file because it has no terminal to write to and because a
+/// failure needs something to quote.
+pub fn launch(
+    client: &dyn OpenShell,
+    session: &Session,
+    start_agent: bool,
+) -> Result<(), SeedError> {
+    let script = detached_script(session, start_agent);
+    let launcher = format!(
+        "mkdir -p /sandbox/.sbx && printf '%s' {script} > {path} &&          setsid sh {path} > {log} 2>&1 < /dev/null &          sleep 0.1",
+        script = sh_quote(&script),
+        path = sh_quote(SEED_SCRIPT_PATH),
+        log = sh_quote(SEED_LOG_PATH),
+    );
+
+    let out = client.exec(&session.sandbox, &["sh", "-c", &launcher])?;
     if !out.ok() {
         return Err(SeedError::Script {
             code: out.exit_code,
@@ -127,6 +241,50 @@ pub fn seed(client: &dyn OpenShell, session: &Session) -> Result<(), SeedError> 
         });
     }
     Ok(())
+}
+
+/// Ask the sandbox how the seeding is going.
+///
+/// One exec, cheap enough to do twice a second while watching and once per stuck
+/// session when repairing records. The liveness check is a directory test in
+/// `/proc`, which costs nothing next to the round trip.
+pub fn seed_state(client: &dyn OpenShell, session: &Session) -> SeedState {
+    let script = format!(
+        "cat {state} 2>/dev/null || true;          pid=$(sed -n 's/^pid //p' {state} 2>/dev/null | tail -1);          if [ -n \"$pid\" ] && [ -d /proc/\"$pid\" ]; then echo 'alive'; fi",
+        state = sh_quote(SEED_STATE_PATH),
+    );
+    match client.exec(&session.sandbox, &["sh", "-c", &script]) {
+        Ok(out) if out.ok() => parse_seed_state(&out.stdout),
+        // An unreachable sandbox says nothing about the seeding; the caller
+        // treats that as "no news" and asks again.
+        _ => SeedState::Unknown,
+    }
+}
+
+/// Read the state file. Pure, so the state machine is testable without a
+/// sandbox.
+pub fn parse_seed_state(text: &str) -> SeedState {
+    let mut step = None;
+    let mut alive = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("failed ") {
+            return SeedState::Failed(rest.trim().to_string());
+        }
+        if line == "done" {
+            return SeedState::Done;
+        }
+        if let Some(rest) = line.strip_prefix("step ") {
+            step = Some(rest.trim().to_string());
+        }
+        if line == "alive" {
+            alive = true;
+        }
+    }
+    match step {
+        Some(step) => SeedState::Running { step, alive },
+        None => SeedState::Unknown,
+    }
 }
 
 /// Script that starts the agent inside the sandbox, under tmux.
@@ -146,15 +304,21 @@ pub fn start_agent_script(session: &Session) -> String {
         format!("{} \"$(cat {})\"", session.agent, TASK_PATH)
     };
 
+    // The locale is exported here as well as in the image, because this runs as
+    // an exec and the gateway does not pass the image's environment through --
+    // and this exec is the one that starts the *tmux server*, whose environment
+    // every pane inherits. An agent with no UTF-8 locale draws its own box rules
+    // and glyphs as something tmux cannot map. See `ops::attach_script`.
     format!(
         r#"set -eu
-if tmux -f /etc/tmux.conf has-session -t {tmux} 2>/dev/null; then
+export LANG=C.UTF-8 LC_ALL=C.UTF-8 COLORTERM=truecolor
+if tmux -u -f /etc/tmux.conf has-session -t {tmux} 2>/dev/null; then
   exit 0
 fi
 mkdir -p /sandbox/.sbx
 printf '%s' {task} > {task_path}
-tmux -f /etc/tmux.conf new-session -d -s {tmux} -c {repo}
-tmux -f /etc/tmux.conf send-keys -t {tmux} {launch} Enter
+tmux -u -f /etc/tmux.conf new-session -d -s {tmux} -c {repo}
+tmux -u -f /etc/tmux.conf send-keys -t {tmux} {launch} Enter
 "#,
         tmux = sh_quote(&session.tmux),
         task = sh_quote(&session.task),
@@ -162,38 +326,6 @@ tmux -f /etc/tmux.conf send-keys -t {tmux} {launch} Enter
         repo = sh_quote(REPO_PATH),
         launch = sh_quote(&launch),
     )
-}
-
-/// Start the agent. Safe to call on an already-running session.
-pub fn start_agent(client: &dyn OpenShell, session: &Session) -> Result<(), SeedError> {
-    let out = client.exec(
-        &session.sandbox,
-        &["sh", "-c", &start_agent_script(session)],
-    )?;
-    if !out.ok() {
-        return Err(SeedError::Script {
-            code: out.exit_code,
-            stderr: out.stderr.trim().to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Refresh the metadata record inside the sandbox.
-///
-/// The record is what adoption reads after the local cache is lost, so it has
-/// to track state changes. Writing it only once during seeding leaves every
-/// recovered session frozen at `seeding`.
-pub fn write_meta(client: &dyn OpenShell, session: &Session) -> Result<(), SeedError> {
-    let meta = serde_json::to_string_pretty(session)?;
-    let out = client.exec(&session.sandbox, &["sh", "-c", &meta_write_command(&meta)])?;
-    if !out.ok() {
-        return Err(SeedError::Script {
-            code: out.exit_code,
-            stderr: out.stderr.trim().to_string(),
-        });
-    }
-    Ok(())
 }
 
 /// Read a session back out of a sandbox, for adopting work the local cache
@@ -245,11 +377,96 @@ mod tests {
         }
     }
 
+    /// The seeder runs detached, so the state file is the only thing that knows
+    /// what happened. Every shape it can be in has to read back correctly.
+    #[test]
+    fn the_state_file_reads_back() {
+        assert_eq!(parse_seed_state(""), SeedState::Unknown);
+        assert_eq!(parse_seed_state("pid 41\n"), SeedState::Unknown);
+
+        assert_eq!(
+            parse_seed_state("pid 41\nstep clone\nalive\n"),
+            SeedState::Running {
+                step: "clone".into(),
+                alive: true
+            }
+        );
+        // Later steps win: the file is appended to, not rewritten.
+        assert_eq!(
+            parse_seed_state("pid 41\nstep clone\nstep branch\nstep meta\nalive\n"),
+            SeedState::Running {
+                step: "meta".into(),
+                alive: true
+            }
+        );
+        // No `alive` line means the process is gone -- which, mid-step, is the
+        // one case that cannot be told from "still working" any other way.
+        assert_eq!(
+            parse_seed_state("pid 41\nstep clone\n"),
+            SeedState::Running {
+                step: "clone".into(),
+                alive: false
+            }
+        );
+
+        assert_eq!(
+            parse_seed_state("pid 41\nstep agent\ndone\n"),
+            SeedState::Done
+        );
+        assert_eq!(
+            parse_seed_state("pid 41\nstep clone\nfailed 12: fatal: repository not found\n"),
+            SeedState::Failed("12: fatal: repository not found".into())
+        );
+    }
+
+    /// What the detached script has to do, in the order it has to do it. Each of
+    /// these is invisible until a seeder dies halfway and the record has to say
+    /// something true about it.
+    #[test]
+    fn the_detached_script_reports_every_step_and_traps_failure() {
+        let s = Session::new("x".into(), "https://github.com/o/r.git".into(), "t".into());
+        let script = detached_script(&s, true);
+
+        // Announced before the work, or a watcher shows the wrong step.
+        let clone_at = script.find("step clone").expect("a clone step");
+        let cloning_at = script.find("gitc clone").expect("the clone itself");
+        assert!(clone_at < cloning_at, "{script}");
+
+        for step in ["step clone", "step branch", "step meta", "step agent"] {
+            assert!(script.contains(step), "missing `{step}`: {script}");
+        }
+        // The end, and the only thing that says the session is usable.
+        assert!(script.trim_end().ends_with("say done"), "{script}");
+        // Anything unexpected has to become `failed`, or the state file simply
+        // stops and the session looks like it is still working.
+        assert!(script.contains("trap fail EXIT INT TERM"), "{script}");
+        // dash has no `$LINENO`, and reaching for it under `set -u` turns the
+        // failure handler into a second failure that reports nothing at all.
+        assert!(!script.contains("LINENO"), "{script}");
+        assert!(
+            script.contains("trap - EXIT INT TERM"),
+            "the trap is cleared before `done`"
+        );
+        // The metadata is written inside the sandbox now, because the host may
+        // not be there when seeding ends.
+        assert!(script.contains(crate::session::META_PATH), "{script}");
+    }
+
+    /// Without `--start`, nothing about the agent is in the script at all: the
+    /// session is prepared and left alone.
+    #[test]
+    fn the_agent_is_only_started_when_asked_for() {
+        let s = Session::new("x".into(), "https://github.com/o/r.git".into(), "t".into());
+        assert!(!detached_script(&s, false).contains("step agent"));
+        assert!(!detached_script(&s, false).contains("new-session"));
+        assert!(detached_script(&s, true).contains("new-session"));
+    }
+
     #[test]
     fn seed_script_interpolates_nothing_raw() {
         let mut s = Session::new("x".into(), "https://example.com/a'b.git".into(), "t".into());
         s.base_branch = Some("main".into());
-        let script = seed_script(&s);
+        let script = detached_script(&s, true);
         // The raw, unquoted URL must never appear.
         assert!(!script.contains("https://example.com/a'b.git"));
         assert!(script.contains(r"a'\''b.git"));
@@ -260,7 +477,7 @@ mod tests {
     #[test]
     fn seed_script_omits_branch_flag_when_unset() {
         let s = Session::new("x".into(), "url".into(), "t".into());
-        let script = seed_script(&s);
+        let script = detached_script(&s, true);
         assert!(!script.contains("--branch"));
         assert!(script.contains("gitc clone --quiet -- 'url'"));
     }
@@ -271,7 +488,7 @@ mod tests {
     #[test]
     fn an_unrecognised_host_still_seeds() {
         let s = Session::new("x".into(), "https://gitlab.com/o/r.git".into(), "t".into());
-        let script = seed_script(&s);
+        let script = detached_script(&s, true);
         assert!(script.contains("gitc clone"), "{script}");
         assert!(script.contains("git_auth=''"), "must be defined: {script}");
         assert!(
@@ -295,7 +512,7 @@ mod tests {
             "https://inetse@dev.azure.com/inetse/proj/_git/repo".into(),
             "t".into(),
         );
-        let script = seed_script(&s);
+        let script = detached_script(&s, true);
         assert!(script.contains("AZURE_DEVOPS_PAT"), "{script}");
         assert!(
             script.contains("Basic"),
@@ -328,7 +545,7 @@ mod tests {
             "https://github.com/octocat/Hello-World.git".into(),
             "t".into(),
         );
-        let script = seed_script(&s);
+        let script = detached_script(&s, true);
         assert!(script.contains("Bearer $GITHUB_TOKEN"), "{script}");
         assert!(
             !script.contains("base64"),
@@ -376,7 +593,7 @@ mod tests {
     #[test]
     fn seed_script_embeds_recoverable_metadata() {
         let s = Session::new("x".into(), "url".into(), "do the thing".into());
-        let script = seed_script(&s);
+        let script = detached_script(&s, true);
         assert!(script.contains("/sandbox/.sbx/meta.json"));
         assert!(
             script.contains("do the thing"),

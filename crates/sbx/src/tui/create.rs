@@ -360,6 +360,8 @@ pub struct Form {
     facts: Option<Facts>,
     task: Input,
     name: Input,
+    /// What already exists, for keeping derived names clear of it.
+    history: History,
     /// Whether the name has been typed into. Until it has, it follows the task,
     /// which is what makes the common case a single field to fill in.
     name_edited: bool,
@@ -379,18 +381,32 @@ impl Form {
     /// `providers` is what the gateway reported, or the reason it could not be
     /// asked. Passed in rather than fetched, because a form is created on a
     /// keystroke and this module does no I/O.
-    pub fn new(repo: LocalRepo, providers: Option<&Result<Vec<Provider>, String>>) -> Self {
+    ///
+    /// `history` is what the sessions that already exist have to say: the names
+    /// that are taken, and the credentials the last session for this repository
+    /// was given. Both are things the form cannot work out for itself and both
+    /// are the difference between a form that has to be corrected and one that
+    /// is already right.
+    pub fn new(
+        repo: LocalRepo,
+        providers: Option<&Result<Vec<Provider>, String>>,
+        history: History,
+    ) -> Self {
         let base = repo.branch.clone().unwrap_or_default();
         let (choices, providers_error) = match providers {
-            Some(Ok(list)) => (preselect(list, &repo), None),
+            Some(Ok(list)) => (preselect(list, &repo, &history.providers), None),
             Some(Err(e)) => (Vec::new(), Some(e.clone())),
             None => (Vec::new(), Some("still reading the provider list".into())),
         };
 
+        let derived = session::derive_name("", &repo.name).unwrap_or_default();
+
         Form {
             facts: None,
-            // Derived from the repository until there is a task to derive from.
-            name: Input::new(session::derive_name("", &repo.name).unwrap_or_default()),
+            // Derived from the repository until there is a task to derive from,
+            // and made unique so a second session in the same repository does not
+            // have to be renamed by hand.
+            name: Input::new(session::unique_name(&derived, &history.taken)),
             task: Input::default(),
             name_edited: false,
             base: Input::new(base),
@@ -398,6 +414,7 @@ impl Form {
             providers: choices,
             provider_cursor: 0,
             providers_error,
+            history,
             field: Field::Task,
             error: None,
             repo,
@@ -425,7 +442,7 @@ impl Form {
         }
         match providers {
             Ok(list) => {
-                self.providers = preselect(list, &self.repo);
+                self.providers = preselect(list, &self.repo, &self.history.providers);
                 self.providers_error = None;
             }
             Err(e) => self.providers_error = Some(e.clone()),
@@ -542,7 +559,8 @@ impl Form {
                         Field::Task if !self.name_edited => {
                             let derived = session::derive_name(self.task.text(), &self.repo.name)
                                 .unwrap_or_default();
-                            self.name.set(derived);
+                            self.name
+                                .set(session::unique_name(&derived, &self.history.taken));
                         }
                         _ => {}
                     }
@@ -613,7 +631,30 @@ impl Form {
 /// exactly one provider -- with two Azure PATs there is no way to know which
 /// organisation is meant, and guessing would attach a credential that cannot
 /// authenticate and produce a failure three steps later.
-fn preselect(providers: &[Provider], repo: &LocalRepo) -> Vec<Choice> {
+/// What the sessions that already exist tell the form.
+#[derive(Debug, Clone, Default)]
+pub struct History {
+    /// Session names in use, so a derived one can avoid them.
+    pub taken: Vec<String>,
+    /// Provider names the most recent session for this repository's host was
+    /// given. A record of what worked, not a guess.
+    pub providers: Vec<String>,
+}
+
+/// Which credentials to tick.
+///
+/// Two rules, in order. A provider is the obvious choice when it is the only one
+/// of the type that is wanted -- the agent's, and the repository host's -- since
+/// a session without the agent's credential comes up to a login prompt and one
+/// without the host's cannot clone a private repository.
+///
+/// When there are several of a type, the type alone cannot say which: two Azure
+/// PATs are two organisations, and the wrong one fails three steps later. That
+/// used to mean nothing was ticked, which is just as wrong for the common case --
+/// the answer is almost always the one used last time. So `used_before`, the
+/// providers the last session for this host was given, breaks the tie. It is
+/// evidence rather than a guess: it can only be wrong where the user was wrong.
+fn preselect(providers: &[Provider], repo: &LocalRepo, used_before: &[String]) -> Vec<Choice> {
     let agent = session::agent_provider_type("claude");
     let forge = repo
         .origin
@@ -629,7 +670,8 @@ fn preselect(providers: &[Provider], repo: &LocalRepo) -> Vec<Choice> {
             selected: [agent, forge]
                 .into_iter()
                 .flatten()
-                .any(|kind| kind == p.kind && unique(kind)),
+                .any(|kind| kind == p.kind)
+                && (unique(&p.kind) || used_before.contains(&p.name)),
             name: p.name.clone(),
             kind: p.kind.clone(),
         })
@@ -829,6 +871,7 @@ mod tests {
         Form::new(
             repo("api", Some("https://github.com/o/api.git"), Some("main")),
             Some(&providers),
+            History::default(),
         )
     }
 
@@ -916,25 +959,93 @@ mod tests {
             provider("azure-pat", "azure-devops-pat"),
             provider("azure-pat-personal", "azure-devops-pat"),
         ]);
-        let f = Form::new(
+        let azure = || {
             repo(
                 "api",
                 Some("https://dev.azure.com/org/proj/_git/api"),
                 Some("main"),
-            ),
-            Some(&providers),
+            )
+        };
+        let ticked = |f: &Form| -> Vec<String> {
+            f.providers()
+                .iter()
+                .filter(|c| c.selected)
+                .map(|c| c.name.clone())
+                .collect()
+        };
+
+        // Nothing to go on: the type alone cannot say which organisation was
+        // meant, and the wrong PAT fails three steps later.
+        let f = Form::new(azure(), Some(&providers), History::default());
+        assert_eq!(ticked(&f), vec!["claude-oauth".to_string()]);
+
+        // With a session for this host already using one, that is the answer.
+        let history = History {
+            taken: vec!["api".into()],
+            providers: vec!["azure-pat-personal".into(), "claude-oauth".into()],
+        };
+        let f = Form::new(azure(), Some(&providers), history);
+        assert_eq!(
+            ticked(&f),
+            vec!["claude-oauth".to_string(), "azure-pat-personal".to_string()],
+            "the credential the last session for this host was given"
         );
-        let selected: Vec<&str> = f
+    }
+
+    /// A provider that was used before but is not of a type this session wants
+    /// must not be ticked -- history breaks ties, it does not invent them.
+    #[test]
+    fn history_only_breaks_ties_between_wanted_types() {
+        let providers = Ok(vec![
+            provider("claude-oauth", "claude-code-oauth"),
+            provider("azure-pat", "azure-devops-pat"),
+            provider("azure-pat-personal", "azure-devops-pat"),
+        ]);
+        let history = History {
+            taken: vec![],
+            // An Azure PAT, for a GitHub repository.
+            providers: vec!["azure-pat".into()],
+        };
+        let f = Form::new(
+            repo("api", Some("https://github.com/o/api.git"), Some("main")),
+            Some(&providers),
+            history,
+        );
+        let ticked: Vec<&str> = f
             .providers()
             .iter()
             .filter(|c| c.selected)
             .map(|c| c.name.as_str())
             .collect();
         assert_eq!(
-            selected,
+            ticked,
             vec!["claude-oauth"],
-            "two Azure PATs: there is no way to know which organisation is meant"
+            "no Azure PAT for a GitHub repo"
         );
+    }
+
+    /// A second session in the same repository is the normal case; with no task
+    /// typed, both derive the repository's name, and the form must not have to be
+    /// corrected by hand.
+    #[test]
+    fn a_derived_name_steps_around_the_ones_in_use() {
+        let providers = Ok(vec![provider("claude-oauth", "claude-code-oauth")]);
+        let history = History {
+            taken: vec!["api".into()],
+            providers: vec![],
+        };
+        let mut f = Form::new(
+            repo("api", Some("https://github.com/o/api.git"), Some("main")),
+            Some(&providers),
+            history,
+        );
+        assert_eq!(f.input(Field::Name).unwrap().text(), "api-2");
+
+        // And it keeps stepping around them as the task is typed.
+        for c in "api".chars() {
+            f.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(f.input(Field::Name).unwrap().text(), "api-2");
     }
 
     #[test]
@@ -957,6 +1068,7 @@ mod tests {
         let mut f = Form::new(
             repo("api", Some("https://github.com/o/api.git"), None),
             None,
+            History::default(),
         );
         assert!(f.providers().is_empty());
         assert!(f.providers_error().is_some());

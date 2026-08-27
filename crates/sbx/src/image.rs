@@ -319,11 +319,13 @@ mod tests {
     /// test that does not run a sandbox, so they are asserted here.
     #[test]
     fn the_image_keeps_the_agents_screen_scrapeable() {
-        let (cols, rows) = crate::tui::term::SCRAPE_SIZE;
+        // Wide enough that Claude Code's footer -- where `status.rs` finds
+        // `esc to interrupt` -- is not truncated away, and the same size an
+        // attach puts the window back to when it detaches.
+        let (cols, rows) = crate::session::SCRAPE_SIZE;
         assert!(
             DOCKERFILE.contains(&format!("default-size {cols}x{rows}")),
-            "an unattached agent pane must be wide enough for its footer, \
-             and must match what the embedded terminal restores on close"
+            "an unattached agent pane must be wide enough for its footer"
         );
         assert!(
             DOCKERFILE.contains("ENV DISABLE_AUTOUPDATER=1"),
@@ -410,6 +412,37 @@ mod tests {
             SBX_STATUS.contains("mv \"$tmp\""),
             "the file must be renamed into place, not written in place"
         );
+    }
+
+    /// The defaults a session starts with, which are the whole point of baking a
+    /// settings file rather than leaving the agent on its own.
+    #[test]
+    fn the_baked_settings_choose_a_model_and_a_permission_mode() {
+        let v: serde_json::Value =
+            serde_json::from_str(CLAUDE_SETTINGS).expect("settings.json must be valid JSON");
+
+        // An alias, not a pinned id: `opus[1m]` follows the newest Opus and keeps
+        // the million-token context, where `claude-opus-5[1m]` would go stale the
+        // way the image's own Claude Code version did before increment 10.
+        assert_eq!(v["model"], "opus[1m]");
+
+        // `auto`, which is its own mode -- not `acceptEdits`, which still stops
+        // for anything that is not an edit, and not `bypassPermissions`, which
+        // stops asking altogether. Claude Code's own words for auto mode are
+        // that it is "only for use in isolated environments", which is the one
+        // thing sbx can actually promise.
+        assert_eq!(v["permissions"]["defaultMode"], "auto");
+
+        // Every one of these exists because the sandbox denies the traffic behind
+        // it, and a denial with nothing worth investigating behind it is noise in
+        // the events pane.
+        for quiet in [
+            "DISABLE_AUTOUPDATER",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+            "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL",
+        ] {
+            assert_eq!(v["env"][quiet], "1", "{quiet}");
+        }
     }
 
     #[test]

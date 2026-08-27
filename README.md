@@ -22,7 +22,7 @@ is portable to macOS, because the isolation is kernel-enforced.
 
 | | |
 | --- | --- |
-| Rust | 1.88 or newer (edition 2024, let-chains) |
+| Rust | 1.89 or newer (edition 2024, let-chains, `File::lock`) |
 | [OpenShell](https://github.com/NVIDIA/OpenShell) | 0.0.110 -- CLI, gateway and sandbox helper |
 | Docker | server 29.x, reachable by your user |
 | tmux | on the host, for `sbx attach` |
@@ -165,6 +165,31 @@ provably cannot publish to it.
 Each agent runs under a tmux session *inside* its own sandbox, so it keeps
 working whether or not anything is attached to it.
 
+The image bakes a `settings.json` for it, because a fresh sandbox has a fresh
+`HOME` and an agent that has to be configured on arrival is an agent that stops
+to ask:
+
+| | |
+| --- | --- |
+| `model` | `opus[1m]` -- an alias, so it follows the newest Opus and keeps the million-token context |
+| `permissions.defaultMode` | `auto`, so the agent handles its own permission prompts |
+| `env` | the auto-updater, non-essential traffic and the plugin marketplace, all off |
+| `hooks` | the status reporter, so the state column has something to read |
+
+**Auto mode** is Claude Code's own middle setting: it judges each tool call and
+executes what it considers safe, rather than stopping for every edit
+(`acceptEdits` stops for everything that is not one) or not asking at all
+(`bypassPermissions`). Claude Code's own advice is to use it "only in isolated
+environments", which is the one thing sbx can actually promise -- and it is the
+whole reason to run several agents at once, since an agent that stops on the
+first edit is an agent you are still babysitting. `Shift+Tab` inside a session
+changes it, and `/model` changes the model, for that session.
+
+The three environment variables are all there because the sandbox *denies* the
+traffic behind them, and a denial with nothing worth investigating behind it is
+noise in the events pane. With them set, a session that clones, edits and answers
+produces a feed with no denials in it at all.
+
 `sbx image build` installs the newest Claude Code release rather than whatever
 the community base image happens to have frozen -- it shipped 2.1.143 while
 2.1.246 was current, and an agent cannot upgrade itself from inside a sandbox
@@ -176,38 +201,61 @@ download is checked against the release manifest's SHA-256.
 what the built image carries and warns when a newer release is out.
 
 ```
-┏ sessions 2 ━━━━━━━━━━━━━━━━━ 1 waiting ┓┌ preview · diff · policy · events · agent ── readme-fix ┐
-┃   1. add-tests                waiting ●┃│── committed, vs origin/main                            │
-┃      sbx/add-tests             clean 48s┃│diff --git a/README b/README                           │
-┃                                        ┃│@@ -1,4 +1,4 @@                                         │
-┃▌  2. readme-fix               running ●┃│-Hello Wrold!                                           │
-┃      sbx/readme-fix        +12/-3 ? 52s┃│+Hello World!                                           │
-┃                                        ┃│── uncommitted                                          │
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛│...                                                     │
-┌ session readme-fix ────────────────────┐│── untracked                                            │
-│task      fix the readme typo           ││tests/test_readme.py                                    │
-│repo      https://github.com/you/sbx.git││                                                        │
-│branch    sbx/readme-fix                ││                                                        │
-│sandbox   sbx-readme-fix                ││                                                        │
-│policy    feature-work                  ││                                                        │
-│agent     claude                        ││                                                        │
-│providers claude-oauth                  ││                                                        │
-│agent at  running  Edit  (screen)       ││                                                        │
-└────────────────────────────────────────┘└────────────────────────────────────────────────────────┘
- j/k move · 1-9 jump · n new  │  enter open · a attach · P publish · D destroy  │  tab view · q quit
+   sessions 2                           1 waiting     agent · diff · policy · events          readme-fix
+
+      1. add-tests                      waiting ●     ── committed, vs origin/main
+         sbx/add-tests                   clean 48s    diff --git a/README b/README
+                                                      @@ -1,4 +1,4 @@
+   ▐ 2. readme-fix                      running ●▌    -Hello Wrold!
+   ▐    sbx/readme-fix               +12/-3 ? 52s▌    +Hello World!
+                                                      ── uncommitted
+                                                      ...
+   session readme-fix                                 ── untracked
+
+   task      fix the readme typo                      tests/test_readme.py
+   repo      https://github.com/you/sbx.git
+   branch    sbx/readme-fix
+   sandbox   sbx-readme-fix
+   policy    feature-work
+   agent     claude
+   providers claude-oauth
+   agent at  running  Edit  (screen)
+
+   j/k move · 1-9 jump · n new  │  enter open · a attach · P publish · D destroy  │  tab view · q quit
 ```
 
 The left column is what a session *is*: the list, and under it the facts about
-whichever one the cursor is on. They live there rather than at the top of the
-preview so they stay on screen when the right-hand pane is showing a diff or
-given over to the agent's terminal. Each fact is one row, cut to the pane rather
-than wrapped -- the preview pane has the task and the repository in full.
+whichever one the cursor is on. They sit there rather than in a pane of their own
+so they stay on screen whatever the right-hand side is showing. Each fact is one
+row, cut to the pane rather than wrapped. Nothing is hidden by that: a task cut
+short here is in the agent's screen in full, since the prompt it was given is the
+first thing in its transcript.
 
 A session takes two rows -- what it is, then where it has got to -- because those
 are two different questions and answering both on one line left room for neither.
 The rows are numbered, and `1`-`9` jump straight to one. The right-hand pane's
-views are tabs along its top border, so the pane keeps every row of its height for
-content; that matters most for the one view that is a live terminal.
+views are tabs in its heading, so the pane keeps every row of its height for
+content.
+
+The selected session is a filled light block -- the `▐ ▌` above stands in for it
+here -- with its text darkened to suit: black for the name and state, grey for
+the number, branch and age. The diff stat keeps its green and red, and the state
+dot its colour, because those read on white in either kind of theme. `waiting`
+keeps its magenta there too; everywhere else it is a filled magenta badge, which
+cannot survive inside another fill.
+
+Nothing sits in a corner of the terminal: the whole interface is inset, the
+columns are held apart, and every heading has a blank row under it. The footer's
+hints shed their descriptions when the window is too narrow for them -- `j/k`
+rather than `j/k move` -- because a hint line clipped mid-word reads as broken and
+the keys are the part worth keeping.
+
+There are no boxes. In a layout this dense they cost more than they earn -- four
+of them, drawn around content that is mostly rules already -- and what a border
+was really carrying was which pane the movement keys belong to. The heading
+carries that instead, in bold, where the eye already is. The create flow's picker
+and form keep their edge, because a modal is drawn over whatever was underneath
+it and its border is the only thing saying where it stops.
 
 The state column is what the *agent* is doing, not just whether the sandbox is
 up. A session blocked on a permission prompt shows `waiting` as a filled badge
@@ -217,16 +265,26 @@ scraping the agent's screen as well as from hooks baked into the image, because
 Claude Code fires no hook for a permission prompt or an interrupt; the `agent at`
 line says which source decided.
 
-`Tab` cycles the right pane through preview, diff, policy, events and the
-agent's own terminal (`Shift-Tab` goes back), remembered per session. `Enter`
-opens the agent, `a` hands the whole terminal over, `P` publishes and `D`
-destroys -- the two that are hard to undo are the two on capitals, and both ask
-first. `h`/`l` move focus between the panes, and the movement keys follow it:
-`j`/`k` walk the session list on the left and scroll on the right. The footer
-always says what the keys are here, because they change with the focus. The `+12/-3` column counts lines changed against
-the branch the session started from, and `?` marks untracked files. Every pane
-refetches on a timer, so a diff you are reading keeps up with the agent editing
-underneath it.
+`Tab` cycles the right pane through the agent's screen, the diff, the policy and
+the events feed (`Shift-Tab` goes back), remembered per session. The agent's
+screen is where it starts, because it answers the question the list raises: the
+state column says an agent is waiting, and this says what for. `Enter` attaches
+to the agent, `P` publishes and `D` destroys -- the two that are hard to undo are the two on capitals, and both ask
+first. `Shift-↑`/`Shift-↓` scroll the right-hand pane from either side, and
+`PageUp`/`PageDown` page it; `h`/`l` move focus between the panes, after which
+`j`/`k` scroll rather than walk the list. The footer always says what the keys are
+here, because they change with the focus. The `+12/-3` column counts lines changed against
+the branch the session started from, and `?` marks untracked files.
+
+Everything refetches on a timer, and the timers are short: a change inside a
+sandbox is on screen in **under 600ms** for the session you are looking at, and
+within two seconds for the rest. That is affordable because the reads are cheap --
+`sandbox list` is 20ms, a full poll of one session is 56ms, `git status` on a ten
+thousand file repository is 65ms -- so the whole interface costs a fraction of a
+percent of a core. The selected session is polled hardest, since its state, its
+stat and its screen all come out of that one read; the floor between polls caps
+the rate at five a second across every session, which keeps a long list from
+turning into a stream of execs.
 
 ### Starting a session
 
@@ -265,11 +323,20 @@ picker rather than hidden. What has not been pushed is not in the clone, which
 is what the last line counts. The current branch becomes the base branch, unless
 the remote has never seen it, in which case the remote's default branch is used.
 
-The name follows the task until you edit it, the policy is the same three
-templates `sbx policies` lists, and the providers are the ones the gateway has:
-the agent's credential and the repository host's are ticked when exactly one
-provider of that type exists, and left alone when there are several, since
-nothing here can tell which Azure organisation you meant.
+The name follows the task until you edit it, and steps around the names already
+in use: a second session in a repository that already has one derives
+`inet-server-2` rather than refusing to start until you rename it by hand. With
+no task typed the repository's own name is the guess, which is exactly when that
+collision happens.
+
+The policy is the same three templates `sbx policies` lists. The providers are
+the ones the gateway has: the agent's credential and the repository host's are
+ticked when exactly one provider of that type exists -- and when there are
+several, the ones the last session for the same host and organisation was given.
+Two Azure PATs are two organisations and the type alone cannot say which, but
+what you used last time for that org can, and it is evidence rather than a guess.
+Failing that, nothing is ticked, since a wrong credential fails three steps
+later.
 
 The scan looks in the working directory, its parent, `~/dev`, `~/src`, `~/code`,
 `~/projects`, `~/work`, `~/repos`, `~/git` and `$HOME` itself, skipping hidden
@@ -285,61 +352,48 @@ about it. It needs the sandbox image to exist already -- `sbx image build`
 streams docker's output, which a TUI cannot survive -- and `sbx doctor` says so
 when it is missing.
 
-### The agent's terminal
+### Looking at an agent, and typing at one
 
-`Enter` opens the selected agent's terminal in the right-hand pane and gives it
-the keyboard. `F12` gives the keyboard back, and the terminal keeps running:
+The last tab is the agent's screen, as the status poll last captured it:
 
 ```
-┏ sessions 2 ━━━━━━━━━━━━━━━━━ 1 waiting ┓┏ preview · diff · policy · events · agent ━ readme-fix · F12 to leave ┓
-┃   1. add-tests                waiting ●┃┃ ● Read README.md                                                    ┃
-┃      sbx/add-tests             clean 48s┃┃                                                                    ┃
-┃                                        ┃┃ ─────────────────────────────────────────────────────────────────── ┃
-┃▌  2. readme-fix               running ●┃┃ ❯ fix the typo                                                      ┃
-┃      sbx/readme-fix        +12/-3 ? 52s┃┃ ─────────────────────────────────────────────────────────────────── ┃
-┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛┃  esc to interrupt                                                   ┃
-┌ session readme-fix ────────────────────┐┃                                                                     ┃
-│task      fix the readme typo           │┃                                                                     ┃
-│branch    sbx/readme-fix                │┃                                                                     ┃
-│agent at  running  Edit  (screen)       │┃                                                                     ┃
-└────────────────────────────────────────┘┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
- every key goes to the agent · pgup/pgdn scroll  │  F12 leave
+   sessions 2                           1 waiting     agent · diff · policy · events          readme-fix
+
+      1. add-tests                      waiting ●     ❯ fix the typo
+         sbx/add-tests                   clean 48s
+                                                      ● Read README.md
+   ▐ 2. readme-fix                      running ●▌
+   ▐    sbx/readme-fix               +12/-3 ? 52s▌    ● Fixed the typo on line 1.
+
+   session readme-fix                                 ──────────────────────────────────────────────────
+                                                      ❯
+   task      fix the readme typo                      ──────────────────────────────────────────────────
+   branch    sbx/readme-fix                             ⏸ manual mode on · ← for agents
+   agent at  running  Edit  (screen)
+
+   enter attach to it · j/k scroll  │  1-9 jump · D destroy  │  tab view · q quit
 ```
 
-The facts stay under the list while you type at the agent, which is why they were
-moved there: what the session is, what its branch is called and what the state
-column thinks the agent is doing are exactly the things you want next to a
-terminal, not behind it.
+It is a view, not an attachment, and it is free: the same capture decides the
+state column, so watching an agent costs no round trip of its own. It refreshes
+faster while you are looking at it, on the interval the diff pane uses, and it
+keeps the colour the agent drew -- the capture carries the escape sequences and
+`crate::ansi` turns them back into styled text.
 
-That is the loop the TUI exists for: `Enter` to type at an agent, `F12` out,
-`j`/`k` to another, `Enter` again -- no key in between that does something else,
-and nothing torn down and rebuilt on the way. Answering a permission prompt is
-just pressing `1` in the pane.
+Blank space is squeezed out of it, because the sandbox pane is 200x50 and this
+one is whatever is left of your terminal. Claude Code draws its output at the top
+of the window and its input box at the *bottom*, so an unsqueezed screen in a
+short pane is all output and no prompt -- the half that says what the agent is
+waiting for. Runs of blank lines collapse to one; the blanks between messages
+survive.
 
-While the terminal has the keyboard it gets **every** key, including `q`, `D`
-and a pending y/n question -- those are things you are typing at an agent, not
-commands. `F12` is the one exception, which is why it is a function key: `Ctrl-b`
-is the agent's own tmux prefix, `Ctrl-c` and `Esc` belong to the agent, and the
-traditional escape chords are awkward on a non-US keyboard.
-
-Each open terminal is one `exec --tty` held against its sandbox, spawned only
-when asked for -- cycling `Tab` onto the view costs nothing and shows an
-invitation instead. Holding one open does not slow anything else down: the state
-column, the diff and the events feed keep updating for a session while you are
-typing at it, which is the property that makes the pane worth having rather than
-just novel.
-
-`PageUp` and `PageDown` scroll back through a long session, because they reach
-the agent like every other key and the agent owns its own transcript: Claude Code
-runs on the alternate screen, so there is no scrollback anywhere else to offer --
-neither this side of the pty nor the sandbox's tmux keeps one. An agent that does
-not take the alternate screen leaves its history in that tmux instead, where
-`Ctrl-b [` reaches it; that is forwarded too.
-
-Not wired up: the mouse and paste. Both are terminal-wide state rather than
-anything about this pane -- capturing the mouse would take text selection away
-from the whole interface -- and `a` is still there for a long stretch of work:
-full width, no key routing, `Ctrl-b d` to come back.
+`Enter` (or `a`) hands the whole terminal over to the agent, full width, with
+`Ctrl-b d` to come back. That is where typing happens: no key routing to get in
+the way, the agent's own scrolling, its own mouse support, and nothing between
+you and it. On the way back the agent's window is put back to 200x50, because
+tmux keeps a window at its last client's size and the status scraper reads that
+window -- attaching from an 80-column terminal would otherwise leave the markers
+truncated for the rest of the session.
 
 ### Ending a session
 
@@ -374,6 +428,15 @@ binary, and the **events** pane is the allow/deny feed behind them:
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
+The events feed is **kept on disk**, one file per session under
+`~/.config/sbx/events/`, because the gateway's log is a rolling window and sbx is
+what makes it roll: every exec it takes to read a sandbox writes three lines of
+its own, so at these poll intervals a 1500-line window covers about two minutes
+and held *one* event worth showing. Each fetch is merged into what the session has
+already shown, deduplicated and trimmed to the last few thousand, so the feed is a
+record rather than a peephole -- and closing the tool no longer looks like it wiped
+the log. Destroying a session takes its history with it.
+
 In the policy pane, `w` widens egress to the package registries and `t`
 tightens it back, without restarting the agent -- for the task that turns out
 to need a dependency installed. Only the network section: the filesystem and
@@ -383,7 +446,25 @@ pane labels them and declines to offer it.
 
 The local cache is disposable: each session's record lives inside its own
 sandbox, so deleting `~/.config/sbx/sessions.json` and running `sbx ls`
-re-adopts everything still running.
+re-adopts everything still running. Every write to it is a locked
+read-modify-write, because more than one writer is the normal case -- a TUI
+reconciling the list every second while `sbx new` in another terminal walks a
+session from `seeding` to `ready`, which on a large repository takes minutes.
+
+**Seeding runs inside the sandbox, detached from the command that asks for it.**
+`sbx new` writes a script into the sandbox, starts it with `setsid`, and then
+only *watches* it: the clone, the work branch, the metadata record and the agent
+all happen in there, and they finish whether or not the tool that started them is
+still running. Killing `sbx new` with `SIGKILL` two seconds into a clone leaves a
+session that comes up complete on its own.
+
+The seeder reports each step into `/sandbox/.sbx/seed.state` and its output to
+`seed.log`, which is what makes the difference between the three things that used
+to look identical from outside: still cloning, finished while nobody was looking,
+and stopped. The first refresh of any `sbx` command reads that file for a session
+whose record still says `creating` or `seeding` and catches the record up --
+`seed-kill: seeding -> ready (seeding finished)` -- or marks it failed with the
+reason git gave. A seeder still running is left alone, however long it takes.
 
 Status: early. See [PLAN.md](PLAN.md) for the increments and
 [docs/manual-loop.md](docs/manual-loop.md) for the verified setup.

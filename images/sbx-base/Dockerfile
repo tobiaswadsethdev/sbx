@@ -89,8 +89,33 @@ RUN printf '%s\n' \
         'set -g mouse on' \
         'set -g escape-time 10' \
         'set -g default-size 200x50' \
+        'set -g default-terminal tmux-256color' \
+        'set -as terminal-features ",*:RGB"' \
+        'set-environment -g LANG C.UTF-8' \
+        'set-environment -g LC_ALL C.UTF-8' \
+        'set-environment -g COLORTERM truecolor' \
     > /etc/tmux.conf \
     && chmod 0644 /etc/tmux.conf
+
+# UTF-8, and colour, and the reason both have to be said twice.
+#
+# The base image sets no locale at all, and the gateway does not pass this
+# environment through to an exec -- so a tmux client started by
+# `openshell sandbox exec` had neither. A tmux client that does not believe it is
+# on a UTF-8 terminal draws with the DEC line-drawing set and replaces every
+# character it cannot map with `_`, which is what Claude Code's banner, its box
+# rules and its `⏸` and `❯` glyphs turned into. `ENV` here fixes anything started
+# from the image; `set-environment` in the tmux conf above fixes the agent's own
+# process, whose environment comes from the tmux server; and `ops::attach_script`
+# exports it a third time for the client, which is the one the gateway strips.
+#
+# `default-terminal` and `terminal-features RGB` are the colour half. Inside tmux
+# a pane's TERM decides how many colours the agent thinks it has, and RGB has to
+# be declared before tmux will pass a 24-bit colour through to the terminal
+# outside rather than flattening it.
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    COLORTERM=truecolor
 
 # The agent does not manage its own version; this image does.
 #

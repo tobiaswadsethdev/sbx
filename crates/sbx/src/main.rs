@@ -1,5 +1,6 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
 
+mod ansi;
 mod doctor;
 mod events;
 mod forge;
@@ -275,7 +276,7 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs) -> Fallible {
 }
 
 fn cmd_ls(client: &dyn OpenShell) -> Fallible {
-    let refreshed = ops::refresh(client)?;
+    let refreshed = ops::refresh_with(client, true)?;
 
     for name in &refreshed.adopted {
         println!("adopted `{name}`");
@@ -410,12 +411,7 @@ fn cmd_publish(client: &dyn OpenShell, name: &str, opts: publish::Options) -> Fa
 fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
     let session = require_session(name)?;
 
-    let script = format!(
-        "tmux -f /etc/tmux.conf attach -d -t {tmux} 2>/dev/null \
-         || tmux -f /etc/tmux.conf new-session -s {tmux} -c {repo}",
-        tmux = seed::sh_quote(&session.tmux),
-        repo = seed::sh_quote(session::REPO_PATH),
-    );
+    let script = ops::attach_script(&session);
     println!("attaching to {name} - detach with Ctrl-b d");
 
     let status = client

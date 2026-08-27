@@ -5,12 +5,18 @@
 //! a live event, is the thing this tool can show that claude-squad structurally
 //! cannot -- so it gets a pane.
 //!
+//! Kept on disk per session, because the gateway's window is too small to be a
+//! record; see [`merge_kept`].
+//!
 //! This is a gateway call rather than an exec, which matters: it does not
 //! contend with the serialised per-sandbox exec budget the diff and poll panes
 //! share, so the feed can refresh on its own timer without delaying anything.
 
+use std::fs;
+use std::path::{Path, PathBuf};
+
 /// Verdict of a policy decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     Allowed,
     Denied,
@@ -20,7 +26,9 @@ pub enum Verdict {
 
 /// Severity as the gateway grades it. Anything above `Info` is worth colouring:
 /// the `tls: terminate` deprecation only ever appeared as a `Med`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Severity {
     Info,
     Medium,
@@ -45,7 +53,7 @@ impl Severity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     /// Epoch seconds. The gateway prints fractional seconds; the fraction is
     /// dropped because the feed shows a wall-clock time, not a duration.
@@ -60,6 +68,108 @@ pub struct Event {
     /// and is normalised to `None`.
     pub policy: Option<String>,
     pub reason: Option<String>,
+}
+
+/// How many events to keep per session on disk.
+///
+/// Enough to be a record of a session's afternoon; small enough that reading it
+/// back on every fetch stays free. Trimmed oldest-first.
+const KEPT: usize = 4000;
+
+/// Where a session's kept events live.
+fn kept_path(session: &str) -> PathBuf {
+    // Beside the session cache, under a directory of its own so a session name
+    // can never collide with `sessions.json`.
+    crate::store::Store::default_path()
+        .with_file_name("events")
+        .join(format!("{session}.jsonl"))
+}
+
+/// Add what was just fetched to what was already known, and keep the result.
+///
+/// The gateway's log is a rolling window and sbx is the thing making it roll:
+/// every exec it takes to read a sandbox writes three lines of its own, so at the
+/// intervals of increment 17 a 1500-line window covers about two minutes and held
+/// *one* event worth showing. Closing the tool and opening it again therefore
+/// looked like the feed had been cleared -- and for anything older than those two
+/// minutes, it had been.
+///
+/// So the feed is now ours to keep. Each fetch is merged into a file per session,
+/// deduplicated, and trimmed; the pane draws the union. Losing the file costs the
+/// history and nothing else, like the session cache beside it.
+pub fn merge_kept(session: &str, fetched: Vec<Event>) -> Vec<Event> {
+    let path = kept_path(session);
+    let mut all = read_kept(&path);
+    let mut known: std::collections::HashSet<(u64, String, String)> =
+        all.iter().map(identity).collect();
+
+    let mut added = false;
+    for e in fetched {
+        // Inserted as they are taken, because one window can carry the same line
+        // twice -- two identical execs inside the timestamp's resolution -- and a
+        // set that only knows the file would keep both.
+        if known.insert(identity(&e)) {
+            all.push(e);
+            added = true;
+        }
+    }
+    if !added && !all.is_empty() {
+        return newest_first(all);
+    }
+
+    // Oldest first while trimming, so the tail that survives is the newest.
+    all.sort_by_key(|e| e.at);
+    if all.len() > KEPT {
+        all.drain(..all.len() - KEPT);
+    }
+    if let Err(e) = write_kept(&path, &all) {
+        // A feed that cannot be persisted is still a feed; the pane shows what
+        // was fetched and the next attempt may work.
+        eprintln!("sbx: could not keep events for {session}: {e}");
+    }
+    newest_first(all)
+}
+
+/// What makes two events the same event. The gateway's own line, in effect: a
+/// timestamp plus what it was about.
+fn identity(e: &Event) -> (u64, String, String) {
+    (e.at, e.class.clone(), e.subject.clone())
+}
+
+fn newest_first(mut events: Vec<Event>) -> Vec<Event> {
+    events.sort_by_key(|e| std::cmp::Reverse(e.at));
+    events
+}
+
+fn read_kept(path: &Path) -> Vec<Event> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    // A line that will not parse is skipped rather than failing the read: this
+    // is a cache, and half a history is better than none.
+    text.lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+fn write_kept(path: &Path, events: &[Event]) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let body: Vec<String> = events
+        .iter()
+        .map(|e| serde_json::to_string(e).expect("an Event is plain data"))
+        .collect();
+    // Temp file and rename, like the session cache: an interrupted write must not
+    // truncate the history.
+    let tmp = path.with_extension("jsonl.tmp");
+    fs::write(&tmp, body.join("\n"))?;
+    fs::rename(&tmp, path)
+}
+
+/// Forget a session's kept events. Called when the session is destroyed.
+pub fn forget_kept(session: &str) {
+    let _ = fs::remove_file(kept_path(session));
 }
 
 impl Event {
@@ -262,6 +372,113 @@ mod tests {
 [1787568598.690] [sandbox] [OCSF ] [ocsf] PROC:LAUNCH [INFO] sleep(56)
 [1787568598.705] [sandbox] [OCSF ] [ocsf] NET:OPEN [INFO] host.openshell.internal:17670
 "#;
+
+    fn ev(at: u64, subject: &str) -> Event {
+        Event {
+            at,
+            class: "NET:OPEN".into(),
+            severity: Severity::Info,
+            verdict: Verdict::Allowed,
+            subject: subject.into(),
+            policy: None,
+            reason: None,
+        }
+    }
+
+    /// `XDG_CONFIG_HOME` is process-wide, so tests that point it somewhere else
+    /// cannot run beside each other: one would move the kept file out from under
+    /// another mid-test.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A directory of its own, so the kept file can be exercised for real.
+    struct Home {
+        dir: PathBuf,
+        previous: Option<std::ffi::OsString>,
+        /// Held for the test's lifetime, not read: dropping it is the point.
+        _serialised: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl Home {
+        fn new(tag: &str) -> Self {
+            // A poisoned lock means another test already failed; taking it anyway
+            // keeps this one's failure its own rather than a second symptom.
+            let guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("sbx-{tag}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            let previous = std::env::var_os("XDG_CONFIG_HOME");
+            // `kept_path` is derived from the same place the session cache is, so
+            // pointing that at a temporary directory is what makes this testable.
+            unsafe { std::env::set_var("XDG_CONFIG_HOME", &dir) };
+            Home {
+                dir,
+                previous,
+                _serialised: guard,
+            }
+        }
+    }
+
+    impl Drop for Home {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+                None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+            }
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The feed has to survive the tool closing, which is what it could not do:
+    /// the gateway's window is about two minutes wide at these poll intervals, so
+    /// anything older than that was gone -- and reopening looked like a wipe.
+    #[test]
+    fn kept_events_outlive_the_window_they_came_from() {
+        let _home = Home::new("events-keep");
+
+        // A first look, which is all the gateway still had.
+        let first = merge_kept("s", vec![ev(100, "curl -> a"), ev(200, "curl -> b")]);
+        assert_eq!(first.len(), 2);
+        assert_eq!(first[0].at, 200, "newest first, like a feed");
+
+        // Later, the window has rolled: only the newest is still in it, plus one
+        // that has happened since.
+        let second = merge_kept("s", vec![ev(200, "curl -> b"), ev(300, "curl -> c")]);
+        let times: Vec<u64> = second.iter().map(|e| e.at).collect();
+        assert_eq!(times, vec![300, 200, 100], "the old one is still there");
+
+        // And a fetch that returns nothing at all -- an unreachable gateway, a
+        // window with no events in it -- must not empty the feed.
+        let third = merge_kept("s", vec![]);
+        assert_eq!(third.len(), 3);
+    }
+
+    #[test]
+    fn the_same_event_is_never_kept_twice() {
+        let _home = Home::new("events-dedupe");
+        merge_kept("s", vec![ev(100, "curl -> a")]);
+        let again = merge_kept("s", vec![ev(100, "curl -> a"), ev(100, "curl -> a")]);
+        assert_eq!(again.len(), 1);
+
+        // And twice inside one fetch, which nothing on the file can catch.
+        let once = merge_kept("t", vec![ev(100, "curl -> a"), ev(100, "curl -> a")]);
+        assert_eq!(once.len(), 1, "a window carrying the same line twice");
+    }
+
+    #[test]
+    fn the_kept_file_is_trimmed_and_forgotten_with_its_session() {
+        let _home = Home::new("events-trim");
+        let many: Vec<Event> = (0..KEPT as u64 + 50).map(|i| ev(i, "x")).collect();
+        let kept = merge_kept("s", many);
+        assert_eq!(kept.len(), KEPT, "trimmed to the cap");
+        assert_eq!(
+            kept[0].at,
+            KEPT as u64 + 49,
+            "and it is the newest that stay"
+        );
+
+        forget_kept("s");
+        assert!(merge_kept("s", vec![]).is_empty(), "nothing is left");
+    }
 
     #[test]
     fn keeps_only_ocsf_policy_decisions() {

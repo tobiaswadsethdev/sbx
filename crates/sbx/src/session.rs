@@ -28,6 +28,14 @@ pub const TASK_PATH: &str = "/sandbox/.sbx/task.txt";
 /// Where the agent's hooks record what it is doing. Written by `sbx-status`,
 /// which the image bakes in; see `images/sbx-base/sbx-status`.
 pub const STATUS_PATH: &str = "/sandbox/.sbx/status.json";
+/// Where the seeder reports how far it has got. Written inside the sandbox by a
+/// process that outlives the command that started it, which is what lets a clone
+/// survive the tool quitting; see [`crate::seed`].
+pub const SEED_STATE_PATH: &str = "/sandbox/.sbx/seed.state";
+/// The seeder's own output, kept for when it fails.
+pub const SEED_LOG_PATH: &str = "/sandbox/.sbx/seed.log";
+/// Where the seeder script is written before being run detached.
+pub const SEED_SCRIPT_PATH: &str = "/sandbox/.sbx/seed.sh";
 /// Name of the tmux session **inside** the sandbox that the agent runs in.
 ///
 /// tmux runs in the sandbox rather than on the host so the agent survives
@@ -47,6 +55,14 @@ const PREFIX: &str = "sbx-";
 /// A session name becomes `sbx-<name>`, so the gateway's sandbox-name limit is
 /// the real constraint - far tighter than the 63-character label limit.
 const MAX_NAME: usize = MAX_SANDBOX_NAME - PREFIX.len();
+
+/// The size to leave the agent's tmux window at when nothing is attached.
+///
+/// The status scraper reads that window, and Claude Code's footer -- where the
+/// running marker lives -- is truncated to the pane, so the width decides
+/// whether the state column can tell working from idle. Matches the image's
+/// `default-size`; `image.rs` has a test that it does.
+pub const SCRAPE_SIZE: (u16, u16) = (200, 50);
 
 /// The sandbox a session of this name owns.
 ///
@@ -122,6 +138,39 @@ pub fn derive_name(task: &str, repo: &str) -> Option<String> {
             .map(|s| s.trim_end_matches(".git"))
             .and_then(slugify)
     })
+}
+
+/// A derived name that is not already taken.
+///
+/// Two sessions in the same repository is the normal case -- try something, try
+/// something else -- and with no task typed yet both derive the repository's own
+/// name. Refusing the second one until the name is edited by hand makes the
+/// common case the one that needs work, so a counter is appended instead:
+/// `inet-server`, `inet-server-2`, `inet-server-3`.
+///
+/// The base is shortened to make room for the suffix rather than the suffix being
+/// dropped, because the gateway's name budget is the hard part and a name that no
+/// longer fits it would be refused three steps later. Unlike [`slugify`], which
+/// drops whole words, this cuts mid-word if it has to: `fix-the-readm-2` still
+/// reads as a variant of the same thing, where `fix-the-2` would not.
+pub fn unique_name(base: &str, taken: &[String]) -> String {
+    let is_free = |candidate: &str| !taken.iter().any(|t| t == candidate);
+    if is_free(base) {
+        return base.to_string();
+    }
+    for n in 2..=99u32 {
+        let suffix = format!("-{n}");
+        let room = MAX_NAME.saturating_sub(suffix.len());
+        let stem: String = base.chars().take(room).collect();
+        // Trimming can leave a trailing dash, which `validate_name` rejects.
+        let candidate = format!("{}{suffix}", stem.trim_end_matches('-'));
+        if is_free(&candidate) {
+            return candidate;
+        }
+    }
+    // A hundred sessions of one name is not a case worth handling; hand back the
+    // base and let the collision be reported as it was before.
+    base.to_string()
 }
 
 /// The provider profile type carrying an agent's credential.
@@ -275,6 +324,50 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two sessions in one repository is the normal case, and with no task typed
+    /// both derive the repository's name. The second must not need hand-editing.
+    #[test]
+    fn a_taken_name_gets_a_counter() {
+        let taken = vec!["inet-server".to_string()];
+        assert_eq!(unique_name("inet-server", &taken), "inet-server-2");
+        assert_eq!(
+            unique_name("other", &taken),
+            "other",
+            "free names are left be"
+        );
+
+        let taken = vec!["inet-server".into(), "inet-server-2".into()];
+        assert_eq!(unique_name("inet-server", &taken), "inet-server-3");
+    }
+
+    /// The suffix has to fit inside the gateway's budget, or the name it produces
+    /// is refused three steps later.
+    #[test]
+    fn the_counter_fits_the_name_limit() {
+        let base = "a".repeat(MAX_NAME);
+        let taken = vec![base.clone()];
+        let next = unique_name(&base, &taken);
+        assert!(next.len() <= MAX_NAME, "`{next}` is {} long", next.len());
+        assert!(
+            validate_name(&next).is_ok(),
+            "{next}: {:?}",
+            validate_name(&next)
+        );
+        assert!(next.ends_with("-2"), "{next}");
+    }
+
+    /// Shortening the stem can leave it ending in a dash, which the gateway's
+    /// name rules reject.
+    #[test]
+    fn the_shortened_stem_never_ends_in_a_dash() {
+        // 13 characters with a dash where the truncation lands.
+        let base = "aaaaaaaaaaaa-b";
+        let taken = vec![base.to_string()];
+        let next = unique_name(base, &taken);
+        assert!(validate_name(&next).is_ok(), "{next}");
+        assert!(!next.contains("--"), "{next}");
+    }
 
     #[test]
     fn slugifies_task_text() {

@@ -2,7 +2,6 @@
 
 mod attach;
 mod create;
-pub mod term;
 mod ui;
 mod worker;
 
@@ -23,33 +22,63 @@ use crate::tui::attach::attach;
 use create::{Create, Form, Picker};
 use worker::{Request, Update, Worker};
 
-/// What to press to get into the agent's terminal, quoted in messages so the
-/// binding is stated in one place.
-const ENTER_AGENT_HINT: &str = "enter";
+// What everything here costs, measured against a live gateway rather than
+// assumed -- the intervals below were originally set against a guess that was
+// out by an order of magnitude:
+//
+// | `sandbox list`               |  20ms |
+// | an exec, doing nothing       |  44ms |
+// | a full poll: stat + screen   |  56ms |
+// | `git status` on a 10k file repo | 65ms |
+// | `openshell logs`, 400 lines  |  14ms |
+//
+// So a read is tens of milliseconds, not the hundreds the first version of this
+// was written around, and the interface can afford to feel live. The budget that
+// still matters is the *sandbox's* CPU -- `git status` on a large repository is
+// real work -- and the gateway's own log, which every exec writes to and the
+// events pane has to read past.
 
 /// How often the session list is reconciled against the gateway.
-const REFRESH_EVERY: Duration = Duration::from_secs(3);
+///
+/// One call, whatever the number of sessions, so this is bounded by the 20ms
+/// above and not by the list.
+const REFRESH_EVERY: Duration = Duration::from_millis(1000);
 /// How long a transient footer message stays up.
 const STATUS_LINGER: Duration = Duration::from_secs(4);
 /// Input poll interval. Short enough to feel immediate, long enough to idle.
 const TICK: Duration = Duration::from_millis(100);
-/// How long right-pane content is trusted before it is fetched again.
+/// How long right-pane content -- a diff, an events feed -- is trusted before it
+/// is fetched again.
 ///
 /// The agent is editing the repository continuously, so a diff the user is
 /// reading has to keep up. Only the *selected* session is refetched, so this is
-/// one exec per interval no matter how many sessions exist.
-const PANE_TTL: Duration = Duration::from_secs(4);
-/// How long a poll -- diff stat plus agent state -- is trusted.
+/// one read per interval no matter how many sessions exist.
+const PANE_TTL: Duration = Duration::from_millis(1500);
+/// How long a poll -- diff stat, agent state and the agent's screen -- is
+/// trusted, for a session that is *not* the one being looked at.
 ///
-/// Shorter than a stat alone would need, because the same exec now carries the
-/// "this agent needs you" signal and that is worth being prompt about. Every
-/// session pays for it, not just the selected one, so it is bounded below by
-/// [`POLL_MIN_GAP`].
-const POLL_TTL: Duration = Duration::from_secs(6);
+/// Every session pays for this, so it is the one interval that scales with the
+/// list; the floor below keeps that from becoming a stream of execs.
+const POLL_TTL: Duration = Duration::from_secs(2);
+/// The same, for the selected session: what is on screen has to keep up with the
+/// agent, and it is one session however many there are.
+///
+/// 500ms, which measures as under 600ms from a change in the sandbox to it being
+/// on screen. Lower is affordable on the host -- the poll is 56ms -- but it is
+/// the *sandbox's* `git status` that sets the floor: 65ms on a ten thousand file
+/// repository, so twice a second is already a tenth of a core spent watching one
+/// session. If sub-100ms ever matters, the answer is to split the poll rather
+/// than to run all of it more often: the state and the screen are a file read and
+/// a `capture-pane`, and only the stat needs git.
+const POLL_SELECTED_TTL: Duration = Duration::from_millis(500);
 /// Floor on the gap between polls, so a long session list cannot turn into a
-/// continuous stream of execs. With N sessions a full round trip takes at worst
-/// N times this, and the exec rate never exceeds one per interval.
-const POLL_MIN_GAP: Duration = Duration::from_secs(1);
+/// continuous stream of execs.
+///
+/// Caps the rate at five a second across all sessions. At ~60ms each that is
+/// about a third of the worker thread in the worst case, and the worker also has
+/// diffs and policies to fetch. With N sessions a full round takes at worst N
+/// times this, so the list stays under [`POLL_TTL`] up to ten of them.
+const POLL_MIN_GAP: Duration = Duration::from_millis(200);
 
 /// What the right-hand pane is showing.
 ///
@@ -58,24 +87,25 @@ const POLL_MIN_GAP: Duration = Duration::from_secs(1);
 /// it has actually tried (events).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum RightView {
+    /// The agent's screen, as the status poll last captured it. First and
+    /// default, because it is the answer to the question the list raises: the
+    /// state column says an agent is waiting, and this says what for.
+    ///
+    /// Read-only. Typing at an agent is `enter`, which hands the whole terminal
+    /// over.
     #[default]
-    Preview,
+    Agent,
     Diff,
     Policy,
     Events,
-    /// The agent's own terminal, live. Last in the cycle: it is the only view
-    /// that takes the keyboard, so walking round the others never lands on it
-    /// by surprise.
-    Agent,
 }
 
 impl RightView {
-    pub const ORDER: [RightView; 5] = [
-        RightView::Preview,
+    pub const ORDER: [RightView; 4] = [
+        RightView::Agent,
         RightView::Diff,
         RightView::Policy,
         RightView::Events,
-        RightView::Agent,
     ];
 
     fn next(self) -> Self {
@@ -88,14 +118,13 @@ impl RightView {
         Self::ORDER[(i + Self::ORDER.len() - 1) % Self::ORDER.len()]
     }
 
-    /// What the tab along the pane's border says.
+    /// What the tab in the pane's heading says.
     pub fn label(self) -> &'static str {
         match self {
-            RightView::Preview => "preview",
+            RightView::Agent => "agent",
             RightView::Diff => "diff",
             RightView::Policy => "policy",
             RightView::Events => "events",
-            RightView::Agent => "agent",
         }
     }
 
@@ -108,11 +137,13 @@ impl RightView {
     /// The events feed is the fastest, because it is a feed.
     fn ttl(self) -> Duration {
         match self {
-            RightView::Preview | RightView::Diff => PANE_TTL,
+            RightView::Diff => PANE_TTL,
             RightView::Policy => Duration::from_secs(30),
-            RightView::Events => Duration::from_secs(3),
-            // Nothing is fetched for it: the pty pushes, so there is no poll to
-            // keep fresh. The value is never read.
+            // A gateway call rather than an exec, so it contends with nothing;
+            // see `crate::events`.
+            RightView::Events => PANE_TTL,
+            // Drawn from the poll, which has its own schedule; see
+            // [`next_poll_target`]. The value is never read.
             RightView::Agent => Duration::MAX,
         }
     }
@@ -124,9 +155,6 @@ pub enum Focus {
     #[default]
     List,
     Right,
-    /// The agent's terminal has the keyboard: almost every key is forwarded to
-    /// it, and [`term::ESCAPE_KEY`] is the way back.
-    Agent,
 }
 
 /// Scroll offset per view, so switching back and forth keeps your place.
@@ -166,7 +194,6 @@ impl<T> Cached<T> {
 pub struct App {
     sessions: Vec<Session>,
     list_state: ListState,
-    previews: HashMap<String, Cached<String>>,
     diffs: HashMap<String, Cached<String>>,
     /// Diff stat and agent state per session, from one exec each.
     polls: HashMap<String, Cached<ops::Poll>>,
@@ -178,7 +205,6 @@ pub struct App {
     /// Sessions whose content is currently being fetched, so the same request
     /// is not queued repeatedly while the worker is busy. One per kind, so a
     /// slow diff does not stall the stat column.
-    preview_in_flight: Option<String>,
     diff_in_flight: Option<String>,
     poll_in_flight: Option<String>,
     policy_in_flight: Option<String>,
@@ -200,6 +226,8 @@ pub struct App {
     status_is_error: bool,
     status_set_at: Instant,
     refreshing: bool,
+    /// Whether the one repairing refresh has been asked for yet.
+    repaired: bool,
     last_refresh: Instant,
     should_quit: bool,
     /// Set by the key handler; acted on by the event loop, which is the only
@@ -219,17 +247,6 @@ pub struct App {
     publishing: Option<String>,
     /// Set by the key handler; sent by the event loop, which owns the worker.
     destroy_request: Option<String>,
-    /// Open agent terminals, one pty each. Not `Option`, because the map being
-    /// empty is the normal state: a terminal is opened only when asked for.
-    terminals: term::Terminals,
-    /// Bytes the focused terminal should receive, and the session they are for.
-    /// Set by the key handler, written by the event loop -- the same split every
-    /// other side effect here uses, which is what makes key routing testable
-    /// without a pty.
-    terminal_input: Vec<(String, Vec<u8>)>,
-    /// A session whose terminal should be opened. Opening spawns a process, so
-    /// it happens in the event loop rather than under the key handler.
-    terminal_request: Option<Session>,
     /// The session a destroy is running for. One at a time, like a publish: the
     /// gateway call takes a moment and the row has to keep saying why it is
     /// still there.
@@ -278,12 +295,10 @@ impl App {
         App {
             sessions: Vec::new(),
             list_state: ListState::default(),
-            previews: HashMap::new(),
             diffs: HashMap::new(),
             polls: HashMap::new(),
             policies: HashMap::new(),
             events: HashMap::new(),
-            preview_in_flight: None,
             diff_in_flight: None,
             poll_in_flight: None,
             policy_in_flight: None,
@@ -300,6 +315,7 @@ impl App {
             status_is_error: false,
             status_set_at: Instant::now(),
             refreshing: false,
+            repaired: false,
             // Force an immediate first refresh.
             last_refresh: Instant::now() - REFRESH_EVERY,
             should_quit: false,
@@ -309,9 +325,6 @@ impl App {
             publish_request: None,
             publishing: None,
             destroy_request: None,
-            terminals: term::Terminals::default(),
-            terminal_input: Vec::new(),
-            terminal_request: None,
             destroying: None,
             create: None,
             stashed_picker: None,
@@ -546,7 +559,6 @@ impl App {
     /// Forget everything fetched for a session. Called when the repository is
     /// known to have moved underneath us, e.g. after an attach.
     fn invalidate(&mut self, name: &str) {
-        self.previews.remove(name);
         self.diffs.remove(name);
         self.polls.remove(name);
         self.policies.remove(name);
@@ -559,12 +571,6 @@ impl App {
     /// agrees the sandbox has gone. Doing it locally is what makes the row
     /// disappear on the keystroke rather than several seconds later.
     fn forget(&mut self, name: &str) {
-        // Before anything else: the pty is a process holding an exec against a
-        // sandbox that is being deleted, and it detaches cleanly on the way out.
-        self.terminals.close(name);
-        if self.focus == Focus::Agent {
-            self.focus = Focus::List;
-        }
         self.invalidate(name);
         self.views.remove(name);
         self.scroll.remove(name);
@@ -735,6 +741,39 @@ impl App {
         self.providers_request = !matches!(self.providers, Some(Ok(_)));
     }
 
+    /// What the existing sessions have to say about a new one in this repository.
+    ///
+    /// The names in use, so a derived one can step around them, and the
+    /// credentials the most recent session for the same *host and organisation*
+    /// was given. Host and organisation rather than the exact URL, because an
+    /// Azure PAT is scoped to an organisation and covers every repository in it --
+    /// which is what makes the answer useful for a repository never opened
+    /// before.
+    fn history_for(&self, repo: &LocalRepo) -> create::History {
+        let taken = self.sessions.iter().map(|s| s.name.clone()).collect();
+
+        let key = |url: &str| {
+            crate::forge::Remote::parse(url)
+                .ok()
+                .map(|r| (r.host, r.org))
+        };
+        let wanted = repo.origin.as_deref().and_then(key);
+
+        // Newest first: the last thing that worked is the best evidence.
+        let providers = wanted
+            .and_then(|w| {
+                self.sessions
+                    .iter()
+                    .filter(|s| key(&s.repo).is_some_and(|k| k == w))
+                    .filter(|s| !s.providers.is_empty())
+                    .max_by_key(|s| s.created_at)
+                    .map(|s| s.providers.clone())
+            })
+            .unwrap_or_default();
+
+        create::History { taken, providers }
+    }
+
     /// Route a key to the create flow and act on what it decided.
     fn on_create_key(&mut self, key: KeyEvent) {
         let Some(flow) = self.create.as_mut() else {
@@ -755,9 +794,11 @@ impl App {
                     self.stashed_picker = Some(picker);
                 }
                 self.inspect_request = Some((repo.path.clone(), repo.branch.clone()));
+                let history = self.history_for(&repo);
                 self.create = Some(Create::Fill(Box::new(Form::new(
                     *repo,
                     self.providers.as_ref(),
+                    history,
                 ))));
             }
             create::Action::Back => {
@@ -829,14 +870,6 @@ impl App {
     }
 
     fn on_key(&mut self, key: KeyEvent) {
-        // The agent's terminal outranks everything, including a pending
-        // question: while it has the keyboard, `y`, `q` and `j` are things the
-        // user is typing at an agent, not commands. Only the escape key is read
-        // here, which is why it has to be one nothing in a sandbox wants.
-        if self.focus == Focus::Agent {
-            self.on_agent_key(key);
-            return;
-        }
         // A pending question owns the keyboard: nothing else may act while it
         // is up, or the answer could be consumed as a movement key.
         if self.confirm.is_some() {
@@ -887,13 +920,10 @@ impl App {
             (KeyCode::Char('t'), _) if self.right_view() == RightView::Policy => {
                 self.repolicy_request = self.request_repolicy(false);
             }
-            // Enter opens the agent in the right-hand pane and gives it the
-            // keyboard. `a` still hands the whole terminal over: it is the
-            // better view for a long stretch of work, it has no key routing to
-            // get in the way, and it is the fallback if the embedded one ever
-            // misbehaves.
-            (KeyCode::Enter, _) => self.enter_agent(),
-            (KeyCode::Char('a'), _) => {
+            // Entering a session hands the whole terminal over to its agent,
+            // full width and with no key routing in between -- the pane shows
+            // what the agent is doing; this is for doing something about it.
+            (KeyCode::Enter, _) | (KeyCode::Char('a'), _) => {
                 self.attach_request = self.selected().cloned();
             }
             // Shift-P, not p: publishing is outward-facing, so it should not
@@ -914,11 +944,19 @@ impl App {
             (KeyCode::Char('r'), _) => {
                 // Make the next tick refresh immediately.
                 self.last_refresh = Instant::now() - REFRESH_EVERY;
-                self.previews.clear();
                 self.diffs.clear();
                 self.polls.clear();
                 self.note("refreshing");
             }
+            // Scrolling the right-hand pane, from either side. The focus-based
+            // keys below need `l` first, and a diff you cannot scroll without
+            // knowing that is a diff that looks broken -- which is exactly how it
+            // was reported. Paging goes here too: a list of a handful of sessions
+            // has nothing to page through, and the content pane always does.
+            (KeyCode::Down, KeyModifiers::SHIFT) => self.scroll_by(1),
+            (KeyCode::Up, KeyModifiers::SHIFT) => self.scroll_by(-1),
+            (KeyCode::PageDown, _) => self.scroll_by(self.page()),
+            (KeyCode::PageUp, _) => self.scroll_by(-self.page()),
             // The movement keys act on whichever pane has focus.
             (code, _) if self.focus == Focus::Right => match code {
                 KeyCode::Char('j') | KeyCode::Down => self.scroll_by(1),
@@ -931,92 +969,15 @@ impl App {
             },
             (KeyCode::Char('j'), _) | (KeyCode::Down, _) => self.move_by(1),
             (KeyCode::Char('k'), _) | (KeyCode::Up, _) => self.move_by(-1),
-            (KeyCode::PageDown, _) => self.move_by(self.page()),
-            (KeyCode::PageUp, _) => self.move_by(-self.page()),
             (KeyCode::Char('g'), _) | (KeyCode::Home, _) => self.move_by(isize::MIN / 2),
             (KeyCode::Char('G'), _) | (KeyCode::End, _) => self.move_by(isize::MAX / 2),
             _ => {}
         }
     }
 
-    /// Every key while the terminal has focus. Almost all of them are the
-    /// agent's; see [`term::encode_key`] for what each becomes.
-    fn on_agent_key(&mut self, key: KeyEvent) {
-        if key.code == term::ESCAPE_KEY {
-            self.leave_agent();
-            return;
-        }
-        let Some(name) = self.selected_name() else {
-            // The session went while its terminal was focused -- destroyed from
-            // elsewhere, or the list emptied. Nothing to type at.
-            self.leave_agent();
-            return;
-        };
-        if let Some(bytes) = term::encode_key(key) {
-            self.terminal_input.push((name, bytes));
-        }
-    }
-
-    /// Give the keyboard back to the *list*. The terminal keeps running: that is
-    /// the whole point of it living in the interface rather than replacing it.
-    ///
-    /// The list rather than the pane it was drawn in, which is what focus
-    /// otherwise means here. Leaving an agent is almost always the first half of
-    /// going to look at another one, and landing on the pane would make `j` a
-    /// scroll and put an `h` between every pair of sessions.
-    fn leave_agent(&mut self) {
-        self.focus = Focus::List;
-        self.note(format!(
-            "left the agent -- j/k for another, {} to go back in",
-            ENTER_AGENT_HINT
-        ));
-    }
-
-    /// Open the selected session's terminal and hand it the keyboard.
-    ///
-    /// The process is spawned by the event loop; this only decides that it
-    /// should be, and refuses the cases where an attach could not work.
-    fn enter_agent(&mut self) {
-        let Some(session) = self.selected().cloned() else {
-            return;
-        };
-        // A row standing in for a create with no sandbox yet has nothing to
-        // attach to, and the exec would fail with something unhelpful.
-        if !self.is_live(&session) {
-            self.fail(format!("{} has no sandbox yet", session.name));
-            return;
-        }
-        if session.state == State::Dead {
-            self.fail(format!("{}'s sandbox is gone", session.name));
-            return;
-        }
-        self.views.insert(session.name.clone(), RightView::Agent);
-        if !self.terminals.is_open(&session.name) {
-            self.note(format!("attaching to {} ...", session.name));
-            self.terminal_request = Some(session);
-        } else {
-            self.focus = Focus::Agent;
-        }
-    }
-
-    /// Whether the selected session's terminal is running, for the renderer.
-    pub fn agent_is_open(&self) -> bool {
-        self.selected()
-            .is_some_and(|s| self.terminals.is_open(&s.name))
-    }
-
-    /// The screen to draw for the selected session, if its terminal is open.
-    pub fn agent_screen(&mut self) -> Option<(std::sync::MutexGuard<'_, vt100::Parser>, bool)> {
-        let name = self.selected_name()?;
-        self.terminals.screen(&name)
-    }
-
-    /// Match the open terminal to the pane it is being drawn in. Called by the
-    /// renderer, which is the only place that knows how big that is.
-    pub fn resize_agent(&mut self, cols: u16, rows: u16) {
-        if let Some(name) = self.selected_name() {
-            self.terminals.resize(&name, cols, rows);
-        }
+    /// The agent's screen as last captured, for the pane that shows it.
+    pub fn agent_screen(&self, session: &Session) -> Option<&str> {
+        self.poll(&session.name).and_then(|p| p.pane.as_deref())
     }
 
     fn on_update(&mut self, update: Update) {
@@ -1024,12 +985,6 @@ impl App {
             Update::Sessions(r) => {
                 self.refreshing = false;
                 self.apply_refresh(*r);
-            }
-            Update::Preview { session, body } => {
-                if self.preview_in_flight.as_deref() == Some(session.as_str()) {
-                    self.preview_in_flight = None;
-                }
-                self.previews.insert(session, Cached::new(body));
             }
             Update::Diff { session, body } => {
                 if self.diff_in_flight.as_deref() == Some(session.as_str()) {
@@ -1206,7 +1161,6 @@ impl App {
         // Drop everything keyed by a session that no longer exists, or the maps
         // grow without bound over a long-running TUI.
         let live: Vec<String> = self.sessions.iter().map(|s| s.name.clone()).collect();
-        self.previews.retain(|name, _| live.contains(name));
         self.diffs.retain(|name, _| live.contains(name));
         self.polls.retain(|name, _| live.contains(name));
         self.policies.retain(|name, _| live.contains(name));
@@ -1270,27 +1224,6 @@ fn event_loop(
             worker.send(Request::Destroy(name));
         }
 
-        // Spawning a pty is a fork, not a gateway round trip, so it happens here
-        // rather than on the worker: sending it there would put it behind
-        // whatever exec is in flight, for no gain.
-        if let Some(session) = app.terminal_request.take() {
-            match app.terminals.open(attach_client, &session) {
-                Ok(()) => {
-                    app.focus = Focus::Agent;
-                    app.note(format!(
-                        "{} -- {} to leave",
-                        session.name,
-                        term::ESCAPE_HINT
-                    ));
-                }
-                Err(e) => app.fail(e),
-            }
-        }
-
-        for (name, bytes) in std::mem::take(&mut app.terminal_input) {
-            app.terminals.send(&name, &bytes);
-        }
-
         // A scan already running answers the pending request too, so a second
         // one is dropped rather than queued behind it.
         if std::mem::take(&mut app.scan_request) && !app.scan_in_flight {
@@ -1338,7 +1271,12 @@ fn event_loop(
         if !app.refreshing && app.last_refresh.elapsed() >= REFRESH_EVERY {
             app.refreshing = true;
             app.last_refresh = Instant::now();
-            worker.send(Request::Refresh);
+            // The first one repairs records left mid-create -- by a create that
+            // died with its TUI, or by a write that lost a race before the cache
+            // was locked. One exec per stuck session, once, rather than every
+            // second; see `ops::refresh_with`.
+            let repair = !std::mem::replace(&mut app.repaired, true);
+            worker.send(Request::Refresh { repair });
         }
 
         dispatch_fetches(app, worker);
@@ -1377,7 +1315,6 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
         // spelled out rather than abstracted over. Four near-identical closures
         // over four differently-typed maps costs more than it saves.
         let due = match view {
-            RightView::Preview => app.previews.get(&name).is_none_or(|c| c.stale_after(ttl)),
             RightView::Diff => app.diffs.get(&name).is_none_or(|c| c.stale_after(ttl)),
             RightView::Policy => app.policies.get(&name).is_none_or(|c| c.stale_after(ttl)),
             RightView::Events => app.events.get(&name).is_none_or(|c| c.stale_after(ttl)),
@@ -1387,10 +1324,6 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
         };
         if due {
             match view {
-                RightView::Preview if app.preview_in_flight.is_none() => {
-                    app.preview_in_flight = Some(name);
-                    worker.send(Request::Preview(Box::new(session.clone())));
-                }
                 RightView::Diff if app.diff_in_flight.is_none() => {
                     app.diff_in_flight = Some(name);
                     worker.send(Request::Diff(Box::new(session.clone())));
@@ -1426,20 +1359,21 @@ fn dispatch_fetches(app: &mut App, worker: &Worker) {
 /// The session most worth polling: the selected one first, since that is what
 /// is being read, then whichever has been stale longest.
 fn next_poll_target(app: &App) -> Option<Session> {
-    let due = |s: &Session| {
-        app.is_live(s)
-            && app
-                .polls
-                .get(&s.name)
-                .is_none_or(|c| c.stale_after(POLL_TTL))
+    let due = |s: &Session, ttl: Duration| {
+        app.is_live(s) && app.polls.get(&s.name).is_none_or(|c| c.stale_after(ttl))
     };
 
-    if let Some(s) = app.selected().filter(|s| due(s)) {
+    // The selected session first and on a shorter interval, whatever view is
+    // showing: its state column, its stat and -- when the agent view is up -- its
+    // screen are all drawn from this one capture, and all three are things the
+    // user is looking at. It is one session however many there are, so the floor
+    // between polls is what bounds the cost, not this.
+    if let Some(s) = app.selected().filter(|s| due(s, POLL_SELECTED_TTL)) {
         return Some(s.clone());
     }
     app.sessions
         .iter()
-        .filter(|s| due(s))
+        .filter(|s| due(s, POLL_TTL))
         // Never polled sorts before any polled one, so no session starves.
         .max_by_key(|s| {
             app.polls
@@ -1535,11 +1469,16 @@ mod tests {
         assert_eq!(app.selected().map(|s| s.name.as_str()), Some("a"));
     }
 
+    /// Everything keyed by a session has to go when the session does, or the
+    /// maps grow for as long as the TUI runs.
     #[test]
-    fn refresh_drops_previews_for_vanished_sessions() {
+    fn refresh_drops_content_for_vanished_sessions() {
         let mut app = app_with(&["a", "b"]);
-        app.previews.insert("a".into(), Cached::new("old".into()));
-        app.previews.insert("b".into(), Cached::new("old".into()));
+        for name in ["a", "b"] {
+            app.polls
+                .insert(name.into(), Cached::new(ops::Poll::default()));
+            app.diffs.insert(name.into(), Cached::new("old".into()));
+        }
 
         let refreshed = ops::Refreshed {
             sessions: vec![Session::new("a".into(), "r".into(), "t".into())],
@@ -1547,25 +1486,26 @@ mod tests {
         };
         app.apply_refresh(refreshed);
 
-        assert!(app.previews.contains_key("a"));
-        assert!(
-            !app.previews.contains_key("b"),
-            "stale preview must be dropped"
-        );
+        assert!(app.polls.contains_key("a"));
+        assert!(!app.polls.contains_key("b"), "stale poll must be dropped");
+        assert!(!app.diffs.contains_key("b"), "and the diff with it");
     }
 
-    /// `a` is the old behaviour and keeps it: the whole terminal, handed over
-    /// until the user detaches.
+    /// Entering a session hands the whole terminal over to its agent. `a` is
+    /// the same thing under a second key, kept because it is what `sbx attach`
+    /// is called on the command line.
     #[test]
-    fn a_requests_a_full_screen_attach_to_the_selected_session() {
-        let mut app = app_with(&["a", "b"]);
-        app.move_by(1);
-        app.on_key(key(KeyCode::Char('a')));
-        assert_eq!(
-            app.attach_request.as_ref().map(|s| s.name.as_str()),
-            Some("b")
-        );
-        assert!(app.terminal_request.is_none(), "and not the embedded one");
+    fn entering_a_session_attaches_to_it() {
+        for pressed in [KeyCode::Enter, KeyCode::Char('a')] {
+            let mut app = app_with(&["a", "b"]);
+            app.move_by(1);
+            app.on_key(key(pressed));
+            assert_eq!(
+                app.attach_request.as_ref().map(|s| s.name.as_str()),
+                Some("b"),
+                "{pressed:?}"
+            );
+        }
     }
 
     #[test]
@@ -1573,7 +1513,6 @@ mod tests {
         let mut app = app_with(&[]);
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(app.attach_request.is_none());
-        assert!(app.terminal_request.is_none());
     }
 
     #[test]
@@ -1587,20 +1526,23 @@ mod tests {
         assert!(app.should_quit);
     }
 
-    /// The plan calls for the choice to be remembered per session, so that
-    /// glancing at another session's preview does not lose the diff you were
-    /// reading.
+    /// The choice is remembered per session, so glancing at what another agent
+    /// is doing does not lose the diff you were reading.
     #[test]
     fn the_right_pane_choice_is_remembered_per_session() {
         let mut app = app_with(&["a", "b"]);
-        assert_eq!(app.right_view(), RightView::Preview, "preview by default");
+        assert_eq!(
+            app.right_view(),
+            RightView::Agent,
+            "the agent's screen by default: it answers what the list asks"
+        );
 
         app.on_key(key(KeyCode::Tab));
         assert_eq!(app.right_view(), RightView::Diff);
 
         // Move to "b": it has its own, untouched choice.
         app.move_by(1);
-        assert_eq!(app.right_view(), RightView::Preview);
+        assert_eq!(app.right_view(), RightView::Agent);
 
         // Back to "a": the diff is still selected.
         app.move_by(-1);
@@ -1610,19 +1552,19 @@ mod tests {
         for _ in 1..RightView::ORDER.len() {
             app.on_key(key(KeyCode::Tab));
         }
-        assert_eq!(app.right_view(), RightView::Preview);
+        assert_eq!(app.right_view(), RightView::Agent);
 
         // Shift-Tab walks back, which is the only sane way to reach the last
-        // view once there are five of them.
+        // view.
         app.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(app.right_view(), RightView::Agent);
+        assert_eq!(app.right_view(), RightView::Events);
     }
 
     #[test]
     fn tab_on_an_empty_list_is_a_no_op() {
         let mut app = app_with(&[]);
         app.on_key(key(KeyCode::Tab));
-        assert_eq!(app.right_view(), RightView::Preview);
+        assert_eq!(app.right_view(), RightView::Agent);
     }
 
     #[test]
@@ -1832,7 +1774,7 @@ mod tests {
         app.policies
             .insert("a".into(), Cached::new(Ok(policy_with_registries(false))));
 
-        for view in [RightView::Preview, RightView::Diff, RightView::Events] {
+        for view in [RightView::Agent, RightView::Diff, RightView::Events] {
             app.views.insert("a".into(), view);
             app.on_key(key(KeyCode::Char('w')));
             app.on_key(key(KeyCode::Char('t')));
@@ -2028,6 +1970,7 @@ mod tests {
                     untracked: 1,
                 }),
                 status: None,
+                pane: None,
             }),
         );
 
@@ -2059,6 +2002,7 @@ mod tests {
             Cached::new(ops::Poll {
                 stat: Some(ops::DiffStat::default()),
                 status: None,
+                pane: None,
             }),
         );
         app.on_key(key(KeyCode::Char('D')));
@@ -2228,174 +2172,6 @@ mod tests {
         assert_eq!(app.selected().map(|s| s.name.as_str()), Some("b"));
     }
 
-    /// Entering the agent switches the right pane to it and asks for a
-    /// terminal; the pty itself is the event loop's business.
-    #[test]
-    fn enter_asks_for_the_selected_sessions_terminal() {
-        let mut app = app_with(&["a", "b"]);
-        app.move_by(1);
-        app.on_key(key(KeyCode::Enter));
-
-        assert_eq!(
-            app.terminal_request.as_ref().map(|s| s.name.as_str()),
-            Some("b")
-        );
-        assert_eq!(app.right_view(), RightView::Agent, "and shows it");
-        // Focus follows only once the terminal is actually open, which the
-        // event loop reports; until then the list still has the keyboard.
-        assert_eq!(app.focus, Focus::List);
-    }
-
-    /// A row standing in for a create with no sandbox yet has nothing to attach
-    /// to, and the exec would fail with something unhelpful several seconds
-    /// later.
-    #[test]
-    fn a_session_without_a_sandbox_is_refused() {
-        let mut app = app_with(&["a"]);
-        let mut pending = app.sessions[0].clone();
-        pending.state = State::Creating;
-        app.pending = Some(pending);
-
-        app.on_key(key(KeyCode::Enter));
-        assert!(app.terminal_request.is_none());
-        assert!(app.status_is_error);
-    }
-
-    #[test]
-    fn a_dead_sandbox_is_refused() {
-        let mut app = app_with(&["a"]);
-        app.sessions[0].state = State::Dead;
-        app.on_key(key(KeyCode::Enter));
-        assert!(app.terminal_request.is_none());
-        assert!(app.status_is_error);
-    }
-
-    /// The whole point of the focus mode: while the agent has the keyboard, the
-    /// keys that would otherwise quit, destroy or move the cursor are things the
-    /// user is typing at an agent.
-    #[test]
-    fn while_the_agent_has_the_keyboard_the_tui_bindings_do_nothing() {
-        let mut app = app_with(&["a", "b"]);
-        app.focus = Focus::Agent;
-
-        for pressed in ['q', 'D', 'j', 'n', 'P', 'r'] {
-            app.on_key(key(KeyCode::Char(pressed)));
-        }
-
-        assert!(!app.should_quit, "q must not quit");
-        assert!(app.pending_question().is_none(), "D must not ask anything");
-        assert_eq!(app.list_state.selected(), Some(0), "j must not move");
-        assert!(app.create.is_none(), "n must not open the create flow");
-        assert_eq!(app.focus, Focus::Agent, "and the agent keeps the keyboard");
-
-        // Every one of them went to the agent instead.
-        let sent: Vec<u8> = app
-            .terminal_input
-            .iter()
-            .flat_map(|(_, b)| b.clone())
-            .collect();
-        assert_eq!(sent, b"qDjnPr".to_vec());
-        assert!(app.terminal_input.iter().all(|(name, _)| name == "a"));
-    }
-
-    /// Even a pending question loses to the terminal. Answering `y` while typing
-    /// at an agent would publish or destroy something the user was not looking
-    /// at.
-    #[test]
-    fn a_pending_question_does_not_steal_keys_from_the_agent() {
-        let mut app = app_with_repo(ADO);
-        app.on_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
-        assert!(app.pending_question().is_some());
-
-        app.focus = Focus::Agent;
-        app.on_key(key(KeyCode::Char('y')));
-
-        assert!(app.publish_request.is_none(), "must not have published");
-        assert!(app.pending_question().is_some(), "the question is still up");
-        assert_eq!(app.terminal_input.len(), 1, "the y went to the agent");
-    }
-
-    #[test]
-    fn the_escape_key_gives_the_keyboard_back_without_reaching_the_agent() {
-        let mut app = app_with(&["a"]);
-        app.focus = Focus::Agent;
-
-        app.on_key(key(term::ESCAPE_KEY));
-
-        // The list, not the pane: `j` should walk to the next session rather
-        // than scroll the terminal that was just left.
-        assert_eq!(app.focus, Focus::List);
-        assert!(app.terminal_input.is_empty(), "and nothing was forwarded");
-        // The terminal is still running: leaving is not closing.
-        assert!(app.terminal_request.is_none());
-    }
-
-    /// The loop this feature exists for: type at one agent, leave, walk to
-    /// another, go in again -- with no key in between that does something else.
-    #[test]
-    fn leaving_an_agent_lands_where_switching_sessions_works() {
-        let mut app = app_with(&["a", "b"]);
-        app.focus = Focus::Agent;
-
-        app.on_key(key(term::ESCAPE_KEY));
-        app.on_key(key(KeyCode::Char('j')));
-        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("b"));
-
-        app.on_key(key(KeyCode::Enter));
-        assert_eq!(
-            app.terminal_request.as_ref().map(|s| s.name.as_str()),
-            Some("b")
-        );
-    }
-
-    /// Scrolling is the agent's, so the paging keys have to arrive as
-    /// themselves. Claude Code runs on the alternate screen and keeps its own
-    /// transcript; intercepting these to scroll something on this side would
-    /// take a working scrollback away and replace it with an empty one.
-    #[test]
-    fn the_paging_keys_reach_the_agent_unchanged() {
-        let mut app = app_with(&["a"]);
-        app.focus = Focus::Agent;
-
-        app.on_key(key(KeyCode::PageUp));
-        app.on_key(key(KeyCode::PageDown));
-
-        assert_eq!(
-            app.terminal_input,
-            vec![
-                ("a".to_string(), b"\x1b[5~".to_vec()),
-                ("a".to_string(), b"\x1b[6~".to_vec()),
-            ]
-        );
-    }
-
-    /// A session destroyed under a focused terminal must not leave the keyboard
-    /// pointing at a pty that is being killed.
-    #[test]
-    fn destroying_a_session_takes_the_keyboard_back() {
-        let mut app = app_with(&["a"]);
-        app.focus = Focus::Agent;
-        app.on_update(Update::Destroyed {
-            session: "a".into(),
-            result: Box::new(Ok(ops::Destroyed::Sandbox)),
-        });
-        assert_eq!(app.focus, Focus::List);
-        assert!(app.sessions.is_empty());
-    }
-
-    /// Cycling onto the agent view must not start anything: a terminal is a
-    /// held process, and walking a list of ten sessions would otherwise leave
-    /// ten attaches running.
-    #[test]
-    fn tabbing_onto_the_agent_view_starts_nothing() {
-        let mut app = app_with(&["a"]);
-        for _ in 0..RightView::ORDER.len() {
-            app.on_key(key(KeyCode::Tab));
-            assert!(app.terminal_request.is_none(), "{:?}", app.right_view());
-        }
-        assert_eq!(app.focus, Focus::List, "and the keyboard stays put");
-    }
-
     fn poll_with(state: Option<State>) -> ops::Poll {
         ops::Poll {
             stat: None,
@@ -2404,7 +2180,62 @@ mod tests {
                 detail: None,
                 source: status::Source::Hook,
             }),
+            pane: None,
         }
+    }
+
+    /// Scrolling the content pane must not require focusing it first: the diff
+    /// was reported as unscrollable by someone pressing `j`, which moved the
+    /// list exactly as the footer said it would.
+    #[test]
+    fn shift_arrows_and_paging_scroll_the_pane_from_the_list() {
+        let mut app = app_with(&["a", "b"]);
+        app.right_lines = 100;
+        app.right_height = 10;
+        assert_eq!(app.focus, Focus::List);
+
+        app.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.right_scroll(), 1, "shift-down scrolls the pane");
+        assert_eq!(app.list_state.selected(), Some(0), "and not the list");
+
+        app.on_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.right_scroll(), 0);
+
+        // Paging a list of a handful of sessions is worth nothing; paging the
+        // content is worth having from either side.
+        app.on_key(key(KeyCode::PageDown));
+        // A page keeps a line of context, so it is one less than the height.
+        assert_eq!(app.right_scroll(), app.page() as u16);
+        assert_eq!(app.list_state.selected(), Some(0));
+        app.on_key(key(KeyCode::PageUp));
+        assert_eq!(app.right_scroll(), 0);
+
+        // And j/k still walk the list, which is what the footer promises.
+        app.on_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list_state.selected(), Some(1));
+    }
+
+    /// The intervals are a budget, and the parts have to add up: the selected
+    /// session must be served sooner than the rest, the floor between polls must
+    /// leave a list of a useful size inside its own TTL, and nothing may be
+    /// slower than the refresh that reconciles the list.
+    #[test]
+    fn the_poll_budget_is_coherent() {
+        assert!(
+            POLL_SELECTED_TTL < POLL_TTL,
+            "what is on screen comes first"
+        );
+        assert!(
+            POLL_MIN_GAP < POLL_SELECTED_TTL,
+            "the floor must not be the thing that decides the interval"
+        );
+        // Up to this many sessions, a full round still lands inside POLL_TTL, so
+        // no session waits longer than its own interval to be looked at.
+        let round = POLL_TTL.as_millis() / POLL_MIN_GAP.as_millis();
+        assert!(round >= 10, "only {round} sessions fit the round trip");
+        // And the redraw has to be quicker than anything it draws, or fresh data
+        // waits for the next frame.
+        assert!(TICK < POLL_SELECTED_TTL);
     }
 
     /// The poll is the one read that scales with the number of sessions, so the
@@ -2557,14 +2388,12 @@ mod tests {
     #[test]
     fn invalidate_clears_every_cached_read() {
         let mut app = app_with(&["a"]);
-        app.previews.insert("a".into(), Cached::new("p".into()));
         app.diffs.insert("a".into(), Cached::new("d".into()));
         app.polls
             .insert("a".into(), Cached::new(ops::Poll::default()));
 
         app.invalidate("a");
 
-        assert!(app.previews.is_empty());
         assert!(app.diffs.is_empty());
         assert!(app.polls.is_empty());
     }
@@ -2705,9 +2534,49 @@ mod tests {
         );
     }
 
+    /// A derived name steps around the ones in use, so starting a second session
+    /// in a repository that already has one needs no correcting: with no task
+    /// typed, both derive the repository's name, which is the normal case.
     #[test]
-    fn a_name_already_taken_is_refused_in_the_form() {
-        let mut app = app_after_submit(&["fix-the-readme"], "fix the readme");
+    fn a_derived_name_avoids_a_collision_instead_of_refusing() {
+        let app = app_after_submit(&["api"], "");
+        let draft = app.create_request.as_ref().expect("a queued create");
+        assert_eq!(draft.name, "api-2");
+        assert!(
+            app.create.is_none(),
+            "the flow closes rather than complaining"
+        );
+
+        // Same for a task whose slug is taken. The stem gives way to the counter
+        // rather than the other way round, because the gateway's name budget is
+        // the hard limit -- `fix-the-readme` is already all of it.
+        let app = app_after_submit(&["fix-the-readme"], "fix the readme");
+        let draft = app.create_request.as_ref().expect("a queued create");
+        assert_eq!(draft.name, "fix-the-readm-2");
+        assert!(crate::session::validate_name(&draft.name).is_ok());
+    }
+
+    /// The guard is still needed for a name typed by hand: editing the name pins
+    /// it, and a pinned name is the user's, not the form's to change.
+    #[test]
+    fn a_hand_typed_name_that_is_taken_is_refused_in_the_form() {
+        let mut app = app_with(&["taken-name"]);
+        app.on_key(key(KeyCode::Char('n')));
+        app.on_update(Update::Repos(vec![local_repo(
+            "api",
+            Some("https://github.com/o/api.git"),
+        )]));
+        app.on_key(key(KeyCode::Enter));
+        // Into the name field, cleared, and typed over.
+        app.on_key(key(KeyCode::Tab));
+        for _ in 0..10 {
+            app.on_key(key(KeyCode::Backspace));
+        }
+        for c in "taken-name".chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+        app.on_key(key(KeyCode::Enter));
+
         assert!(app.create_request.is_none(), "nothing may be queued");
         match &app.create {
             Some(Create::Fill(form)) => assert!(
@@ -2718,11 +2587,14 @@ mod tests {
             _ => panic!("the form must stay open with the complaint on it"),
         }
 
-        // Editing the name to something free lets it through.
-        app.on_key(key(KeyCode::Tab));
+        // Editing it to something free lets it through -- the cursor is still in
+        // the name field, so this appends.
         app.on_key(key(KeyCode::Char('2')));
         app.on_key(key(KeyCode::Enter));
-        assert!(app.create_request.is_some());
+        assert_eq!(
+            app.create_request.as_ref().map(|d| d.name.as_str()),
+            Some("taken-name2")
+        );
     }
 
     #[test]

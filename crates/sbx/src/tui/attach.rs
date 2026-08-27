@@ -4,8 +4,8 @@ use std::io;
 
 use openshell_client::CliClient;
 
-use crate::seed::sh_quote;
-use crate::session::{REPO_PATH, Session};
+use crate::ops;
+use crate::session::Session;
 
 /// Attach to the agent's tmux session inside the sandbox.
 ///
@@ -17,16 +17,7 @@ pub fn attach(
     client: &CliClient,
     session: &Session,
 ) -> io::Result<()> {
-    // `attach -d` evicts any client left behind by an earlier crash; without
-    // it a stale client makes the new attach share a resized, confusing view.
-    // Falling through to new-session means Enter always lands somewhere useful
-    // even if the agent was never started or has been killed.
-    let script = format!(
-        "tmux -f /etc/tmux.conf attach -d -t {tmux} 2>/dev/null \
-         || tmux -f /etc/tmux.conf new-session -s {tmux} -c {repo}",
-        tmux = sh_quote(&session.tmux),
-        repo = sh_quote(REPO_PATH),
-    );
+    let script = ops::attach_script(session);
 
     ratatui::restore();
     println!("attaching to {} - detach with Ctrl-b d", session.name);

@@ -9,8 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Paragraph, Wrap};
-use tui_term::widget::PseudoTerminal;
+use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap};
 
 use crate::events::Verdict;
 use crate::ops;
@@ -19,7 +18,7 @@ use crate::repos::{Facts, LocalRepo};
 use crate::session::{self, Session, State};
 use crate::status::Source;
 use crate::tui::create::{Create, Field, Form, Input, Picker};
-use crate::tui::{App, Focus, RightView, term};
+use crate::tui::{App, Focus, RightView};
 
 /// Width of the session-name column. Names are capped at 15 characters by the
 /// gateway's sandbox-name limit, so this only ever truncates a near-maximal one.
@@ -27,7 +26,7 @@ const NAME_W: usize = 15;
 /// Width of the `+12/-3 ?1` column.
 const STAT_W: usize = 11;
 
-/// The accent: borders, the active tab, the keys in the footer.
+/// The accent: headings, the active tab, the keys in the footer, a modal's edge.
 ///
 /// ANSI rather than a hard-coded violet, so a light terminal theme is still
 /// legible -- the shapes are what make this recognisable, not one exact hue. Not
@@ -64,17 +63,67 @@ fn state_style(state: State) -> Style {
     Style::default().fg(colour)
 }
 
-/// A block whose border shows whether the pane has the movement keys.
+/// A pane: a heading, a column of air either side, and no box.
+///
+/// The boxes are gone because in a layout this dense they cost more than they
+/// earn -- four of them nested three deep, drawing rules around content that is
+/// mostly rules already (a diff, an agent's own input box). What a border was
+/// carrying was *focus*, and the heading carries that better: it is where the eye
+/// already is, and it costs no row.
+///
+/// Modals keep their box; see [`modal`].
 fn pane(title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
-    let block = Block::bordered().title(title.into());
-    if focused {
-        block
-            .border_type(BorderType::Thick)
-            .border_style(Style::default().fg(ACCENT))
+    let title = title.into();
+    let title = if focused {
+        title.style(Style::default().add_modifier(Modifier::BOLD))
     } else {
-        block.border_style(Style::default().fg(DIM))
-    }
+        title
+    };
+    Block::new()
+        .title(title)
+        // A column of air either side, and a blank row under the heading. The
+        // row is deliberate: ratatui charges the title row *and* the top padding,
+        // so this is two rows before content -- which is what [`PANE_TOP`] is,
+        // and what every caller that sizes a pane to its contents measures with.
+        .padding(Padding::new(1, 1, 1, 0))
 }
+
+/// Rows a pane spends before its content -- the heading, then a blank -- and
+/// columns on its margins.
+const PANE_TOP: u16 = 2;
+const PANE_SIDES: u16 = 2;
+
+/// The interface's own margin: columns at the left and right edges, rows at the
+/// top and bottom. Nothing sits in a corner of the terminal, which is the
+/// difference between a layout and a wall of text.
+const OUTER_X: u16 = 2;
+const OUTER_Y: u16 = 1;
+/// Columns between the two columns, on top of each pane's own margin.
+const COL_GAP: u16 = 2;
+/// The blank row between the list and the facts under it.
+const ROW_GAP: u16 = 1;
+/// The row between the panes and the footer, so the hints are not read as part
+/// of the pane above them.
+const FOOTER_GAP: u16 = 1;
+
+/// A floating box: the create flow's picker and form.
+///
+/// These *do* keep a border, and for the reason the panes lost theirs -- a modal
+/// is drawn over whatever was underneath it, so its edge is the only thing saying
+/// where it stops.
+fn modal(title: impl Into<Line<'static>>) -> Block<'static> {
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(ACCENT))
+        .title(title.into())
+        // A column inside the border, so nothing reads as touching it. No top
+        // row: a modal is a short list and the border already separates it from
+        // what is underneath.
+        .padding(Padding::horizontal(1))
+}
+
+/// Columns a modal spends on its border and the air inside it.
+const MODAL_SIDES: usize = 4;
 
 /// The right pane's views as tabs along its top border.
 ///
@@ -103,16 +152,30 @@ fn pane_subject(text: String) -> Line<'static> {
     Line::from(Span::styled(format!(" {text} "), Style::default().fg(DIM))).right_aligned()
 }
 
-/// Rows the session list keeps whatever else wants room. Two borders and three
-/// rows: enough to see the selected session and a neighbour either side, which
-/// is the least that can still be navigated.
+/// Rows the session list keeps whatever else wants room. A heading and four
+/// rows: enough for the selected session -- which takes two of them -- and a
+/// glimpse of a neighbour, which is the least that can still be navigated.
 const LIST_MIN_H: u16 = 5;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [main, footer] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(frame.area());
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).areas(main);
+    // Inset from the terminal's edges, and the footer held off the panes by a
+    // row of its own.
+    let outer = Layout::vertical([Constraint::Min(0)])
+        .horizontal_margin(OUTER_X)
+        .vertical_margin(OUTER_Y)
+        .areas::<1>(frame.area())[0];
+    let [main, _, footer] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(FOOTER_GAP),
+        Constraint::Length(1),
+    ])
+    .areas(outer);
+    let [left, _, right] = Layout::horizontal([
+        Constraint::Percentage(42),
+        Constraint::Length(COL_GAP),
+        Constraint::Fill(1),
+    ])
+    .areas(main);
 
     // The session's facts sit under the list rather than at the top of the
     // preview, so they stay on screen when the right-hand pane is given over to
@@ -120,21 +183,27 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // most of the time. The left column carries what a session *is*; the right
     // one carries whatever you are looking at.
     let session = app.selected().cloned();
-    let inner_w = left.width.saturating_sub(2) as usize;
+    let inner_w = left.width.saturating_sub(PANE_SIDES) as usize;
     let meta = session
         .as_ref()
         .map(|s| (s.name.clone(), meta_lines(app, s, inner_w)));
 
-    // Sized to its content, capped so the list always has somewhere to go. An
-    // empty list has no facts to show, and the list takes the whole column.
+    // Exactly as tall as its contents, plus the rows a pane spends on its
+    // heading, because each fact is one row and none of them wrap. Capped so the
+    // list always has somewhere to go; an empty list has no facts to show at all,
+    // and the list takes the whole column.
     let meta_h = match &meta {
         Some((_, lines)) => {
-            (wrapped_height(lines, inner_w) as u16 + 2).min(left.height.saturating_sub(LIST_MIN_H))
+            (lines.len() as u16 + PANE_TOP).min(left.height.saturating_sub(LIST_MIN_H + ROW_GAP))
         }
         None => 0,
     };
-    let [list_area, meta_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(meta_h)]).areas(left);
+    let [list_area, _, meta_area] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(if meta_h > 0 { ROW_GAP } else { 0 }),
+        Constraint::Length(meta_h),
+    ])
+    .areas(left);
 
     draw_list(frame, app, list_area);
     if let Some((name, lines)) = meta {
@@ -146,10 +215,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // keyboard while it is up.
     draw_create(frame, app, frame.area());
 }
-
-/// Columns the selection marker takes on every row, selected or not, so the
-/// content does not shift sideways as the cursor moves.
-const MARKER_W: usize = 2;
 
 /// One session, over two rows and a gap.
 ///
@@ -175,27 +240,32 @@ fn session_item(
     // Line one: what it is, and what the agent is doing.
     let head = format!("{:>2}. ", index + 1);
     let state_text = state.to_string();
-    // The dot repeats the colour the word already carries, for reading the
-    // column at a glance without reading any of it.
-    let dot_w = 2;
-    let name_room =
-        width.saturating_sub(head.chars().count() + state_text.chars().count() + dot_w + 1);
+    let name_room = width.saturating_sub(head.chars().count() + state_text.chars().count() + 1);
     let name = truncate(&session.name, name_room.max(4));
-    let gap = width.saturating_sub(
-        head.chars().count() + name.chars().count() + state_text.chars().count() + dot_w,
-    );
+    let gap = width
+        .saturating_sub(head.chars().count() + name.chars().count() + state_text.chars().count());
+
+    // Two styles for the row's own text, so a light selection does not leave any
+    // of it at the terminal's default colour.
+    let (strong, quiet) = if selected {
+        (
+            Style::default().fg(SELECTED_FG),
+            Style::default().fg(SELECTED_DIM),
+        )
+    } else {
+        (Style::default(), Style::default().fg(DIM))
+    };
 
     let first = Line::from(vec![
-        Span::styled(head, Style::default().fg(DIM)),
-        Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(head, quiet),
+        Span::styled(name, strong.add_modifier(Modifier::BOLD)),
         Span::raw(" ".repeat(gap)),
         state_span(state, selected),
-        Span::raw(" "),
-        Span::styled("●", Style::default().fg(state_dot(state))),
     ]);
 
     // Line two: the branch, then what has changed and how long it has been.
-    let stat_spans = stat_spans(stat);
+    // Green and red survive the light fill; the greys have to follow the row.
+    let stat_spans = stat_spans(stat, quiet);
     let stat_w: usize = stat_spans.iter().map(|s| s.content.chars().count()).sum();
     let age_w = age.chars().count() + 1;
     let branch_room = width.saturating_sub(4 + stat_w + age_w);
@@ -204,49 +274,63 @@ fn session_item(
 
     let mut spans = vec![
         Span::raw("    ".to_string()),
-        Span::styled(branch, Style::default().fg(DIM)),
+        Span::styled(branch, quiet),
         Span::raw(" ".repeat(pad)),
     ];
     spans.extend(stat_spans);
-    spans.push(Span::styled(format!(" {age}"), Style::default().fg(DIM)));
+    spans.push(Span::styled(format!(" {age}"), quiet));
 
-    ListItem::new(vec![first, Line::from(spans), Line::from("")])
+    // A blank row either side of the two content rows, so a list of sessions
+    // reads as a list of *things* rather than a paragraph -- and so the light
+    // block of the selected one has room around its text instead of hugging it.
+    ListItem::new(vec![
+        Line::from(""),
+        first,
+        Line::from(spans),
+        Line::from(""),
+    ])
 }
 
 /// The state, as it appears on a row.
 ///
-/// `Waiting` is a filled badge everywhere else in the interface, but a filled
-/// badge cannot sit inside the selection's own fill: a list's highlight style is
-/// patched *over* the row, so the badge's background is replaced and its black
-/// text lands on dark grey. On the selected row it becomes bright magenta text
-/// instead -- still the only magenta on screen, still unmissable, and legible.
+/// The selected row is a light block, so its colours are chosen against white
+/// rather than against the terminal's background. `Waiting` keeps its magenta --
+/// it is the one state that has to be seen, and magenta on white is legible in
+/// either kind of theme -- and the rest read as dark text with the coloured dot
+/// beside them. A filled badge could not survive here anyway: a list's highlight
+/// style is patched *over* the row, so its background would be replaced and its
+/// black text left on white.
 fn state_span(state: State, selected: bool) -> Span<'static> {
     let text = state.to_string();
-    if state == State::Waiting && selected {
-        return Span::styled(
-            text,
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        );
+    if !selected {
+        return Span::styled(text, state_style(state));
     }
-    Span::styled(text, state_style(state))
+    let style = if state == State::Waiting {
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(SELECTED_FG)
+    };
+    Span::styled(text, style)
 }
 
-/// The same colour as the state word, as a dot.
-fn state_dot(state: State) -> Color {
-    if state == State::Waiting {
-        return Color::Magenta;
-    }
-    state_style(state).fg.unwrap_or(Color::Reset)
-}
+/// Text on the selected row, and the quieter half of it.
+///
+/// Explicit, and dark, because the selection is a light fill and *nothing* on it
+/// may be left at the terminal's default foreground -- which in a dark theme is
+/// near-white, and would be a row of invisible text. Black on white also reads
+/// the same in a light theme, which reversed video or a hard-coded pale grey
+/// would not.
+const SELECTED_FG: Color = Color::Black;
+const SELECTED_DIM: Color = Color::Indexed(240);
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let now = session::now_epoch();
     let focused = app.focus == Focus::List;
-    // What a row has to itself: the border either side, and the marker column.
+    // What a row has to itself: everything but the pane's margins.
     let width = (area.width as usize)
-        .saturating_sub(2 + MARKER_W)
+        .saturating_sub(PANE_SIDES as usize)
         .max(NAME_W);
 
     let items: Vec<ListItem> = app
@@ -264,7 +348,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         Span::styled(format!("{} ", app.sessions.len()), Style::default().fg(DIM)),
     ]);
     // The count of blocked agents, as loud as the badge on the row it refers to,
-    // and at the other end of the border so it is legible even when that row is
+    // and at the other end of the heading so it is legible even when that row is
     // scrolled out of view.
     let waiting = app.waiting_count();
     let mut block = pane(title, focused);
@@ -279,11 +363,10 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             ))
             .right_aligned(),
         );
-    } else if app.refreshing {
-        block = block.title(
-            Line::from(Span::styled(" refreshing ", Style::default().fg(DIM))).right_aligned(),
-        );
     }
+    // Nothing says "refreshing": at a one second interval that label was on screen
+    // more often than off it, and a flicker that carries no information is worse
+    // than no label at all.
 
     if items.is_empty() {
         let hint = Paragraph::new(vec![
@@ -298,17 +381,23 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 
     let list = List::new(items)
-        .block(block)
-        // A quiet fill for the selection and a bar in the accent, rather than
-        // reversing the row: reversed video turns every coloured span inside out,
-        // which makes a state word unreadable exactly when it is selected.
-        .highlight_style(Style::default().bg(Color::Indexed(236)))
-        .highlight_symbol("▌ ");
+        // No top padding here, unlike every other pane: each item carries its own
+        // leading blank, and both would leave two rows under the heading.
+        .block(block.padding(Padding::horizontal(1)))
+        // A light block, which is the whole selection: no marker, because the
+        // fill is unmistakable and a symbol would only shift every row sideways
+        // to make room for it. Not reversed video, which turns every coloured
+        // span inside out; not a dark fill, which was too close to the
+        // background to find.
+        .highlight_style(Style::default().bg(Color::White));
 
     frame.render_stateful_widget(list, area, &mut app.list_state);
 }
 
 /// The `+12/-3 ?` column, padded to a fixed width so the age column lines up.
+///
+/// `quiet` is the row's own grey: on the selected row that is a grey chosen
+/// against a white fill, not the pane's.
 ///
 /// Blank until the first stat arrives rather than showing a placeholder zero: a
 /// session that has not been measured yet and one with no changes are different
@@ -318,15 +407,12 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
 /// column past the width the list can afford on an 80-column terminal, and "the
 /// agent created files it has not committed" is the part worth knowing at a
 /// glance; the diff pane lists them.
-fn stat_spans(stat: Option<ops::DiffStat>) -> Vec<Span<'static>> {
+fn stat_spans(stat: Option<ops::DiffStat>, quiet: Style) -> Vec<Span<'static>> {
     let Some(stat) = stat else {
         return vec![Span::raw(" ".repeat(STAT_W))];
     };
     if stat.is_empty() {
-        return vec![Span::styled(
-            format!("{:>w$}", "clean", w = STAT_W),
-            Style::default().fg(DIM),
-        )];
+        return vec![Span::styled(format!("{:>w$}", "clean", w = STAT_W), quiet)];
     }
 
     let added = format!("+{}", compact(stat.added));
@@ -339,77 +425,73 @@ fn stat_spans(stat: Option<ops::DiffStat>) -> Vec<Span<'static>> {
     let mut spans = vec![
         Span::raw(" ".repeat(STAT_W.saturating_sub(used))),
         Span::styled(added, Style::default().fg(Color::Green)),
-        Span::styled("/", Style::default().fg(DIM)),
+        Span::styled("/", quiet),
         Span::styled(removed, Style::default().fg(Color::Red)),
     ];
     if !untracked.is_empty() {
-        spans.push(Span::styled(untracked, Style::default().fg(DIM)));
+        spans.push(Span::styled(untracked, quiet));
     }
     spans
 }
 
-/// The agent's live screen, or an invitation to start it.
+/// The agent's screen, as the status poll last captured it.
 ///
-/// Nothing is drawn until it has been asked for: a terminal is a held process,
-/// and cycling the right pane past this view should not spend one. The title
-/// carries the way out, because a pane that has taken the keyboard has to say
-/// how to give it back.
-fn draw_agent(frame: &mut Frame, app: &mut App, area: Rect, session: &crate::session::Session) {
-    let has_keyboard = app.focus == Focus::Agent;
-
-    if !app.agent_is_open() {
-        let hint = Paragraph::new(vec![
+/// Read-only, and free: the capture is the same one that decides the state
+/// column, so this view costs no exec of its own. It is a *view*, though, not an
+/// attachment -- `enter` hands the whole terminal over for anything that needs
+/// typing, which is why nothing here forwards a key.
+fn agent_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
+    let Some(screen) = app.agent_screen(session) else {
+        return vec![
             Line::from(""),
-            Line::from(format!("  {} is running in its sandbox.", session.name))
-                .style(Style::default().fg(Color::DarkGray)),
+            Line::from(format!("  no screen captured for {}", session.name))
+                .style(Style::default().fg(DIM)),
             Line::from(""),
-            Line::from("  press enter to open its terminal here")
-                .style(Style::default().fg(Color::DarkGray)),
-            Line::from("  or a to hand the whole terminal over")
-                .style(Style::default().fg(Color::DarkGray)),
-        ])
-        .block(pane(tabs(RightView::Agent), false).title(pane_subject(session.name.clone())));
-        frame.render_widget(hint, area);
-        return;
-    }
-
-    // The pty is told the size of the *inner* area, so the agent draws exactly
-    // what fits inside the border. Done here because the renderer is the only
-    // place that knows it, and every frame, because a terminal resize has to
-    // reach the agent's tmux.
-    let cols = area.width.saturating_sub(2);
-    let rows = area.height.saturating_sub(2);
-    app.resize_agent(cols, rows);
-
-    let subject = if has_keyboard {
-        format!("{} · {}", session.name, term::ESCAPE_HINT)
-    } else {
-        format!("{} · enter to type", session.name)
+            Line::from("  the agent may not have started; enter attaches anyway")
+                .style(Style::default().fg(DIM)),
+        ];
     };
 
-    let Some((parser, exited)) = app.agent_screen() else {
-        return;
-    };
-    let subject = if exited {
-        format!("{} · attach ended", session.name)
-    } else {
-        subject
-    };
-    // Hide our cursor when the pane does not have the keyboard: two cursors on
-    // screen, one of them inert, is worse than none.
-    let cursor = tui_term::widget::Cursor::default();
-    let mut term = PseudoTerminal::new(parser.screen())
-        .block(pane(tabs(RightView::Agent), has_keyboard).title(pane_subject(subject)))
-        .cursor(cursor);
-    if !has_keyboard {
-        term = term.cursor({
-            let mut c = tui_term::widget::Cursor::default();
-            c.hide();
-            c
-        });
-    }
-    frame.render_widget(term, area);
+    // Drawn in the colour the agent chose: the capture keeps it, and
+    // `crate::ansi` turns each line's escapes back into spans. Guessing at
+    // colour by matching on the agent's own words would go wrong the next time
+    // it changed them; this is the colour itself.
+    squeeze(screen).map(crate::ansi::to_line).collect()
 }
+
+/// The agent's screen with its padding taken out.
+///
+/// The sandbox pane is 200x50 and this one is whatever is left of the terminal,
+/// so the screen has to lose something. What it loses is empty space: Claude Code
+/// draws its output at the top of the window and its input box at the *bottom*,
+/// which in a 50-row pane leaves thirty blank rows between them -- and a pane
+/// showing the first thirty rows of that is all output and no prompt, missing the
+/// half that says what the agent is waiting for. Runs of blank lines collapse to
+/// one; single and double blanks, which separate one message from the next,
+/// survive.
+///
+/// An approximation, and honest about being one: `enter` attaches to the real
+/// screen at its real size.
+fn squeeze(screen: &str) -> impl Iterator<Item = &str> {
+    // Blankness is a question about the *text*, and a captured line can be
+    // several colour changes around nothing at all -- tmux colours the empty
+    // right-hand end of a row. Judged on the stripped copy, or thirty rows of
+    // invisible escapes count as content and nothing is squeezed.
+    let blank = |line: &&str| crate::ansi::strip(line).trim().is_empty();
+    let mut blanks = 0usize;
+    screen.lines().skip_while(blank).filter(move |line| {
+        if blank(line) {
+            blanks += 1;
+            blanks < BLANK_RUN
+        } else {
+            blanks = 0;
+            true
+        }
+    })
+}
+
+/// How many consecutive blank lines survive before the rest are dropped.
+const BLANK_RUN: usize = 2;
 
 /// Abbreviate a line count to at most three columns, so a huge diff cannot
 /// widen the column and push the age off the pane. Precision above a few
@@ -425,9 +507,9 @@ fn compact(n: u32) -> String {
 fn draw_right(frame: &mut Frame, app: &mut App, area: Rect) {
     let focused = app.focus == Focus::Right;
     let view = app.right_view();
-    // Inner area: the border takes a row top and bottom, a column either side.
-    let inner_w = area.width.saturating_sub(2) as usize;
-    let inner_h = area.height.saturating_sub(2) as usize;
+    // Inner area: the heading takes the top row, the margins a column either side.
+    let inner_w = area.width.saturating_sub(PANE_SIDES) as usize;
+    let inner_h = area.height.saturating_sub(PANE_TOP) as usize;
 
     let Some(session) = app.selected().cloned() else {
         let empty = Paragraph::new("").block(pane(tabs(view), focused));
@@ -437,20 +519,9 @@ fn draw_right(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
 
-    // The agent's terminal is not text this function lays out -- it is a screen
-    // something else already laid out -- so it leaves here rather than being
-    // squeezed through the paragraph path below.
-    if view == RightView::Agent {
-        draw_agent(frame, app, area, &session);
-        app.right_lines = 0;
-        app.right_height = inner_h;
-        return;
-    }
-
     // Both produce owned lines, so no borrow of `app` outlives this call and the
     // measurements below can be written back.
     let (lines, wrap) = match view {
-        RightView::Preview => (preview_lines(app, &session), true),
         RightView::Diff => (diff_lines(app, &session), false),
         // Wrapped: a policy is prose as much as data, and a notice that says
         // why a section cannot be changed is worth more than the alignment.
@@ -461,8 +532,9 @@ fn draw_right(frame: &mut Frame, app: &mut App, area: Rect) {
         // makes the whole pane unscannable. Long lines are clipped instead;
         // `sbx events` prints them in full.
         RightView::Events => (event_lines(app, &session), false),
-        // Handled above, where a screen can be drawn as a screen.
-        RightView::Agent => unreachable!("the agent view leaves before this"),
+        // Already laid out by the agent, so never wrapped: re-flowing a screen
+        // someone else drew turns a box border into rubble.
+        RightView::Agent => (agent_lines(app, &session), false),
     };
 
     // With wrapping on, one logical line can occupy several rows, and
@@ -494,7 +566,7 @@ fn draw_right(frame: &mut Frame, app: &mut App, area: Rect) {
     } else {
         String::new()
     };
-    // The view is named by its tab; the border's other end says which session it
+    // The view is named by its tab; the heading's other end says which session it
     // is of, and how far down it you are. Events are the one view whose contents
     // need a word of explanation, so the clock lives there rather than in a tab.
     let subject = if view == RightView::Events {
@@ -634,30 +706,6 @@ fn draw_meta(frame: &mut Frame, area: Rect, name: &str, lines: Vec<Line<'static>
     ]);
     let para = Paragraph::new(lines).block(pane(title, false));
     frame.render_widget(para, area);
-}
-
-fn preview_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
-    // The task in full, which the facts pane can only show the head of. The rest
-    // of what used to be here now lives there.
-    let mut lines = vec![
-        field(
-            "task",
-            if session.task.is_empty() {
-                "-"
-            } else {
-                &session.task
-            },
-        ),
-        Line::from(""),
-    ];
-
-    match app.previews.get(&session.name) {
-        Some(cached) => lines.extend(cached.value.lines().map(|l| Line::from(l.to_string()))),
-        None => lines.push(
-            Line::from("  reading repository ...").style(Style::default().fg(Color::DarkGray)),
-        ),
-    }
-    lines
 }
 
 fn diff_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
@@ -938,14 +986,14 @@ type Group = &'static [(&'static str, &'static str)];
 /// styled differently -- the key is what you are looking for, the word after it
 /// is only there to remind you. Grouped by what they are *for*: moving, acting,
 /// leaving.
+/// Not every binding: the ones worth being reminded of, short enough that the
+/// descriptions still fit a normal terminal. `a` is a second way to do what
+/// `enter` does and `pgup`/`pgdn` are a bigger version of `shift-↑/↓`, so neither
+/// earns a place here.
 const KEYS_LIST: &[Group] = &[
     &[("j/k", "move"), ("1-9", "jump"), ("n", "new")],
-    &[
-        ("enter", "open"),
-        ("a", "attach"),
-        ("P", "publish"),
-        ("D", "destroy"),
-    ],
+    &[("shift-↑/↓", "scroll")],
+    &[("enter", "open"), ("P", "publish"), ("D", "destroy")],
     &[("tab", "view"), ("q", "quit")],
 ];
 const KEYS_RIGHT: &[Group] = &[
@@ -958,14 +1006,13 @@ const KEYS_POLICY: &[Group] = &[
     &[("h", "list"), ("tab", "view"), ("q", "quit")],
 ];
 const KEYS_AGENT_VIEW: &[Group] = &[
-    &[("enter", "type at it"), ("a", "full screen")],
-    &[("j/k", "move"), ("D", "destroy")],
+    &[("enter", "attach to it"), ("shift-↑/↓", "scroll")],
+    &[("1-9", "jump"), ("D", "destroy")],
     &[("tab", "view"), ("q", "quit")],
 ];
-const KEYS_AGENT_FOCUS: &[Group] = &[
-    &[("every key", "goes to the agent"), ("pgup/pgdn", "scroll")],
-    &[("F12", "leave")],
-];
+/// With no sessions there is exactly one thing to do, and offering keys that act
+/// on a selection there is worse than offering none.
+const KEYS_EMPTY: &[Group] = &[&[("n", "new session")], &[("q", "quit")]];
 const KEYS_PICK: &[Group] = &[
     &[("type", "filter"), ("up/down", "move")],
     &[("enter", "pick"), ("esc", "cancel")],
@@ -977,7 +1024,20 @@ const KEYS_FORM: &[Group] = &[
 
 /// Lay the groups out: the key in the accent, what it does beside it in grey,
 /// `·` between keys and `│` between groups.
-fn hint_line(groups: &[Group]) -> Line<'static> {
+///
+/// If that will not fit the width, the descriptions go and the keys stay. A hint
+/// line clipped mid-word reads as a broken interface, and the keys are the part
+/// worth having -- someone who needs reminding what `D` does can afford to be
+/// told in a wider window.
+fn hint_line(groups: &[Group], width: usize) -> Line<'static> {
+    let full = hint_spans(groups, true);
+    if span_width(&full) <= width {
+        return Line::from(full);
+    }
+    Line::from(hint_spans(groups, false))
+}
+
+fn hint_spans(groups: &[Group], described: bool) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw(" ")];
     for (g, group) in groups.iter().enumerate() {
         if g > 0 {
@@ -988,10 +1048,16 @@ fn hint_line(groups: &[Group]) -> Line<'static> {
                 spans.push(Span::styled(" · ", Style::default().fg(DIM)));
             }
             spans.push(Span::styled(*key, Style::default().fg(ACCENT)));
-            spans.push(Span::styled(format!(" {what}"), Style::default().fg(DIM)));
+            if described {
+                spans.push(Span::styled(format!(" {what}"), Style::default().fg(DIM)));
+            }
         }
     }
-    Line::from(spans)
+    spans
+}
+
+fn span_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
@@ -1001,8 +1067,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         // The flow is modal, so its keys are the only ones that do anything.
         (Some(Create::Pick(_)), ..) => KEYS_PICK,
         (Some(Create::Fill(_)), ..) => KEYS_FORM,
-        // The terminal has the keyboard, so there is one binding left.
-        (_, Focus::Agent, _) => KEYS_AGENT_FOCUS,
+        // Nothing selected: every key that acts on a session is a key that does
+        // nothing.
+        _ if app.selected().is_none() => KEYS_EMPTY,
         (_, _, RightView::Agent) => KEYS_AGENT_VIEW,
         (_, _, RightView::Policy) => KEYS_POLICY,
         (_, Focus::List, _) => KEYS_LIST,
@@ -1035,7 +1102,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             format!(" {msg}"),
             Style::default().fg(Color::Green),
         )),
-        None => hint_line(groups),
+        None => hint_line(groups, area.width as usize),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -1104,7 +1171,7 @@ fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
     // Query line, the rows, and a line for a complaint when there is one.
     let height = 2 + 1 + shown.max(1) + usize::from(picker.error().is_some());
     let box_area = centered(area, MODAL_W, u16::try_from(height).unwrap_or(u16::MAX));
-    let inner_w = box_area.width.saturating_sub(2) as usize;
+    let inner_w = (box_area.width as usize).saturating_sub(MODAL_SIDES);
 
     let mut lines = vec![Line::from(
         [
@@ -1146,7 +1213,7 @@ fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
     }
 
     frame.render_widget(Clear, box_area);
-    frame.render_widget(Paragraph::new(lines).block(pane(title, true)), box_area);
+    frame.render_widget(Paragraph::new(lines).block(modal(title)), box_area);
 }
 
 /// One repository row: where it is, what branch it is on, and whether it can
@@ -1212,7 +1279,7 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
 
     // Everything past the label column, so a long path or clone URL is
     // truncated rather than clipped by the border.
-    let value_w = usize::from(MODAL_W).saturating_sub(2 + LABEL_W);
+    let value_w = usize::from(MODAL_W).saturating_sub(MODAL_SIDES + LABEL_W);
 
     // What the sandbox will actually clone, spelled out: the local checkout is
     // only how the remote was named, and conflating the two is the one
@@ -1304,7 +1371,7 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
     if let Some(note) = drift_note(form.facts()) {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            truncate(&format!(" {note}"), usize::from(MODAL_W) - 2),
+            truncate(&format!(" {note}"), usize::from(MODAL_W) - MODAL_SIDES),
             Style::default().fg(Color::Yellow),
         )));
     }
@@ -1319,7 +1386,7 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
     let box_area = centered(area, MODAL_W, height);
     frame.render_widget(Clear, box_area);
     frame.render_widget(
-        Paragraph::new(lines).block(pane(" new session ".to_string(), true)),
+        Paragraph::new(lines).block(modal(" new session ")),
         box_area,
     );
 }
@@ -1490,9 +1557,13 @@ diff --git a/b b/b
     fn stat_column_is_fixed_width() {
         let width =
             |spans: Vec<Span>| -> usize { spans.iter().map(|s| s.content.chars().count()).sum() };
-        assert_eq!(width(stat_spans(None)), STAT_W, "unmeasured");
         assert_eq!(
-            width(stat_spans(Some(ops::DiffStat::default()))),
+            width(stat_spans(None, Style::default())),
+            STAT_W,
+            "unmeasured"
+        );
+        assert_eq!(
+            width(stat_spans(Some(ops::DiffStat::default()), Style::default())),
             STAT_W,
             "clean"
         );
@@ -1524,7 +1595,11 @@ diff --git a/b b/b
                 untracked: 1,
             },
         ] {
-            assert_eq!(width(stat_spans(Some(stat))), STAT_W, "{stat:?}");
+            assert_eq!(
+                width(stat_spans(Some(stat), Style::default())),
+                STAT_W,
+                "{stat:?}"
+            );
         }
     }
 
@@ -1682,47 +1757,80 @@ diff --git a/b b/b
     }
 
     /// Cell styles from a rendered buffer, for the one thing text cannot show.
-    fn styles_at(app: &mut App, width: u16, height: u16, needle: &str) -> Vec<Style> {
+    ///
+    /// `row` picks which line to look at -- `waiting` appears in the list's
+    /// heading as well as on a row -- and `needle` the cells within it.
+    fn styles_in_row(
+        app: &mut App,
+        width: u16,
+        height: u16,
+        row: &str,
+        needle: &str,
+    ) -> Vec<Style> {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
         terminal.draw(|frame| draw(frame, app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
 
         for y in 0..height {
-            let row: String = (0..width)
+            let line: String = (0..width)
                 .map(|x| buffer[(x, y)].symbol().to_string())
                 .collect();
-            // Byte offsets are not cell offsets: a border row is mostly
-            // multi-byte box drawing, so the needle's position has to be counted
-            // in characters to index the buffer with it.
-            if let Some(byte_at) = row.find(needle) {
-                let at = row[..byte_at].chars().count();
+            if !line.contains(row) {
+                continue;
+            }
+            // Byte offsets are not cell offsets: a line can hold multi-byte
+            // glyphs, so the needle's position has to be counted in characters
+            // to index the buffer with it.
+            if let Some(byte_at) = line.find(needle) {
+                let at = line[..byte_at].chars().count();
                 return (at..at + needle.chars().count())
                     .map(|x| buffer[(x as u16, y)].style())
                     .collect();
             }
         }
-        panic!("`{needle}` is not on screen");
+        panic!("`{needle}` is not on a row containing `{row}`");
+    }
+
+    /// The selection is a light block, so every colour on that row is chosen
+    /// against white -- and nothing may be left at the terminal's default
+    /// foreground, which in a dark theme would be a row of invisible text.
+    #[test]
+    fn the_selected_row_is_a_light_block_with_dark_text_on_it() {
+        let mut app = app_with_session();
+        app.sessions[0].state = State::Running;
+
+        // `1. readme-fix` only appears on the row; the pane heading carries the
+        // bare name, and would match first.
+        let name = styles_in_row(&mut app, 100, 24, "1. readme-fix", "readme-fix");
+        for style in &name {
+            assert_eq!(style.bg, Some(Color::White), "the fill");
+            assert_eq!(style.fg, Some(Color::Black), "and legible on it");
+        }
+
+        // The branch on the second line is quieter, but still explicit.
+        let branch = styles_in_row(&mut app, 100, 24, "sbx/readme-fix", "sbx/readme-fix");
+        for style in &branch {
+            assert_eq!(style.bg, Some(Color::White));
+            assert_ne!(style.fg, None, "never the terminal default on a light fill");
+            assert_ne!(style.fg, Some(Color::White));
+        }
     }
 
     /// A waiting agent is the one thing the whole tool exists to surface, and it
-    /// used to become invisible at the worst possible moment: a list's highlight
-    /// style is patched over the row, so the badge's magenta fill was replaced by
-    /// the selection's grey and its black text went with it. Selected, the badge
-    /// becomes bright text instead of a fill.
+    /// has become invisible twice now: once when the selection's fill replaced
+    /// the badge's magenta background and left black text on dark grey, and
+    /// again when that fill turned white. Selected, it is magenta text on the
+    /// block; everywhere else it is the filled badge.
     #[test]
-    fn the_waiting_badge_stays_legible_on_the_selected_row() {
+    fn the_waiting_badge_stays_legible_either_way() {
         let mut app = app_with_session();
         app.sessions[0].state = State::Waiting;
 
-        // The badge in the list's title is the first `waiting` on screen and is
-        // a fill wherever it appears; the row's is what this is about, so it is
-        // found by the marker that only the selected row carries.
-        let selected = styles_at(&mut app, 100, 24, "readme-fix               waiting");
-        let word = &selected[selected.len() - "waiting".len()..];
-        for style in word {
-            assert_eq!(style.fg, Some(Color::Magenta), "bright, not black-on-grey");
-            assert_ne!(style.bg, Some(Color::Magenta), "and not a fill");
+        let selected = styles_in_row(&mut app, 100, 24, "1. readme-fix", "waiting");
+        for style in &selected {
+            assert_eq!(style.fg, Some(Color::Magenta), "magenta on the light fill");
+            assert_eq!(style.bg, Some(Color::White), "not a fill of its own");
         }
 
         // Unselected, it is the filled badge it is everywhere else.
@@ -1732,9 +1840,8 @@ diff --git a/b b/b
             "t".into(),
         ));
         app.list_state.select(Some(1));
-        let unselected = styles_at(&mut app, 100, 24, "readme-fix               waiting");
-        let word = &unselected[unselected.len() - "waiting".len()..];
-        for style in word {
+        let unselected = styles_in_row(&mut app, 100, 24, "1. readme-fix", "waiting");
+        for style in &unselected {
             assert_eq!(style.bg, Some(Color::Magenta), "filled when not selected");
             assert_eq!(style.fg, Some(Color::Black));
         }
@@ -1767,13 +1874,74 @@ diff --git a/b b/b
         assert!(body.contains("1. readme-fix"), "the numbered row: {body}");
         // The right-hand pane is the agent's, named by its tab.
         assert!(
-            body.contains("preview · diff · policy · events · agent"),
+            body.contains("agent · diff · policy · events"),
             "the tabs: {body}"
         );
-        assert!(body.contains("press enter to open its terminal"), "{body}");
+        assert!(body.contains("no screen captured"), "{body}");
         for row in &rows {
             assert!(row.chars().count() <= 120, "overflowed: {row}");
         }
+    }
+
+    /// The agent view draws the screen the status poll already captured, so
+    /// watching an agent costs nothing beyond what the state column costs
+    /// anyway. Not wrapped: it is a screen someone else laid out.
+    #[test]
+    fn the_agent_view_shows_the_captured_screen() {
+        let mut app = app_with_session();
+        app.views
+            .insert("readme-fix".into(), crate::tui::RightView::Agent);
+        app.polls.insert(
+            "readme-fix".into(),
+            crate::tui::Cached::new(ops::Poll {
+                stat: None,
+                status: None,
+                pane: Some(
+                    "● Read README.md\n───────────────\n❯ fix the typo\n  esc to interrupt".into(),
+                ),
+            }),
+        );
+
+        let body = render(&mut app, 120, 30).join("\n");
+        assert!(body.contains("Read README.md"), "{body}");
+        assert!(body.contains("esc to interrupt"), "{body}");
+        // And the facts are still beside it.
+        assert!(body.contains("sbx/readme-fix"), "{body}");
+    }
+
+    /// The agent draws its output at the top of a 50-row window and its input box
+    /// at the bottom, so an unsqueezed screen in a short pane is all output and
+    /// no prompt -- missing the half that says what it is waiting for.
+    #[test]
+    fn the_captured_screen_loses_its_padding_not_its_content() {
+        let screen = format!(
+            "\n\n● Read README.md\n\n● Done.\n{}❯ fix the typo\n  esc to interrupt",
+            "\n".repeat(30)
+        );
+        let out: Vec<&str> = squeeze(&screen).collect();
+
+        assert_eq!(out.first(), Some(&"● Read README.md"), "{out:?}");
+        assert!(
+            out.contains(&"❯ fix the typo") && out.contains(&"  esc to interrupt"),
+            "both ends have to fit: {out:?}"
+        );
+        // The blank between two messages is content; thirty of them are not.
+        assert!(out.len() < 12, "{} lines left: {out:?}", out.len());
+        assert!(
+            out.windows(3).all(|w| w.iter().any(|l| !l.is_empty())),
+            "no run of three blanks survives: {out:?}"
+        );
+
+        // A row of nothing but colour changes is blank, however many bytes it
+        // is. tmux colours the empty end of a row, so most of a captured screen
+        // looks like this.
+        let coloured_blanks = format!(
+            "● Read README.md\n{}❯ fix the typo",
+            "\u{1b}[38;5;246m\u{1b}[39m\n".repeat(20)
+        );
+        let out: Vec<&str> = squeeze(&coloured_blanks).collect();
+        assert!(out.len() < 4, "{} lines left: {out:?}", out.len());
+        assert_eq!(out.last(), Some(&"❯ fix the typo"));
     }
 
     /// The list must survive a short terminal: the facts pane is sized to its
@@ -1809,13 +1977,60 @@ diff --git a/b b/b
         assert!(text.contains('…'), "the task is cut: {text}");
         assert!(text.contains("sbx-readme-fix"), "and the fields survive");
         assert!(text.contains("agent at"), "{text}");
+    }
 
-        // The whole task is still reachable, in the pane that has room for it.
-        let preview: String = preview_lines(&app, &app.sessions[0])
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
-            .collect();
-        assert!(preview.contains("write the tests for every one of them"));
+    /// A hint line that does not fit is clipped mid-word, which reads as broken.
+    /// The descriptions go first; the keys are the part worth having.
+    #[test]
+    fn the_hints_shed_their_descriptions_before_they_overflow() {
+        let wide = hint_line(KEYS_LIST, 120);
+        let text: String = wide.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("j/k move"), "{text}");
+
+        let narrow = hint_line(KEYS_LIST, 80);
+        let text: String = narrow.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(text.contains("j/k"), "the keys stay: {text}");
+        assert!(!text.contains("move"), "the words go: {text}");
+        assert!(
+            text.chars().count() <= 80,
+            "{} columns: {text}",
+            text.chars().count()
+        );
+
+        // Narrower than even the keys, and clipping is all that is left -- but it
+        // is the short form being clipped, not the long one.
+        let tiny = hint_line(KEYS_LIST, 20);
+        let text: String = tiny.spans.iter().map(|s| s.content.to_string()).collect();
+        assert!(!text.contains("move"), "{text}");
+    }
+
+    /// An empty list must not offer keys that act on a selection: `enter attach
+    /// to it` with nothing to attach to reads as a broken interface.
+    #[test]
+    fn an_empty_list_offers_only_what_works() {
+        let mut app = App::new();
+        let body = render(&mut app, 100, 24).join("\n");
+        assert!(body.contains("n new session"), "{body}");
+        assert!(!body.contains("attach"), "{body}");
+        assert!(!body.contains("destroy"), "{body}");
+    }
+
+    /// What a pane spends before its content -- a heading and a blank row -- is
+    /// what every caller that sizes a pane to its contents measures with.
+    /// ratatui charges the title row *and* the top padding, which cost the facts
+    /// pane its last line when that was got wrong, so the arithmetic is asserted
+    /// rather than assumed.
+    #[test]
+    fn a_pane_spends_two_rows_before_its_content() {
+        let area = Rect::new(0, 0, 40, 10);
+        let inner = pane("title", false).inner(area);
+        assert_eq!(inner.y, area.y + PANE_TOP, "the heading, then a blank");
+        assert_eq!(
+            inner.height,
+            area.height - PANE_TOP,
+            "and the rest is content"
+        );
+        assert_eq!(inner.width, area.width - PANE_SIDES, "a column either side");
     }
 
     /// The bug this pane's sizing was rewritten for: a repository URL is one

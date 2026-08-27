@@ -67,7 +67,7 @@ created_at, last_activity, diff_stat
 ## Increments
 
 Each increment ends in something runnable and is committed separately.
-Increments 0-12 are done. What is left is the unscheduled list below.
+Increments 0-20 are done. What is left is the unscheduled list below.
 
 - **0. Ground truth** — DONE except agent auth. CLI 0.0.45 -> 0.0.110,
   gateway installed from tarballs (Arch has no dpkg/rpm) and running as a
@@ -562,6 +562,372 @@ Increments 0-12 are done. What is left is the unscheduled list below.
   of that test looked fine while asserting on the wrong cells, since `str::find`
   returns a byte offset and a border row is mostly multi-byte box drawing.
 
+- **13. The agent's screen, not its terminal** — DONE, and a deliberate reversal
+  of half of increment 11. Entering a session hands the whole terminal over
+  again; the agent tab is now a read-only view of its screen.
+
+  **Why the pty went.** It worked -- typing, scrolling, permission prompts, all
+  verified -- but a full-screen attach is simply better at the thing it was for:
+  full width, the agent's own scrolling and mouse support, and no key routing
+  standing between the user and the agent. Everything the embedded terminal added
+  was compensation for being small and for owning the keyboard. What is worth
+  keeping is *seeing* the agent without leaving, and that never needed a pty.
+  Claude Squad turns out to have this exactly right: its Preview tab is read-only
+  and attaching is a separate act.
+
+  So the agent tab draws the capture the status poll already takes -- the same one
+  that decides the state column -- which makes watching an agent free rather than
+  a held `exec --tty` per session. `portable-pty`, `vt100` and `tui-term` are
+  gone, and with them `Focus::Agent`, the key encoding, the escape hatch and the
+  pty lifecycle. The pty implementation is in the history at the commit before
+  this one, if it is ever wanted back.
+
+  Three things the view needed that the terminal did not:
+
+  * **The whole screen, not the last forty lines.** `PANE_LINES` was sized for
+    marker detection, where every marker sits at the bottom; forty lines of a
+    fifty-row pane cut off the banner and the first exchange. Now 120, still
+    bounded so a pane left tall by an attach cannot flood a poll.
+  * **The padding squeezed out.** The sandbox pane is 200x50 and the TUI's is
+    whatever is left of the terminal. Claude Code draws output at the top and its
+    input box at the bottom, so thirty blank rows sit between them and a short
+    pane showed all output and no prompt. Runs of blanks collapse to one.
+  * **A faster poll while it is on screen.** The view is only as live as the
+    capture behind it, so the selected session's poll uses the diff pane's
+    interval when the agent tab is showing -- content under the user's eyes has to
+    keep up -- with the existing floor still capping the exec rate.
+
+  **And the attach now puts the window back.** `Terminal::drop` used to restore
+  the agent's tmux window to 200x50 on the way out; without it, attaching from an
+  80-column terminal leaves the window 80 columns wide for the rest of the
+  session, narrow enough to truncate the footer the running marker lives in. The
+  attach script -- one definition now, shared by `sbx attach` and the TUI, which
+  had drifted into two copies -- resizes the window and restores
+  `window-size latest` afterwards, so the next client still resizes it. Verified
+  by attaching from a 120x32 terminal and reading `#{window_width}` back out of
+  the sandbox: 120x32 attached, 200x50 after detaching, no client left behind.
+
+  Also fixed, found by using it: `sbx rm` followed by `sbx ls` printed
+  "could not adopt sbx-x: sandbox not found". Deletion is asynchronous, so the
+  sandbox is still listed while its record is already gone -- which looks exactly
+  like an orphan worth adopting. `store::reconcile` now skips anything in
+  `Deleting`.
+
+- **14. Legible agents, and no boxes** — DONE. Two bugs, a simplification and a
+  flatter interface, all from looking at a screenshot of the real thing.
+
+  **Everything the agent drew came out as underscores.** Claude Code's banner,
+  its box rules and its `⏸` and `❯` glyphs, in a real attach. The cause is three
+  facts stacked: the community base image sets no locale at all, the gateway does
+  not pass the image's environment through to an exec, and a tmux client that
+  does not believe it is on a UTF-8 terminal draws with the DEC line-drawing set
+  and replaces what it cannot map with `_`. So the locale has to be said three
+  times, and each one covers a different process: `ENV` in the image for anything
+  started from it, `set-environment -g` in the tmux conf for the agent itself
+  (whose environment comes from the tmux server), and an explicit export in
+  `ops::attach_script` for the *client*, which is the one the gateway strips.
+  Every tmux invocation also passes `-u`, which asserts UTF-8 without depending
+  on a locale at all. The colour half is `default-terminal tmux-256color` plus
+  `terminal-features ",*:RGB"`, and `COLORTERM=truecolor` so the agent knows it
+  may use 24-bit colour: inside tmux the pane's TERM decides what the agent
+  thinks it has, and RGB has to be declared before tmux will pass a direct colour
+  out to the terminal rather than flattening it.
+
+  **The agent view now shows the colour too.** `capture-pane -pe` keeps the
+  escape sequences, and `crate::ansi` -- about 150 lines, no dependency -- turns
+  each line into styled spans. It is deliberately not a terminal emulator: no
+  cursor, no scroll regions, no charset switching, because the capture is already
+  a laid-out screen and `m` is the only sequence in it that carries meaning.
+  Everything else is skipped rather than guessed at.
+
+  The same tokenizer produces `strip`, which is what the marker search reads --
+  `esc to interrupt` is not findable in a string where tmux has coloured `esc`
+  separately, so status detection would have quietly stopped working the moment
+  the capture gained colour. Blankness is judged on the stripped copy for the same
+  reason: tmux colours the empty right-hand end of every row, so thirty "blank"
+  rows are thirty rows of invisible escapes, and `squeeze` would have found
+  nothing to squeeze. Two bugs in the parser came out of its own tests: the colon
+  form of direct colour carries an empty colour-space field (`38:2::255:128:0`),
+  which read as the red channel loses the colour; and `0m` resets to *nothing
+  set* rather than to an explicit default, which is what lets the pane's own
+  colours show through.
+
+  **The preview tab is gone, and the agent's screen is the default view.** The
+  preview had become the facts pane -- session, repo, branch, policy, providers --
+  plus a `git status` the diff tab and the stat column already answer. It cost an
+  exec per selected session for that. Dropping it removes `ops::repo_preview`,
+  the `previews` map and a `Request`/`Update` pair, and it pays for the agent
+  view's faster poll: the same budget, spent on the pane that answers the question
+  the list raises. Four tabs now, agent first, and `RightView::default()` with it.
+
+  **And the boxes are gone.** Four nested borders, drawn around content that is
+  mostly rules already -- a diff, an agent's own input box, the policy pane's
+  sections. What a border was actually carrying was which pane the movement keys
+  belong to, and a heading carries that better: bold when focused, and no row
+  spent on it. The create flow's picker and form keep theirs, because a modal is
+  drawn over whatever was underneath it and its edge is the only thing saying
+  where it stops.
+
+  The selection went with them: a light filled block, as Claude Squad has it,
+  because the dark fill that replaced the old reversed row turned out to be too
+  close to the background to find. That makes every colour on that row a colour
+  chosen against *white*, and the trap is what is not styled at all -- unstyled
+  text keeps the terminal's default foreground, which in a dark theme is
+  near-white and therefore invisible on it. So the row's own spans carry explicit
+  dark colours when selected, `waiting` keeps its magenta (legible on white in
+  either kind of theme, where the filled badge could not survive inside another
+  fill), and the stat and the state dot keep theirs. The marker went: a solid
+  block needs no arrow, and dropping it gives every row two columns back.
+
+  With the boxes gone the layout needed its own air, so there is a margin at the
+  terminal's edges, a gap between the columns, a blank row between the list and
+  the facts, and a blank row under every heading. That last one is only safe
+  because the title/padding arithmetic below is now understood: it is a *second*
+  row before content, and `PANE_TOP` is what every caller measures with. The
+  footer sheds its descriptions when the window is too narrow for them, since a
+  hint line clipped mid-word reads as broken; an empty list offers only `n` and
+  `q`, rather than keys that act on a selection that does not exist.
+
+  The arithmetic behind that is worth knowing: ratatui charges a block a title
+  row *and* any top padding, so asking for both left a blank line and one row
+  less of content than every caller had measured for -- which cost the facts pane
+  its `agent at` line. `PANE_TOP`/`PANE_SIDES` and a test over `Block::inner`
+  pin it down now.
+
+  Verified against a live gateway: a session created on the rebuilt image, the
+  attach rendering `▐▛███▛█`, `❯`, `⏸` and `──────` correctly where the screenshot
+  had underscores, the agent tab showing Claude Code's own colours through
+  `crate::ansi`, the state column still reading `running` off the screen -- which
+  is the thing the strip had to keep working -- and every tab plus the create
+  modal read back from a live TUI without a box in sight.
+
+- **15. The create form stops asking what it can work out** — DONE. Two pieces of
+  friction, both found by using it on a real repository.
+
+  **A second session in the same repository had to be renamed by hand.** With no
+  task typed the name is derived from the repository, so the second one always
+  collided and the form refused it until the name was edited. That makes the
+  common case -- try something, try something else -- the one that needs work.
+  `session::unique_name` appends a counter instead, shortening the stem to keep
+  inside the gateway's name budget rather than dropping the suffix; `fix-the-readme`
+  becomes `fix-the-readm-2`, which still reads as a variant of the same thing.
+  Unlike `slugify` it will cut mid-word, because `fix-the-2` would not. The
+  submit-time guard stays, for a name typed by hand: editing the name pins it, and
+  a pinned name is the user's to be wrong about.
+
+  **The Azure PAT was not ticked for an Azure repository.** Increment 9 preselects
+  by *type* and only when exactly one provider of that type exists, on the grounds
+  that two Azure PATs are two organisations and the wrong one fails three steps
+  later. True, but it left the common case -- one PAT per org, the same one every
+  time -- needing a correction on every create. So the store now breaks the tie:
+  the providers the most recent session for the same **host and organisation** was
+  given. Host and organisation rather than the exact URL, because an Azure PAT
+  covers every repository in an org, which is what makes the answer useful for a
+  repository never opened before. It is evidence rather than a guess -- it can only
+  be wrong where the user was already wrong -- and with nothing to go on the old
+  behaviour stands.
+
+  History only breaks ties between the types a session actually wants: an Azure
+  PAT used before is not ticked for a GitHub repository.
+
+  Verified against the live store: opening the form on `Inet.Server`, which
+  already had a session, derived `inet-server-2` and ticked `claude-oauth` and
+  `azure-pat` -- leaving `azure-pat-personal`, the other PAT of the same type,
+  alone.
+
+- **16. Defaults the agent arrives with** — DONE. A fresh sandbox has a fresh
+  `HOME`, so an agent with nothing baked for it starts on someone else's
+  defaults: Sonnet on the subscription credential, manual permissions, and a
+  handful of network calls the policy denies. The image's `settings.json` now
+  carries four things -- a model, a permission mode, the traffic switches, and the
+  status hooks it already had.
+
+  * **`model: opus[1m]`**, an *alias* rather than `claude-opus-5[1m]`. Both give
+    "Opus 5 (1M context)", measured, but the alias follows the newest Opus and
+    keeps the million-token context -- which is the same trap as increment 10's
+    Claude Code version, and the same answer. The banner says
+    "(from .claude/settings.json)", which is how it was verified.
+  * **`permissions.defaultMode: auto`**. Not `acceptEdits`, which still stops for
+    everything that is not an edit, and not `bypassPermissions`, which is a
+    different thing again -- `auto` is its own value in the mode enum
+    (`default`, `auto`, `acceptEdits`, `plan`, `bypassPermissions`) and it judges
+    each tool call rather than waving them all through. Claude Code's own words
+    for it are "recommended to only use in isolated environments", which is
+    exactly what this project builds. An agent that stops on its first edit is an
+    agent still being babysat, which defeats the point of running several.
+  * **`DISABLE_AUTOUPDATER`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` and
+    `CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL`**. Each one is a call
+    the policy denies -- telemetry to Datadog, the updater reaching
+    `downloads.claude.ai`, the plugin marketplace reaching
+    `raw.githubusercontent.com` -- and a denial with nothing behind it is noise in
+    the pane that exists to show the denials that matter. Found by reading that
+    pane rather than by guessing: the first two switches cleared the telemetry and
+    left two hosts still being refused, and the umbrella variable cleared the
+    rest.
+
+  A consequence worth stating: with auto mode on, the `waiting` state fires far
+  less often, because most of what used to raise a prompt no longer does. The
+  detection is unchanged and still catches a genuine question; there is simply
+  less to catch, which is the point.
+
+  Verified against a live gateway: a session created on the rebuilt image reported
+  `Opus 5 (1M context)`, announced auto mode, read and edited the repository
+  without stopping to ask, showed `+1/-1` in the list, and produced an events feed
+  with zero denials in it.
+
+- **17. The intervals, measured instead of guessed** — DONE. The interface felt
+  slow, and the cause was not the transport: it was that every interval had been
+  chosen against a cost model an order of magnitude out.
+
+  Measured against a live gateway: `sandbox list` 20ms, an exec that does nothing
+  44ms, a full poll -- diff stat, agent state and the agent's screen -- 56ms,
+  `openshell logs` 14ms for 400 lines. Even `git status --porcelain` on a ten
+  thousand file, 238MB repository is 65ms. The original numbers (a 3s refresh, a
+  6s poll, a one *second* floor between polls) were written when an exec was
+  believed to cost hundreds of milliseconds, which is what it costs under load or
+  with a client attached, not at rest.
+
+  So: the refresh is 1s, a background session polls every 2s, the selected one
+  every 500ms, the diff and events panes are 1.5s, and the floor between polls is
+  200ms -- five a second across all sessions, which keeps ten of them inside their
+  own interval. End to end, from touching a file in a sandbox to seeing it in the
+  list: **298ms, 536ms, 523ms** over three trials, against ~850ms at the first
+  attempt and six seconds before that. The TUI process sits at 0.2% CPU doing it.
+
+  Two consequences handled rather than discovered later:
+
+  * Every exec writes three events to the gateway's log, and the events pane reads
+    a window on the end of that log. Polling five times harder shrinks how much
+    *time* that window covers, so `LOG_LINES` went from 400 to 1500 -- the filter
+    already drops sbx's own noise, and the read is 14ms.
+  * A test asserts the budget is coherent, because the parts have to add up: the
+    selected session sooner than the rest, the floor below the interval it is
+    bounding, a full round inside `POLL_TTL` for a list of ten, and the redraw
+    quicker than anything it draws.
+
+  **Streaming was considered and is not needed.** One long-lived exec per session
+  emitting on a loop would make this properly live and cost one round trip per
+  session rather than one per read -- and increment 11 proved a held exec does not
+  starve the others. But at 56ms a poll, the polling model already lands inside
+  half a second, and the machinery a stream needs (a supervisor per session, a
+  protocol to parse, backpressure) buys tenths of a second. The note stays here in
+  case the numbers ever change: what to split first is the *stat* from the rest,
+  since state and screen are a file read and a `capture-pane` and only the stat
+  needs git.
+
+- **18. The cache had a race, and the list had too little air** — DONE. Three
+  small requests and one real bug they led to.
+
+  The list: a blank row either side of each session's two rows, so a list of
+  four reads as four things rather than a paragraph -- and so the selected one's
+  light block has room around its text. The state dot is gone; the coloured word
+  beside it was already saying the same thing twice. And nothing says
+  "refreshing" any more: at a one second interval that label was on screen more
+  often than off it, and a flicker carrying no information is worse than no label.
+
+  **The bug, found by looking at why a session said `seeding` when its sandbox was
+  perfectly healthy.** `sessions.json` has more than one writer and that is the
+  normal case, not an edge: a TUI reconciles the whole list on a timer while a
+  `sbx new` in another terminal walks a session through `creating`, `seeding`,
+  `ready`. Both did load-modify-save with no lock, so the second write won and the
+  first was lost -- and with increment 17 taking the refresh from three seconds to
+  one, the window went from occasional to reliable. Worse, `ops::create` held a
+  snapshot from *before* its clone, which on a 238MB repository is minutes old;
+  `save`'s own doc comment claimed it reloaded per step, and it never had.
+
+  Every change now goes through `store::update`, which takes an exclusive lock on
+  a file beside the cache, reads, applies and writes inside it. Gateway calls and
+  execs stay outside, so the lock is held for a file read and a rename. `refresh`
+  merges rather than replacing wholesale, because it only knows what it loaded and
+  a create in another process may have added a record since. Verified live: four
+  creates from a second terminal against a TUI refreshing every second, all four
+  `ready`; before the fix, one of two was `seeding`.
+
+  **And a repair, for the records already wrong.** A record stuck in
+  `creating`/`seeding` is either an abandoned create -- the create thread is
+  detached, so quitting the TUI mid-clone is enough -- or the loser of the race
+  above. The first refresh of any command now re-reads such a session's metadata
+  and takes the sandbox's word for it: `space-b: record said seeding, sandbox says
+  ready`. A session whose sandbox has *no* metadata is left alone, because that is
+  exactly what a clone still running looks like -- which is what tells an
+  abandoned create apart from a slow one, without a timeout to guess at.
+
+- **19. Seeding survives the tool that asks for it** — DONE, and it closes the
+  failure increment 18 could only report: a create that died left a sandbox
+  holding 69MB of a 238MB clone, no `HEAD`, and a record that said `seeding`
+  forever.
+
+  The clone used to be a child of the host process, over one long `exec`. Now the
+  host writes a script into the sandbox, starts it with `setsid`, and watches a
+  state file. The script does everything -- clone, identity, work branch, the
+  metadata record, and the agent's tmux session -- so a session comes up complete
+  with nobody watching. `ops::create` is a *watcher*: it reports each step, and if
+  it runs out of patience (fifteen minutes) it says the session is still seeding
+  and leaves it to finish. Quitting the TUI now costs the progress report, not the
+  session.
+
+  **The state file is the point.** Three things used to look identical from
+  outside a sandbox -- still cloning, finished while nobody was looking, and
+  stopped -- and telling them apart is what makes an honest record possible. The
+  seeder announces each step before doing it, writes its own pid, and traps any
+  failure into `failed <the last lines of its log>`. The repair pass reads that
+  instead of guessing: `done` is `ready`, `failed` carries git's own words, a step
+  with a live pid is left alone however long it takes, and a step with a dead pid
+  is a sandbox that went out from under its seeder.
+
+  **Two things only a live run could have found.** `/bin/sh` in the sandbox is
+  dash, which has no `$LINENO` -- and reaching for it *inside* the failure handler
+  under `set -u` made the handler fail, so a clone that could not authenticate
+  wrote no reason at all and the host had to infer "stopped" from a missing
+  process. And `tr '\\n'` in a Rust raw string is a backslash and an `n`, not a
+  newline, so the first working error message came back with every `n` replaced by
+  a space: `could ot read User ame`.
+
+  Verified against a live gateway, all three paths: a normal create (all four
+  steps, `done`, agent running); `SIGKILL` to the host two seconds into a clone,
+  after which the sandbox finished on its own and `sbx ls` reported
+  `seed-kill: seeding -> ready (seeding finished)`; and a clone that cannot
+  authenticate, which now says
+  `seeding failed: fatal: could not read Username for 'https://github.com'` and
+  leaves the record `failed` rather than `seeding`.
+
+- **20. A diff you can scroll, and a feed that is a record** — DONE. Two reports,
+  one a discoverability failure and one a real design flaw.
+
+  **"I cannot scroll in the diff."** It scrolled -- after `l` to focus the pane,
+  which is what the footer said and not what anyone tries. `Shift-↑`/`Shift-↓` now
+  scroll the right-hand pane from either side, as Claude Squad does it, and
+  `PageUp`/`PageDown` page it: paging a list of half a dozen sessions was never
+  worth a binding, and paging the content always is. The footer lost `a attach`
+  and `pgup/pgdn page` in exchange -- `enter` already does the first and
+  `shift-↑/↓` implies the second -- because the described hints had grown past what
+  a 120 column terminal can show, which is its own kind of unhelpful.
+
+  **"The events log gets cleared when closing the app and opening it again."** It
+  was, and by us. The pane asks the gateway for the last 1500 log lines, and every
+  exec sbx makes to read a sandbox writes three lines of its own; at increment
+  17's intervals a measurement said it plainly -- that window covered **125
+  seconds** and contained **one** event worth showing, out of 1500 lines of which
+  376 were sbx's own execs. Nothing was cleared; everything older than two minutes
+  had simply rolled out, and reopening the tool made it obvious.
+
+  So the feed is ours to keep: one JSONL file per session beside the session
+  cache, each fetch merged into it, deduplicated on (timestamp, class, subject),
+  trimmed to the newest 4000, written through a temp file and a rename like the
+  cache. A fetch that returns nothing -- an unreachable gateway, a quiet window --
+  leaves the history alone rather than emptying it. Destroying a session forgets
+  its file, since it is about a sandbox that no longer exists.
+
+  Proved end to end rather than argued: 14 events recorded from a session's clone
+  and first turn, then 550 execs fired at the same sandbox until the gateway's
+  window no longer contained a single one of them -- `grep -c` on the oldest
+  timestamp went to zero -- after which `sbx events` still listed all 14, clone
+  included.
+
+  Worth knowing for anything else that reads that log: raising `LOG_LINES` (which
+  increment 17 did, 400 to 1500) buys time linearly and loses to the poll rate
+  immediately. Keeping what has been seen is the only thing that scales.
+
 ### Later, unscheduled
 
 - **Warm pool** — less urgent than expected: sandbox creation is ~1s with the
@@ -706,7 +1072,9 @@ Things a future session should know that are not obvious from the code:
   filter in `crates/sbx/src/events.rs`, and expect the same problem in any
   future feature that watches the gateway's own output.
 * **A held `exec --tty` does not block ordinary execs, and killing one does not
-  wedge the sandbox.** Both were assumed to be true the other way round -- the
+  wedge the sandbox.** (Measured for increment 11's embedded terminal, which
+  increment 13 removed; the finding still stands and still matters for anything
+  that holds an exec open.) Both were assumed to be true the other way round -- the
   second is written down in increment 0 -- and both were measured on 0.0.110
   while building increment 11: execs stayed at ~200ms with an attach open, and
   survived the attach being killed. Worth re-measuring rather than trusting if
@@ -719,6 +1087,24 @@ Things a future session should know that are not obvious from the code:
   an agent has to let the agent do it. Check those two format strings before
   building a scrollback for any agent, and expect a different answer from one
   that renders inline. See increment 11.
+* **A create that dies leaves a half-cloned sandbox, and it looks like one still
+  working.** *(Fixed in increment 19 by moving seeding into the sandbox; the note
+  stays because the shape of the problem recurs -- anything the host does *to* a
+  sandbox over a single exec dies with the host.)* The create thread is detached -- quitting the TUI mid-clone is enough
+  to kill it -- and what is left is a `.git` with a partial pack: 69MB of a 238MB
+  repository, `count-objects` reporting zero, `rev-parse HEAD` failing. Nothing in
+  the gateway log, because nothing failed; the client simply went away. Increment
+  18's repair pass makes the *record* honest, but the sandbox is still unusable and
+  the only cure is to destroy it. The durable fix is to run seeding *inside* the
+  sandbox, detached from the exec that starts it, so it survives the tool that
+  asked for it -- which is the same principle as the agent's own tmux session.
+* **A tmux client with no locale is not a UTF-8 client, and the gateway strips
+  the environment.** Two facts that only bite together: the image's `ENV` never
+  reaches an `openshell sandbox exec`, so a tmux client started there falls back
+  to the DEC line-drawing set and turns every glyph it cannot map into `_`. Any
+  tmux invocation that talks to a terminal wants `-u` and an exported locale, and
+  anything that starts the tmux *server* has to set it too, because panes inherit
+  the server's environment. See increment 14.
 * **tmux keeps a window at its last client's size after that client leaves.**
   `default-size` only applies at creation, so anything that attaches at a small
   size -- an embedded pane, a narrow terminal -- decides what the status scraper
