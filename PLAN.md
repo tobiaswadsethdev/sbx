@@ -1041,6 +1041,193 @@ Increments 0-21 are done. What is left is the unscheduled list below.
   key at all. Verified live: `sbx policy does-the` rendering the three list states
   against a real `feature-work` sandbox.
 
+- **23. MCP servers, run on the host and reached through the policy** — DONE.
+  The agents had no tools beyond their own, and the ones worth having -- Jira,
+  Azure DevOps -- need credentials. Running those servers *inside* the sandbox
+  would put the credentials inside the sandbox, which is the thing this tool
+  exists not to do. So they run on the host in their own containers, holding
+  their own secrets, and a `[[mcp]]` table in the config file gives every new
+  session one endpoint each.
+
+  **Two topologies, both measured against 0.0.110 with the Docker driver.** A
+  sibling container on the gateway's own network (`--network openshell-docker`)
+  is reachable from a sandbox *by container name* -- Docker's embedded DNS
+  resolves it even though the sandbox has no DNS of its own, because the proxy
+  does the resolving -- and publishes nothing on the host at all. A port
+  published on the host is reachable as `host.openshell.internal`, which the
+  gateway already puts in every sandbox's `ExtraHosts` pointing at the bridge
+  gateway (172.18.0.1 here). An IP literal is *not* covered by a hostname rule:
+  granting `host.openshell.internal:8931` and then asking for `172.18.0.1:8931`
+  is denied, as it should be.
+
+  **The binary is the agent, and that is sharper than the registry rules.**
+  Claude Code 2.x is a native binary, so `/usr/local/bin/claude` is a rule only
+  the agent satisfies -- unlike npm, whose kernel-resolved exe is `/usr/bin/node`
+  and covers everything JavaScript in the sandbox. Demonstrated live in
+  `sbx-adoe2e`: `claude -> POST http://mcp-azure-devops:9001/mcp ALLOWED
+  [policy:allow_mcp_azure_devops_9001]` beside
+  `curl -> ... DENIED [binary '/usr/bin/curl' not allowed in policy]`. This cost
+  a round trip to find: with `node` and `curl` on the rule and not `claude`, the
+  agent reports the proxy's 403 as **`! Needs authentication`**, which sends you
+  looking at credentials for a policy problem. `sbx doctor` exists partly to
+  shorten that path -- it says which container is missing or off the network.
+
+  **Registration happens inside the sandbox, before the agent starts.** The
+  seeder runs `claude mcp add --scope user` as its own `mcp` step, because the
+  agent reads its servers at startup: doing it from the host afterwards would
+  leave the first session of every sandbox without tools. `claude mcp add`
+  rather than writing `mcpServers` into `/sandbox/.claude.json` by hand, since
+  the CLI owns that file's shape and the image already pre-populates it with the
+  onboarding keys. The endpoints are opened in one `policy update --wait` at
+  create time, next to `impose_lists` and for the same reason: an allow that does
+  not land announces itself the moment the agent tries, so it is a warning, not a
+  failed create.
+
+  **Loopback is refused when the file is read.** `http://localhost:9000/mcp` is
+  correct on the host and means the sandbox itself inside one, so it would look
+  fine until an agent was running and then fail as an authentication problem. The
+  error names `host.openshell.internal` and the network by name rather than just
+  saying no. `stdio` is refused for the same class of reason: it would run the
+  server in the sandbox, with its credentials.
+
+  **Streaming is not buffered by the inspecting proxy**, which was the risk worth
+  testing before building any of this: an SSE endpoint emitting an event a second
+  arrived inside the sandbox event by event, a second apart. Real servers
+  verified end to end: `@azure-devops/mcp` 2.9.0 behind `supergateway`
+  (stdio-only, so it needs the shim; its `pat` mode wants the base64 of `:<pat>`,
+  which it splits on the colon) reported `✔ Connected` to a real session's agent,
+  and `ghcr.io/sooperset/mcp-atlassian` answers `--transport streamable-http` on
+  `/mcp`.
+
+  **What it costs, recorded rather than glossed.** The gateway sees every MCP
+  call as `POST /mcp`, so the method/path rules that make the git endpoints sharp
+  buy nothing: the agent gains whatever the server can do, with the host's
+  credentials. Fine for Jira and Azure DevOps, whose blast radius is a work item;
+  a filesystem or Docker MCP server on the host would be a straight sandbox
+  escape, and sbx cannot tell the difference for you.
+
+- **24. Skills carried in, and no attribution stamp** — DONE. Two things a
+  sandbox got wrong about being someone's environment rather than a clean room.
+
+  **Skills.** A sandbox has its own `HOME`, so a fresh one has none of them --
+  the one part of a setup that did not follow you in. `skills = ["ship-pr"]`
+  copies them: a bare name is one of your own under `~/.claude/skills` (or
+  `$CLAUDE_CONFIG_DIR/skills`), and anything with a `/` is a path, so a skill
+  living in a repository can be named where it is. Packed with `tar -czh` on the
+  host, carried as base64 inside the seeder script, unpacked into
+  `/sandbox/.claude/skills` as a `skills` step before the agent starts -- the
+  whole directory, since a skill is `SKILL.md` beside its scripts and
+  references, and a passthrough that moved only the markdown would be worse than
+  none.
+
+  **A symlink was the ask and a copy is the answer**, which is worth writing
+  down rather than quietly substituting: a symlink does not cross into a
+  sandbox, and a bind mount would hand it the rest of `$HOME` -- the isolation
+  is the product. What the config file holds is the pointer, which buys the part
+  of a symlink that was actually wanted: edit the original, and the next session
+  gets the edit. A running session keeps what it was created with, its record
+  says so, and the facts pane lists the names.
+
+  **Failures cost the skill, not the session.** A skill that is missing at create
+  time is a warning -- computed by re-running the pack in `ops::create`, since
+  the seeder runs detached and has nowhere to say it -- and `sbx doctor` reports
+  the same three problems (not there, not a directory, no `SKILL.md`) before you
+  ever get that far. The 256KiB cap on a packed skill is there because the
+  payload rides in an exec argument: over it, the failure would be
+  `argument list too long` rather than anything about skills.
+
+  Base64 is fifteen lines in `skills.rs` rather than a dependency, tested against
+  the RFC 4648 vectors *and* round-tripped through the real `base64 -d`, which is
+  the decoder that actually has to accept it.
+
+  **Attribution.** The baked `claude-settings.json` now sets
+  `attribution.commit` and `attribution.pr` to empty strings, which is how Claude
+  Code is told to stamp nothing; an absent key means the default trailer, not
+  silence. Commits made in a sandbox already carry the host's git identity, so a
+  co-author trailer would credit the tool for work attributed to the person
+  running it.
+
+  Verified live in `sbx-skilltest`: `step skills` in the state file, the
+  `ship-pr` manifest at `/sandbox/.claude/skills/ship-pr/SKILL.md`, and both MCP
+  servers `✔ Connected` in the same session -- the first run with real
+  credentials rather than placeholders.
+
+  **A window that used to be microseconds became seconds.** Creating a session
+  reported `could not adopt sbx-x: cat: /sandbox/.sbx/meta.json: No such file or
+  directory` while the session itself came up perfectly. Between
+  `sandbox create` returning and the record being saved, the sandbox is an
+  orphan: labelled `sbx.managed`, no record, no `meta.json`. Any refresh landing
+  there -- the TUI runs one a second -- tries to adopt it and fails on a file the
+  seeder has not written yet. `impose_lists` had the same shape, and was
+  invisible because an empty list makes no call; `impose_mcp` is a
+  `policy update --wait`. The record is now written the moment the sandbox
+  exists, before either, so a refresh finds a `creating` record instead of an
+  orphan. `read_meta` also grew a `NoMeta` variant, so if it ever does happen the
+  message is about the sandbox rather than about `cat`. Verified by racing 25
+  refreshes against a create: no warning, and the session seeded through
+  `step skills`, `step mcp`, `done`.
+
+- **25. Attach was cooked, not raw** — DONE. A question with options could not
+  be answered from an attached session: arrow keys did nothing, Enter did
+  nothing, and Ctrl-C was the only key that worked -- which declined the
+  question. It read as an agent that had stopped listening.
+
+  **Nothing was putting the local terminal in raw mode.** `openshell sandbox
+  exec --tty` allocates a pty at the *sandbox* end and leaves the caller's
+  terminal exactly as it found it; measured against 0.0.110 by spawning it under
+  a pty and reading the termios back: `ICANON`, `ECHO`, `ISIG` and `ICRNL` all
+  still set while the exec ran. Every symptom follows from that one fact. Input
+  is line-buffered, so arrow keys arrive in a batch on Enter, if at all, and a
+  dialog cannot be driven. `ICRNL` turns Enter into `\n` where the agent's input
+  box submits on `\r`, so a typed line sits in the box doing nothing. `ISIG`
+  catches Ctrl-C locally, and Ctrl-B never reaches tmux, so detaching is not
+  possible either.
+
+  `sbx attach` and the TUI's attach now share `ops::attach_interactively`, which
+  holds a raw-mode guard for the life of the child and restores on every path
+  out, panic included. Two copies would have been one fixed and one not. A
+  terminal that cannot go raw attaches anyway: reading is still worth something.
+
+  Verified under a real pty against a throwaway session: `ICANON/ECHO/ISIG/ICRNL`
+  all off during the attach and all back on after it, `echo raw-mode-works`
+  delivered keystroke by keystroke with no Enter and run by a bare `\r`, and
+  `Ctrl-b d` detaching cleanly with exit 0 -- which matters, since killing an
+  `exec --tty` wedges that sandbox's exec path until it is recreated.
+
+- **26. Names that say something, and a task field you can read** — DONE.
+  Three small things about the create flow, from using it.
+
+  **Filler spends the name budget.** "I want to add the MaxGaming Scala customer
+  id" derived `i-want-to-add`: fifteen characters of wrapper, none of subject.
+  `slugify` now drops pronouns, articles, auxiliaries and the wrapper verbs
+  (`want`, `need`, `please`), keeping real verbs -- `add the flag` and
+  `remove the flag` have to stay two names. A task made of nothing but filler
+  falls back to the text as written, since a name is better than no name.
+
+  **The 15-character cap was the gateway's, not ours.** Sandbox names are capped
+  at 19 and `sbx-` takes four. So the session name is now ours (40 characters,
+  bounded by being a branch and a list column) and the *sandbox* name is derived
+  from it: unchanged for short names, and for long ones the first ten characters
+  plus four hex digits of FNV-1a over the whole name. Deterministic, because
+  `sbx rm` and adoption have to name a sandbox with no record to read it from;
+  distinct, because `maxgaming-scala-customer-id` and `maxgaming-scala-tax` would
+  otherwise share one sandbox. The full name lives in the `sbx.session` label,
+  which has 63 characters. Branches stay `sbx/<name>` and simply get longer.
+
+  **The task field was one row.** A task is a prompt -- a sentence or three --
+  and `with_cursor` drew it on a single unbounded line, so past the modal's width
+  the text and the cursor were clipped by the border: you could not see what you
+  were typing, which is what prompted this. It now wraps over four rows and
+  scrolls by whole rows to keep the cursor visible, hard-wrapped at the column
+  like the facts pane's task rows so the same text breaks the same way in both.
+
+  **Copy on select, off.** `copyOnSelect` is a Claude Code default-on setting,
+  and it is *not* a `settings.json` key -- it is `/config`'s "Copy on select",
+  read from the global `.claude.json` the image already writes. Selecting text to
+  read it should not take the clipboard, least of all in a terminal borrowed to
+  watch an agent. A test asserts the Dockerfile sets it and that `settings.json`
+  does not pretend to.
+
 ### Later, unscheduled
 
 - **Warm pool** — less urgent than expected: sandbox creation is ~1s with the

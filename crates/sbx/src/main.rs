@@ -7,6 +7,7 @@ mod endpoints;
 mod events;
 mod forge;
 mod image;
+mod mcp;
 mod ops;
 mod pane;
 mod policy;
@@ -14,6 +15,7 @@ mod publish;
 mod repos;
 mod seed;
 mod session;
+mod skills;
 mod status;
 mod store;
 mod tui;
@@ -285,6 +287,11 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
         } else {
             args.providers
         },
+        // No flag to override this: an MCP server is a tool the agent has, set
+        // up once in the config file next to the container that serves it, and
+        // a URL typed on a command line would be a policy hole opened by hand.
+        mcp: cfg.mcp().to_vec(),
+        skills: cfg.skills().to_vec(),
         start: !args.no_start,
     };
 
@@ -405,6 +412,21 @@ fn cmd_config(cfg: &Config, init: bool, path_only: bool) -> Fallible {
         "refresh",
         cfg.refresh.is_some(),
         format!("{}ms", tui::Intervals::from_config(cfg).refresh.as_millis()),
+    );
+    // Name and url both, because the url is the half that is wrong when an
+    // agent reports a tool it cannot reach.
+    row(
+        "mcp",
+        !cfg.mcp().is_empty(),
+        if cfg.mcp().is_empty() {
+            "(none)".into()
+        } else {
+            cfg.mcp()
+                .iter()
+                .map(|m| format!("{} -> {}", m.name, m.url))
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
     );
     println!();
     println!("* set here, - built-in default");
@@ -553,12 +575,9 @@ fn cmd_publish(client: &dyn OpenShell, name: &str, opts: publish::Options) -> Fa
 fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
     let session = require_session(name)?;
 
-    let script = ops::attach_script(&session);
     println!("attaching to {name} - detach with Ctrl-b d");
 
-    let status = client
-        .interactive_exec(&session.sandbox, &["sh", "-c", &script])
-        .status()?;
+    let status = ops::attach_interactively(client, &session)?;
     if !status.success() {
         return Err(format!("attach exited with {status}").into());
     }

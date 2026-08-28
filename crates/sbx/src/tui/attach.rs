@@ -17,14 +17,13 @@ pub fn attach(
     client: &CliClient,
     session: &Session,
 ) -> io::Result<()> {
-    let script = ops::attach_script(session);
-
     ratatui::restore();
     println!("attaching to {} - detach with Ctrl-b d", session.name);
 
-    let status = client
-        .interactive_exec(&session.sandbox, &["sh", "-c", &script])
-        .status();
+    // Raw mode is [`ops::attach_interactively`]'s to manage, and it has to
+    // outlive `ratatui::restore` above: restoring the TUI's terminal turns raw
+    // mode *off*, which is right for a shell prompt and wrong for the agent.
+    let status = ops::attach_interactively(client, session);
 
     // Restore the TUI before reporting anything, so an error is drawn inside
     // the interface rather than scrolling past on a bare terminal.

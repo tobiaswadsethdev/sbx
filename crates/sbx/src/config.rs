@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::mcp;
 use crate::policy;
+use crate::skills;
 use crate::store::Store;
 
 /// A starter file, written by `sbx config --init`.
@@ -68,6 +70,18 @@ pub struct Config {
     /// related to each other and a single absolute interval would break the
     /// relationships.
     pub refresh: Option<Duration>,
+    /// Skills copied into every new session, already resolved to host paths.
+    ///
+    /// Global for the same reason as [`Self::mcp`]: this is what an agent of
+    /// yours knows how to do, not a per-session choice.
+    pub skills: Vec<skills::Skill>,
+    /// MCP servers every new session's agent is given, already validated.
+    ///
+    /// Not a per-session choice and so not on [`crate::ops::Draft`]: like the
+    /// global endpoint lists, this is one decision about what an agent of yours
+    /// can reach, made once. A session records the servers it was created with,
+    /// so changing the file changes the next session rather than this one.
+    pub mcp: Vec<mcp::Server>,
 }
 
 impl Config {
@@ -160,6 +174,62 @@ impl Config {
             ));
         }
 
+        // Resolved but not checked against the filesystem: a skill directory
+        // that is temporarily gone -- a repository not cloned yet, an external
+        // drive not mounted -- should not stop every command from running. The
+        // shape is checked here, existence is `sbx doctor`'s to report and a
+        // create-time warning otherwise.
+        let mut resolved_skills = Vec::new();
+        for entry in raw.skills.iter().flatten() {
+            let skill = skills::Skill::parse(entry)
+                .map_err(|e| invalid("skills", format!("`{entry}` {e}")))?;
+            if resolved_skills
+                .iter()
+                .any(|s: &skills::Skill| s.name == skill.name)
+            {
+                return Err(invalid(
+                    "skills",
+                    format!(
+                        "`{}` is the name of two skills; the agent keys them by \
+                         directory name, so one would hide the other",
+                        skill.name
+                    ),
+                ));
+            }
+            resolved_skills.push(skill);
+        }
+        if raw.skills.as_ref().is_some_and(Vec::is_empty) {
+            return Err(invalid(
+                "skills",
+                "is empty; remove the key to copy none".to_string(),
+            ));
+        }
+
+        // Validated here, where the error can name the file and the entry,
+        // rather than at create time: a URL the sandbox cannot reach is worth
+        // finding out about before a sandbox exists, and a loopback URL -- the
+        // one mistake everybody makes -- looks perfectly fine until the agent
+        // is running.
+        let mut mcp = Vec::new();
+        for entry in raw.mcp.into_iter().flatten() {
+            let transport = match &entry.transport {
+                Some(t) => mcp::Transport::parse(t)
+                    .map_err(|e| invalid("mcp", format!("`{}`: {e}", entry.name)))?,
+                None => mcp::Transport::default(),
+            };
+            let server = mcp::Server::parse(&entry.name, &entry.url, transport)
+                .map_err(|e| invalid("mcp", format!("`{}`: {e}", entry.name)))?;
+            // The agent keys its servers by name, so two entries sharing one
+            // means the second silently replaces the first.
+            if mcp.iter().any(|s: &mcp::Server| s.name == server.name) {
+                return Err(invalid(
+                    "mcp",
+                    mcp::Error::DuplicateName(server.name).to_string(),
+                ));
+            }
+            mcp.push(server);
+        }
+
         Ok(Config {
             path: path.to_path_buf(),
             present: true,
@@ -172,6 +242,8 @@ impl Config {
                 .repo_roots
                 .map(|list| list.iter().map(|p| expand_tilde(p)).collect()),
             refresh,
+            skills: resolved_skills,
+            mcp,
         })
     }
 
@@ -183,6 +255,16 @@ impl Config {
     /// The providers a new session gets when nothing else says.
     pub fn providers(&self) -> &[String] {
         self.providers.as_deref().unwrap_or(&[])
+    }
+
+    /// The MCP servers a new session's agent is given.
+    pub fn mcp(&self) -> &[mcp::Server] {
+        &self.mcp
+    }
+
+    /// The skills copied into a new session.
+    pub fn skills(&self) -> &[skills::Skill] {
+        &self.skills
     }
 }
 
@@ -201,6 +283,20 @@ struct Raw {
     providers: Option<Vec<String>>,
     repo_roots: Option<Vec<PathBuf>>,
     refresh: Option<String>,
+    skills: Option<Vec<String>>,
+    /// `[[mcp]]` tables. An `Option` so `deny_unknown_fields` still rejects a
+    /// misspelled `[[mcps]]` rather than reading it as none configured.
+    mcp: Option<Vec<RawMcp>>,
+}
+
+/// One `[[mcp]]` table, before it is checked. Its own struct so a misspelled key
+/// inside one is an error too, and so the message can name the entry.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMcp {
+    name: String,
+    url: String,
+    transport: Option<String>,
 }
 
 #[derive(Debug)]
@@ -493,11 +589,138 @@ mod tests {
             "providers",
             "repo_roots",
             "refresh",
+            "skills",
         ] {
             assert!(
                 EXAMPLE.contains(&format!("# {key} =")),
                 "the example does not show `{key}`"
             );
         }
+        // A table rather than a key, so it is shown as one.
+        assert!(
+            EXAMPLE.contains("# [[mcp]]"),
+            "the example does not show `[[mcp]]`"
+        );
+    }
+
+    #[test]
+    fn skills_take_a_name_or_a_path() {
+        let c = parse(r#"skills = ["ship-pr", "~/dev/sbx/.claude/skills/audit"]"#).unwrap();
+        assert_eq!(c.skills().len(), 2);
+        assert_eq!(c.skills()[0].name, "ship-pr");
+        assert_eq!(
+            c.skills()[0].source,
+            crate::skills::host_skills_dir().join("ship-pr"),
+            "a bare name is one of your own"
+        );
+        assert_eq!(c.skills()[1].name, "audit");
+    }
+
+    /// A skill directory that is not there is not a config error: it may be a
+    /// repository that is not cloned yet, and every command refusing to run over
+    /// it would be worse than the session missing the skill.
+    #[test]
+    fn a_skill_that_does_not_exist_still_loads() {
+        let c = parse(r#"skills = ["/nope/not/here"]"#).unwrap();
+        assert_eq!(c.skills()[0].name, "here");
+        assert!(c.skills()[0].problem().is_some(), "doctor's to report");
+    }
+
+    #[test]
+    fn two_skills_cannot_share_a_directory_name() {
+        let e = parse(r#"skills = ["/a/ship-pr", "/b/ship-pr"]"#).unwrap_err();
+        assert!(e.to_string().contains("two skills"), "{e}");
+    }
+
+    #[test]
+    fn an_empty_skills_list_is_an_error() {
+        assert!(
+            parse("skills = []")
+                .unwrap_err()
+                .to_string()
+                .contains("skills")
+        );
+    }
+
+    #[test]
+    fn mcp_servers_are_read_and_defaulted() {
+        let c = parse(
+            r#"
+            [[mcp]]
+            name = "jira"
+            url = "http://mcp-atlassian:9000/mcp"
+
+            [[mcp]]
+            name = "azure-devops"
+            url = "http://mcp-azure:9001/sse"
+            transport = "sse"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(c.mcp().len(), 2);
+        assert_eq!(c.mcp()[0].endpoint, "mcp-atlassian:9000");
+        assert_eq!(
+            c.mcp()[0].transport,
+            mcp::Transport::Http,
+            "http is the transport a server has unless it says otherwise"
+        );
+        assert_eq!(c.mcp()[1].transport, mcp::Transport::Sse);
+    }
+
+    #[test]
+    fn no_mcp_table_is_no_servers() {
+        assert!(parse("").unwrap().mcp().is_empty());
+    }
+
+    /// The mistake this validation exists for: correct on the host, wrong in the
+    /// sandbox, and invisible until the agent is running.
+    #[test]
+    fn a_loopback_mcp_url_is_refused_by_name() {
+        let e = parse(
+            r#"
+            [[mcp]]
+            name = "jira"
+            url = "http://localhost:9000/mcp"
+            "#,
+        )
+        .unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("jira"), "names the entry: {msg}");
+        assert!(
+            msg.contains("host.openshell.internal"),
+            "says what to use: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_mcp_key_is_an_error() {
+        let e = parse(
+            r#"
+            [[mcp]]
+            name = "jira"
+            urls = "http://mcp:9000/mcp"
+            "#,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("urls"), "{e}");
+    }
+
+    /// The agent keys its servers by name, so a duplicate is one server
+    /// silently replacing another.
+    #[test]
+    fn two_mcp_servers_cannot_share_a_name() {
+        let e = parse(
+            r#"
+            [[mcp]]
+            name = "jira"
+            url = "http://a:9000/mcp"
+
+            [[mcp]]
+            name = "jira"
+            url = "http://b:9000/mcp"
+            "#,
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("already the name"), "{e}");
     }
 }

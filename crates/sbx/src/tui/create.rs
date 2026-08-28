@@ -408,6 +408,14 @@ pub struct Defaults {
     /// explicit list is a better answer than any heuristic, and merging the two
     /// would attach credentials nobody asked for.
     pub providers: Option<Vec<String>>,
+    /// MCP servers every session gets. Carried through the form without being
+    /// shown as a field, because there is nothing to choose: it is one decision
+    /// about what your agents can reach, made in the config file. The form's job
+    /// here is only to put it on the draft, so the TUI and `sbx new` cannot
+    /// create sessions with different tools.
+    pub mcp: Vec<crate::mcp::Server>,
+    /// Skills copied into the sandbox. Carried, not chosen, like `mcp`.
+    pub skills: Vec<crate::skills::Skill>,
 }
 
 /// One entry of the form's policy chooser.
@@ -459,6 +467,8 @@ pub struct Form {
     /// The config file's provider list, kept because the gateway's own list may
     /// arrive after the form is open and has to be ticked the same way then.
     configured_providers: Option<Vec<String>>,
+    mcp: Vec<crate::mcp::Server>,
+    skills: Vec<crate::skills::Skill>,
     /// Why the provider list is empty, when the gateway could not be asked.
     providers_error: Option<String>,
     field: Field,
@@ -517,6 +527,8 @@ impl Form {
             providers: choices,
             provider_cursor: 0,
             configured_providers: defaults.providers.clone(),
+            mcp: defaults.mcp.clone(),
+            skills: defaults.skills.clone(),
             providers_error,
             history,
             field: Field::Task,
@@ -637,6 +649,8 @@ impl Form {
                 .filter(|c| c.selected)
                 .map(|c| c.name.clone())
                 .collect(),
+            mcp: self.mcp.clone(),
+            skills: self.skills.clone(),
             start: true,
         })
     }
@@ -1070,18 +1084,18 @@ mod tests {
         for c in "fix the readme".chars() {
             f.on_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(f.input(Field::Name).unwrap().text(), "fix-the-readme");
+        assert_eq!(f.input(Field::Name).unwrap().text(), "fix-readme");
 
         // Editing the name pins it, and further task edits leave it alone.
         f.on_key(key(KeyCode::Tab));
         assert_eq!(f.field(), Field::Name);
         f.on_key(key(KeyCode::Char('2')));
-        assert_eq!(f.input(Field::Name).unwrap().text(), "fix-the-readme2");
+        assert_eq!(f.input(Field::Name).unwrap().text(), "fix-readme2");
         f.on_key(key(KeyCode::BackTab));
         f.on_key(key(KeyCode::Char('!')));
         assert_eq!(
             f.input(Field::Name).unwrap().text(),
-            "fix-the-readme2",
+            "fix-readme2",
             "a hand-edited name must survive further typing in the task"
         );
     }
@@ -1437,7 +1451,7 @@ mod tests {
         }
         match f.on_key(key(KeyCode::Enter)) {
             Action::Submit(d) => {
-                assert_eq!(d.name, "fix-the-readme");
+                assert_eq!(d.name, "fix-readme");
                 assert_eq!(d.repo, "https://github.com/o/api.git");
                 assert_eq!(d.task, "fix the readme");
                 assert_eq!(d.base.as_deref(), Some("main"));

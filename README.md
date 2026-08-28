@@ -148,6 +148,12 @@ policy     = "feature-work"                           # a template, or a path to
 providers  = ["claude-oauth", "azure-pat"]            # credentials for a new session
 repo_roots = ["~/dev", "~/work"]                      # where the picker looks
 refresh    = "1s"                                     # how often the TUI reads the sandboxes
+
+skills     = ["ship-pr"]                               # copied into every session
+
+[[mcp]]                                               # one table per MCP server
+name = "jira"                                         # see "MCP servers" below
+url  = "http://mcp-atlassian:9000/mcp"
 ```
 
 Everything in it is a *default*: a flag on the command line wins, and so does an
@@ -233,6 +239,8 @@ to ask:
 | --- | --- |
 | `model` | `opus[1m]` -- an alias, so it follows the newest Opus and keeps the million-token context |
 | `permissions.defaultMode` | `auto`, so the agent handles its own permission prompts |
+| `attribution` | `commit` and `pr` both empty, so nothing is stamped -- an empty string is what silences it, where an absent key means the default trailer |
+| `copyOnSelect` | off. Not a `settings.json` key -- it lives in the global `.claude.json` the image also writes, and defaults to on; selecting text to read it should not take the clipboard of a terminal you are borrowing |
 | `env` | the auto-updater, non-essential traffic and the plugin marketplace, all off |
 | `hooks` | the status reporter, so the state column has something to read |
 
@@ -474,6 +482,180 @@ after the destroy had dropped it. The row disappears as soon as the gateway
 accepts the deletion rather than on the next refresh: a deleted sandbox is listed
 as `Deleting` for a while, and waiting would show the session coming back as
 `dead` first.
+
+### Names and branches
+
+A session name is derived from the task, and the words a task opens with are
+almost never what it is about: "I want to add the MaxGaming Scala customer id"
+used to become `i-want-to-add`, which spends the whole budget on the wrapper and
+names nothing. Filler -- pronouns, articles, auxiliaries, `want`, `please` --
+is dropped, and verbs are kept, because `add the flag` and `remove the flag` are
+two different sessions. A task made of nothing else still gets a name: the
+filtered pass is tried first and the text as written is the fallback.
+
+Names run to 40 characters, longer than a sandbox name can hold. The gateway
+caps those at 19, so `sbx-` leaves 15 -- and rather than cap the name there,
+the *sandbox* name is derived from it: short names are `sbx-<name>` exactly, and
+a longer one keeps its first ten characters and ends in four hex digits of the
+whole name. That keeps it a pure function of the session name, which is what
+lets `sbx rm` and adoption name a sandbox with no record to read, while two
+names sharing fifteen characters still get two sandboxes. The full name travels
+in the `sbx.session` label, which has 63 characters to spend.
+
+```
+I want to add the MaxGaming Scala customer id
+  session   add-maxgaming-scala-customer-id
+  branch    sbx/add-maxgaming-scala-customer-id
+  sandbox   sbx-add-maxgam-0c45
+```
+
+The branch stays `sbx/<name>`, and the task field in the create form wraps over
+four rows and scrolls with the cursor, since a prompt is a sentence and a single
+row shows you the end of one with the cursor past the edge of the modal.
+
+## Skills
+
+Your skills do not follow you into a sandbox: it has its own `HOME`, so a fresh
+one has none. Name them in the config file and every new session gets them:
+
+```toml
+skills = ["ship-pr", "~/dev/notes/.claude/skills/changelog"]
+```
+
+A bare name is one of your own, under `~/.claude/skills` (or
+`$CLAUDE_CONFIG_DIR/skills`). Anything with a `/` in it is a path, so a skill
+that lives in a repository can be pointed at where it actually is.
+
+**It is a copy, and it cannot be anything else.** A symlink does not cross into
+a sandbox and a bind mount would hand it the rest of `$HOME` -- the isolation is
+the whole product. What the config file holds is the *pointer*, which buys the
+part of a symlink that is actually wanted: edit the original, and the next
+session gets the edit. A running session keeps what it was created with, and its
+record and facts pane say what that was.
+
+The whole directory travels, not just the manifest: `SKILL.md` beside its
+scripts, references and templates, packed with `tar` on the host and unpacked
+into `/sandbox/.claude/skills` as a seeder step before the agent starts. Symlinks
+inside are followed, so a skill that is itself a link arrives as its contents.
+A skill above 256KiB packed is refused rather than silently making the create
+fail on an over-long command line -- at that size something has a virtualenv in
+it by accident.
+
+A skill that is missing at create time costs the skill, not the session: it is a
+warning, and `sbx doctor` says so beforehand, since a session that quietly comes
+up without one looks like the agent forgetting how to do something it used to
+know.
+
+```
+[ warn ] skills       ship-pr: /home/you/.claude/skills/ship-pr has no SKILL.md, so the agent would not load it
+```
+
+## MCP servers
+
+The agents can be given MCP servers, and the servers run **on the host, in their
+own containers, holding their own credentials**. Nothing about Jira or Azure
+DevOps ever lands on a sandbox filesystem; the sandbox is granted one endpoint
+per server, and the grant is per-binary like every other rule here:
+
+```
+claude → POST http://mcp-azure-devops:9001/mcp   ALLOWED  [policy:allow_mcp_azure_devops_9001]
+curl   → POST http://mcp-azure-devops:9001/mcp   DENIED   [binary '/usr/bin/curl' not allowed]
+```
+
+Same host, same port, different binary -- measured from inside a session, not
+described. Claude Code 2.x is a native binary, so `/usr/local/bin/claude` is a
+rule only the agent satisfies. That is sharper than the registry rules in
+`net-open.yaml`, where npm's kernel-resolved exe is `/usr/bin/node` and the rule
+cannot tell an agent from anything else JavaScript in the sandbox.
+
+Name them in the config file, one table each:
+
+```toml
+[[mcp]]
+name = "jira"
+url  = "http://mcp-atlassian:9000/mcp"
+
+[[mcp]]
+name = "azure-devops"
+url  = "http://mcp-azure-devops:9001/mcp"
+transport = "http"                        # or "sse"; http is the default
+```
+
+The url is what the **sandbox** sees, which is not what your browser sees.
+`localhost` in there is the sandbox itself and is refused when the file is read,
+because it is correct on the host, wrong in the sandbox, and invisible until an
+agent is running. Two addresses work instead:
+
+* **the container's name**, when it has joined the gateway's own Docker network
+  with `--network openshell-docker`. Docker's embedded DNS resolves it even
+  though the sandbox has no DNS of its own, because the proxy does the
+  resolving -- and nothing is published on the host at all. This is the shape to
+  prefer.
+* **`host.openshell.internal`**, which every sandbox already has in `/etc/hosts`
+  pointing at the bridge gateway, for a server that is not in a container or is
+  in one that cannot join another network. Publish to the bridge address rather
+  than to `127.0.0.1`, or the sandbox cannot reach it.
+
+Jira and Confluence, with the credentials staying in the container:
+
+```sh
+docker run -d --name mcp-atlassian --network openshell-docker \
+  -e JIRA_URL=https://your-org.atlassian.net \
+  -e JIRA_USERNAME=you@example.com -e JIRA_API_TOKEN="$JIRA_API_TOKEN" \
+  ghcr.io/sooperset/mcp-atlassian:latest --transport streamable-http --port 9000
+```
+
+Azure DevOps needs one extra part: `@azure-devops/mcp` speaks stdio only, so it
+runs behind an HTTP shim. Its `pat` mode reads `PERSONAL_ACCESS_TOKEN`, and wants
+the base64 of `:<pat>` -- it decodes the value and drops everything up to the
+first colon, which is Azure DevOps' usual empty-username Basic auth:
+
+```sh
+docker run -d --name mcp-azure-devops --network openshell-docker \
+  -e PERSONAL_ACCESS_TOKEN="$(printf ':%s' "$AZURE_DEVOPS_PAT" | base64 -w0)" \
+  node:22-alpine npx -y supergateway \
+    --stdio "npx -y @azure-devops/mcp <org> -a pat" \
+    --outputTransport streamableHttp --port 9001 --stateful
+```
+
+Both serve `/mcp`. The Azure DevOps one was run against a real session while
+writing this -- the agent reported `azure-devops: ... ✔ Connected`, with Azure
+DevOps MCP 2.9.0 answering behind the shim, and the denial above is `curl` in
+that same sandbox. The Atlassian one was started and answered on `/mcp` with
+placeholder credentials; its own flags are documented by that image.
+
+Registration happens **inside the sandbox, before the agent starts** -- the
+seeder runs `claude mcp add --scope user` as its own `mcp` step, because the
+agent reads its servers at startup and registering them afterwards would leave
+the first session of every sandbox without tools. The endpoints are opened in
+one `policy update` at creation, so the rules are loaded before anything can use
+them. A session records the servers it was created with, and the facts pane
+lists them by name; changing the file changes the next session, not a running
+one.
+
+`sbx doctor` checks each of them, because a container that is not running -- or
+one running but not attached to the gateway's network -- produces a session whose
+agent reports its tools as **needing authentication**, which sends you looking in
+entirely the wrong direction:
+
+```
+[ warn ] mcp          jira: there is no container named `mcp-atlassian`, so no sandbox can resolve that url
+         fix: start it, or attach it with `docker network connect openshell-docker <container>`; or fix its url in the config file
+```
+
+**What this costs.** An MCP server is a hole in the sandbox, and worth being
+plain about: the agent gains everything the server can do, using the host's
+credentials, and the gateway can only see it as `POST /mcp`. Every MCP call is
+the same request shape, so the method/path rules that make the git endpoints
+sharp buy nothing here -- a server that can transition Jira issues means a
+sandboxed agent can transition Jira issues. That is a fine trade for Jira and
+Azure DevOps, whose blast radius is a work item. It is a terrible one for a
+filesystem or Docker MCP server on the host, which would be a straight sandbox
+escape, and sbx cannot tell the difference for you.
+
+The transport is not a problem the way it might look: streaming responses are
+not buffered by the inspecting proxy. An SSE stream emitting an event a second
+arrived event by event, a second apart, inside the sandbox.
 
 ## Policy
 

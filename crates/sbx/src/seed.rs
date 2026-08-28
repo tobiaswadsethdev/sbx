@@ -125,6 +125,12 @@ pub enum SeedError {
     Script { code: i32, stderr: String },
     #[error("sandbox metadata at {META_PATH} is not valid JSON: {0}")]
     BadMeta(#[from] serde_json::Error),
+    /// No record in the sandbox at all. Its own variant because it is the one
+    /// failure with an innocent explanation -- a sandbox created seconds ago,
+    /// whose seeder has not reached `step meta` -- and a caller that cannot tell
+    /// it apart reports a `cat` error about a session that is fine.
+    #[error("has no metadata record yet: it is still being created, or it was not created by sbx")]
+    NoMeta,
 }
 
 /// How far the seeder has got, as it reports itself.
@@ -167,6 +173,28 @@ pub fn detached_script(session: &Session, start_agent: bool) -> String {
     let meta =
         serde_json::to_string_pretty(session).expect("Session is plain data and always serializes");
 
+    // Before the agent for the same reason as the MCP step: the agent reads the
+    // skills directory when it starts. Warnings are the caller's to report --
+    // this function returns a script -- so they are recomputed by
+    // `ops::create`, which is the only place that has anywhere to put them.
+    let (skills_script, _) = crate::skills::pack(&session.skills);
+    let skills = if skills_script.is_empty() {
+        String::new()
+    } else {
+        format!("step skills\n{skills_script}")
+    };
+
+    // Before the agent, because the agent reads its MCP servers at startup:
+    // registering them afterwards would leave the first session of every
+    // sandbox without tools. Its own step so the state file says which part of
+    // the seeding failed, and skipped entirely when none are configured, so an
+    // ordinary session's script is exactly what it was.
+    let mcp = if session.mcp.is_empty() {
+        String::new()
+    } else {
+        format!("step mcp\n{}", crate::mcp::register_script(&session.mcp))
+    };
+
     let agent = if start_agent {
         // In a subshell: the agent script exits early when a session is already
         // running, and that must not end the seeder before it reports `done`.
@@ -202,13 +230,15 @@ step clone
 step branch
 step meta
 {write_meta}
-{agent}trap - EXIT INT TERM
+{skills}{mcp}{agent}trap - EXIT INT TERM
 say done
 "#,
         state = sh_quote(SEED_STATE_PATH),
         log = sh_quote(SEED_LOG_PATH),
         clone = clone_and_branch(session).trim_end(),
         write_meta = meta_write_command(&meta),
+        skills = skills,
+        mcp = mcp,
         agent = agent,
     )
 }
@@ -333,6 +363,11 @@ tmux -u -f /etc/tmux.conf send-keys -t {tmux} {launch} Enter
 pub fn read_meta(client: &dyn OpenShell, sandbox: &str) -> Result<Session, SeedError> {
     let out = client.exec(sandbox, &["cat", META_PATH])?;
     if !out.ok() {
+        // Matched on the message rather than on the exit code, because `cat`
+        // exits 1 for every reason it has.
+        if out.stderr.contains("No such file") {
+            return Err(SeedError::NoMeta);
+        }
         return Err(SeedError::Script {
             code: out.exit_code,
             stderr: out.stderr.trim().to_string(),
@@ -558,6 +593,31 @@ mod tests {
         let cmd = meta_write_command(r#"{"a":"it's"}"#);
         assert!(cmd.starts_with("mkdir -p /sandbox/.sbx &&"));
         assert!(cmd.contains(r"it'\''s"), "JSON must be shell-quoted: {cmd}");
+    }
+
+    /// The agent reads its MCP servers when it starts, so registering them
+    /// after it is up would leave the first session of every sandbox without
+    /// tools.
+    #[test]
+    fn mcp_servers_are_registered_before_the_agent_starts() {
+        let mut s = Session::new("x".into(), "url".into(), "t".into());
+        s.mcp = vec![
+            crate::mcp::Server::parse("jira", "http://mcp-jira:9000/mcp", Default::default())
+                .unwrap(),
+        ];
+        let script = detached_script(&s, true);
+        let mcp = script.find("step mcp").expect("an mcp step");
+        let agent = script.find("step agent").expect("an agent step");
+        assert!(mcp < agent, "{script}");
+        assert!(script.contains("claude mcp add --transport http --scope user 'jira'"));
+    }
+
+    /// Nothing configured leaves the script exactly as it was, rather than
+    /// carrying an empty step that the state file would then have to explain.
+    #[test]
+    fn no_mcp_servers_is_no_mcp_step() {
+        let s = Session::new("x".into(), "url".into(), "t".into());
+        assert!(!detached_script(&s, true).contains("step mcp"));
     }
 
     #[test]

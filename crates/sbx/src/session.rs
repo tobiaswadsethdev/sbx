@@ -52,9 +52,25 @@ const MAX_SANDBOX_NAME: usize = 19;
 /// Prefix applied to sandbox and tmux names, so ours are recognisable in
 /// `openshell sandbox list` alongside sandboxes created by hand.
 const PREFIX: &str = "sbx-";
-/// A session name becomes `sbx-<name>`, so the gateway's sandbox-name limit is
-/// the real constraint - far tighter than the 63-character label limit.
-const MAX_NAME: usize = MAX_SANDBOX_NAME - PREFIX.len();
+/// How much of a *sandbox* name is left for the session's own name.
+const MAX_NAME_IN_SANDBOX: usize = MAX_SANDBOX_NAME - PREFIX.len();
+
+/// How long a session name may be.
+///
+/// Deliberately longer than a sandbox name can hold. `sbx-` plus fifteen
+/// characters is what the gateway allows, and fifteen characters of a task
+/// produce names like `i-want-to-add`: the *filler* survives and the subject is
+/// cut off. So the session name is ours and the sandbox name is derived from it
+/// -- see [`sandbox_name`] -- and the full name travels in the `sbx.session`
+/// label, which has 63 characters to spend.
+///
+/// Forty rather than sixty-three: the name is also a branch (`sbx/<name>`), a
+/// column in the list, and something you type after `sbx attach`.
+const MAX_NAME: usize = 40;
+
+/// Characters of the name kept when a sandbox name has to be shortened. The
+/// rest of the budget goes to the discriminator below.
+const SANDBOX_STEM: usize = 10;
 
 /// The size to leave the agent's tmux window at when nothing is attached.
 ///
@@ -71,7 +87,30 @@ pub const SCRAPE_SIZE: (u16, u16) = (200, 50);
 /// having a convention -- and two copies of this `format!` would be two things
 /// to keep in step with [`Session::new`].
 pub fn sandbox_name(name: &str) -> String {
-    format!("{PREFIX}{name}")
+    if name.len() <= MAX_NAME_IN_SANDBOX {
+        return format!("{PREFIX}{name}");
+    }
+    // Truncation alone would collide: `maxgaming-scala-customer-id` and
+    // `maxgaming-scala-tax` share their first fifteen characters, and the two
+    // sessions would name one sandbox. So a long name keeps its first ten
+    // characters -- enough to recognise in `openshell sandbox list` -- and ends
+    // in four hex digits of the *whole* name, which keeps this a pure function
+    // of the session name. That is what makes it a convention rather than a
+    // lookup: deleting or adopting a sandbox has to name it without a record to
+    // read it from.
+    let stem: String = name.chars().take(SANDBOX_STEM).collect();
+    format!("{PREFIX}{}-{:04x}", stem.trim_end_matches('-'), tag(name))
+}
+
+/// FNV-1a, folded to sixteen bits. A hash, not a checksum: it only has to
+/// scatter names that share a prefix, and writing four lines beats a dependency.
+fn tag(name: &str) -> u16 {
+    let mut h: u32 = 0x811c_9dc5;
+    for b in name.as_bytes() {
+        h ^= u32::from(*b);
+        h = h.wrapping_mul(0x0100_0193);
+    }
+    ((h >> 16) ^ h) as u16
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -92,7 +131,28 @@ pub enum NameError {
 ///
 /// Used to derive a name from a task description when the user does not supply
 /// one. Returns `None` if nothing usable survives.
+/// Words a task wraps its subject in, dropped when deriving a name.
+///
+/// A task is written as a sentence -- "I want to add the MaxGaming Scala
+/// customer id" -- and the first words of a sentence are almost never what it
+/// is about. Keeping them spent the whole budget on `i-want-to-add`, which
+/// names nothing. Verbs are *not* here: `add`, `fix`, `remove` and `update`
+/// distinguish two tasks about the same subject.
+const FILLER: &[&str] = &[
+    "a", "also", "an", "and", "any", "are", "at", "be", "can", "could", "do", "does", "for",
+    "from", "i", "in", "into", "is", "it", "its", "just", "let", "lets", "me", "my", "need",
+    "needs", "of", "on", "or", "our", "please", "shall", "should", "some", "that", "the", "there",
+    "these", "this", "to", "us", "want", "we", "will", "would", "you", "your",
+];
+
 pub fn slugify(text: &str) -> Option<String> {
+    // Twice: once keeping only the words that carry meaning, and -- if that
+    // leaves nothing, as "can you do it for me" would -- once taking the text as
+    // written. A name is better than no name.
+    slug(text, true).or_else(|| slug(text, false))
+}
+
+fn slug(text: &str, drop_filler: bool) -> Option<String> {
     // Split on anything that is not alphanumeric, then re-join with dashes,
     // dropping whole words once the budget is spent. Truncating mid-word would
     // turn "readme" into "read" and read as a different task.
@@ -102,6 +162,9 @@ pub fn slugify(text: &str) -> Option<String> {
             continue;
         }
         let word = word.to_ascii_lowercase();
+        if drop_filler && FILLER.contains(&word.as_str()) {
+            continue;
+        }
         let extra = if out.is_empty() {
             word.len()
         } else {
@@ -265,6 +328,20 @@ pub struct Session {
     pub policy: Option<String>,
     #[serde(default)]
     pub providers: Vec<String>,
+    /// Skills copied into this session when it was created, and where each came
+    /// from on the host. A copy, not a link -- see [`crate::skills`] -- so this
+    /// says what the agent has, whatever the host's copy says now.
+    #[serde(default)]
+    pub skills: Vec<crate::skills::Skill>,
+    /// MCP servers this session's agent was given, as the config file named
+    /// them when it was created.
+    ///
+    /// Recorded rather than re-read, for the reason the whole record exists: the
+    /// sandbox is the source of truth about itself. The config file may have
+    /// changed since, and what matters for reading -- or re-seeding -- this
+    /// session is what it was actually created with.
+    #[serde(default)]
+    pub mcp: Vec<crate::mcp::Server>,
     #[serde(default = "default_agent")]
     pub agent: String,
     /// Epoch seconds. Deliberately not a formatted timestamp: the display wants
@@ -307,6 +384,8 @@ impl Session {
             task,
             policy: None,
             providers: Vec::new(),
+            skills: Vec::new(),
+            mcp: Vec::new(),
             agent: default_agent(),
             created_at: now_epoch(),
             state: State::Creating,
@@ -375,16 +454,101 @@ mod tests {
             slugify("Add OAuth login!").as_deref(),
             Some("add-oauth-login")
         );
-        assert_eq!(slugify("  fix   the BUG  ").as_deref(), Some("fix-the-bug"));
+        assert_eq!(slugify("  fix   the BUG  ").as_deref(), Some("fix-bug"));
         assert_eq!(slugify("!!!"), None);
         assert_eq!(slugify(""), None);
+    }
+
+    /// The name that started this: fifteen characters of "I want to add the
+    /// MaxGaming Scala customer id" was `i-want-to-add`, which says nothing
+    /// about the task at all.
+    #[test]
+    fn filler_words_do_not_get_to_spend_the_budget() {
+        assert_eq!(
+            slugify("I want to add the MaxGaming Scala customer id").as_deref(),
+            Some("add-maxgaming-scala-customer-id")
+        );
+        assert_eq!(
+            slugify("Can you please update the changelog for me").as_deref(),
+            Some("update-changelog")
+        );
+        // Verbs stay: they are what tells two tasks about one subject apart.
+        assert_eq!(slugify("remove the flag").as_deref(), Some("remove-flag"));
+        assert_eq!(slugify("add the flag").as_deref(), Some("add-flag"));
+    }
+
+    /// A task made entirely of filler still has to produce a name.
+    #[test]
+    fn a_task_of_nothing_but_filler_falls_back_to_the_words_it_has() {
+        assert_eq!(
+            slugify("can you do it for me").as_deref(),
+            Some("can-you-do-it-for-me")
+        );
+    }
+
+    /// Long enough to say what the session is, and still a legal branch, label
+    /// and list column.
+    #[test]
+    fn a_name_may_be_longer_than_a_sandbox_name() {
+        let long = "add-maxgaming-scala-customer-id-to-prod";
+        assert!(long.len() > MAX_NAME_IN_SANDBOX && long.len() <= MAX_NAME);
+        assert_eq!(validate_name(long), Ok(()));
+
+        let s = Session::new(long.into(), "https://example.com/r.git".into(), "t".into());
+        assert_eq!(s.work_branch, format!("sbx/{long}"));
+        assert_eq!(
+            s.labels().get(LABEL_SESSION).map(String::as_str),
+            Some(long),
+            "the full name lives in the label, whatever the sandbox is called"
+        );
+    }
+
+    /// The derived sandbox name is a pure function of the session name -- that
+    /// is what lets `sbx rm` and adoption name a sandbox with no record to read.
+    #[test]
+    fn a_long_name_gets_a_short_sandbox_of_its_own() {
+        let a = "maxgaming-scala-customer-id";
+        let b = "maxgaming-scala-tax-rate";
+
+        for name in [a, b] {
+            let sandbox = sandbox_name(name);
+            assert!(
+                sandbox.len() <= MAX_SANDBOX_NAME,
+                "`{sandbox}` is {} long",
+                sandbox.len()
+            );
+            assert!(sandbox.starts_with("sbx-maxgaming"), "{sandbox}");
+            assert_eq!(sandbox, sandbox_name(name), "must be deterministic");
+        }
+        assert_ne!(
+            sandbox_name(a),
+            sandbox_name(b),
+            "two names sharing fifteen characters must not share a sandbox"
+        );
+
+        // Short names are untouched, so sandboxes created before this keep the
+        // names they already have.
+        assert_eq!(sandbox_name("add-auth"), "sbx-add-auth");
+        assert_eq!(
+            sandbox_name(&"a".repeat(MAX_NAME_IN_SANDBOX)).len(),
+            MAX_SANDBOX_NAME
+        );
+    }
+
+    /// A stem cut mid-name must not leave the dash next to the discriminator.
+    #[test]
+    fn a_shortened_sandbox_name_never_doubles_its_dash() {
+        // Ten characters of this land exactly on a dash.
+        let sandbox = sandbox_name("fix-thing-with-a-long-tail");
+        assert!(!sandbox.contains("--"), "{sandbox}");
+        assert!(sandbox.len() <= MAX_SANDBOX_NAME);
     }
 
     #[test]
     fn derives_a_name_from_the_task_then_the_repo() {
         assert_eq!(
             derive_name("Fix the README typo", "https://github.com/o/r.git").as_deref(),
-            Some("fix-the-readme")
+            Some("fix-readme-typo")
         );
         // No task: the repository's own name is the next best thing.
         assert_eq!(

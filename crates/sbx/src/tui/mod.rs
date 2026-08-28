@@ -1166,6 +1166,8 @@ impl App {
             base: self.cfg.base.clone(),
             policy: self.cfg.policy.clone(),
             providers: self.cfg.providers.clone(),
+            mcp: self.cfg.mcp().to_vec(),
+            skills: self.cfg.skills().to_vec(),
         }
     }
 
@@ -3340,7 +3342,7 @@ mod tests {
         let app = app_after_submit(&["other"], "fix the readme");
 
         let draft = app.create_request.as_ref().expect("a queued create");
-        assert_eq!(draft.name, "fix-the-readme");
+        assert_eq!(draft.name, "fix-readme");
         assert_eq!(draft.repo, "https://github.com/o/api.git");
         assert!(app.create.is_none(), "the flow closes on submit");
 
@@ -3349,13 +3351,10 @@ mod tests {
         let row = app
             .sessions
             .iter()
-            .find(|s| s.name == "fix-the-readme")
+            .find(|s| s.name == "fix-readme")
             .expect("a row");
         assert_eq!(row.state, State::Creating);
-        assert_eq!(
-            app.selected().map(|s| s.name.as_str()),
-            Some("fix-the-readme")
-        );
+        assert_eq!(app.selected().map(|s| s.name.as_str()), Some("fix-readme"));
     }
 
     /// A derived name steps around the ones in use, so starting a second session
@@ -3371,12 +3370,12 @@ mod tests {
             "the flow closes rather than complaining"
         );
 
-        // Same for a task whose slug is taken. The stem gives way to the counter
-        // rather than the other way round, because the gateway's name budget is
-        // the hard limit -- `fix-the-readme` is already all of it.
-        let app = app_after_submit(&["fix-the-readme"], "fix the readme");
+        // Same for a task whose slug is taken. Names have room now, so the
+        // counter is appended rather than eating the stem -- but a name already
+        // at the cap still gives way to it, since the cap is the hard limit.
+        let app = app_after_submit(&["fix-readme"], "fix the readme");
         let draft = app.create_request.as_ref().expect("a queued create");
-        assert_eq!(draft.name, "fix-the-readm-2");
+        assert_eq!(draft.name, "fix-readme-2");
         assert!(crate::session::validate_name(&draft.name).is_ok());
     }
 
@@ -3424,7 +3423,7 @@ mod tests {
     #[test]
     fn progress_moves_the_row_through_the_states() {
         let mut app = app_after_submit(&[], "fix the readme");
-        let name = "fix-the-readme";
+        let name = "fix-readme";
         let state = |app: &App| app.sessions.iter().find(|s| s.name == name).unwrap().state;
 
         app.on_update(Update::Creating {
@@ -3445,7 +3444,7 @@ mod tests {
     #[test]
     fn the_pending_row_is_not_polled_until_it_has_a_sandbox() {
         let mut app = app_after_submit(&[], "fix the readme");
-        let name = "fix-the-readme";
+        let name = "fix-readme";
         assert!(
             next_poll_target(&app).is_none(),
             "nothing else exists, and the pending row is not askable"
@@ -3465,7 +3464,7 @@ mod tests {
     #[test]
     fn a_created_session_keeps_its_row_until_the_store_has_it() {
         let mut app = app_after_submit(&[], "fix the readme");
-        let name = "fix-the-readme";
+        let name = "fix-readme";
         let mut created = Session::new(name.into(), "r".into(), "t".into());
         created.state = State::Ready;
 
@@ -3496,7 +3495,7 @@ mod tests {
     fn a_failed_create_drops_the_row_and_says_why() {
         let mut app = app_after_submit(&[], "fix the readme");
         app.on_update(Update::Created {
-            session: "fix-the-readme".to_string(),
+            session: "fix-readme".to_string(),
             result: Box::new(Err("the gateway said no".into())),
         });
         assert!(app.pending.is_none());

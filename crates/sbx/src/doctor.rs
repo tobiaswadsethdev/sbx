@@ -3,11 +3,15 @@
 //! Every failure mode here is one actually hit while bringing this project up
 //! on Arch/WSL2, so each check carries the fix rather than just a verdict.
 
+use std::net::{TcpStream, ToSocketAddrs};
 use std::process::Command;
+use std::time::Duration;
 
 use openshell_client::OpenShell;
 
 use crate::config::{self, Config};
+use crate::mcp;
+use crate::skills;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Level {
@@ -199,6 +203,162 @@ fn check_image() -> Check {
     }
 }
 
+/// How long to wait for a published MCP port to answer.
+///
+/// It is on the loopback bridge, so a server that is up answers in microseconds
+/// and anything slower is a firewall or a wrong address. Short enough that a
+/// misconfigured entry does not make `doctor` feel broken.
+const MCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// Whether the MCP servers the config names are actually there.
+///
+/// The quietest failure this feature has: a container that is not running, or
+/// one running but not attached to the gateway's network, produces a session
+/// whose agent comes up with a tool it cannot reach -- and the agent reports
+/// that as "needs authentication", which sends anyone looking in the wrong
+/// direction entirely.
+///
+/// Two shapes, checked differently because they fail differently. A container
+/// name is asked about through Docker, since the host cannot reach it by name at
+/// all -- only sandboxes on that network can. A published port is connected to,
+/// on the bridge gateway address the sandbox will use rather than on `localhost`,
+/// because a container published to `127.0.0.1` only is exactly the mistake that
+/// looks fine from the host and is unreachable from a sandbox.
+fn check_mcp(servers: &[mcp::Server]) -> Check {
+    // Also the answer to "is Docker there at all": without the network there is
+    // no address to connect to and no point asking about containers, and the
+    // docker check above has already said why. Saying it a second time here
+    // would be two failures for one cause.
+    let Some(bridge) = bridge_gateway() else {
+        return Check::ok(
+            "mcp",
+            "not checked: the openshell docker network is not there",
+        );
+    };
+    let mut problems: Vec<String> = Vec::new();
+
+    for s in servers {
+        let problem = if s.via_host() {
+            (!port_open(&bridge, port_of(s))).then(|| {
+                format!(
+                    "nothing is listening on {bridge}:{}, which is where `{}` points from inside a sandbox",
+                    port_of(s),
+                    s.host()
+                )
+            })
+        } else {
+            container_problem(s.host())
+        };
+        if let Some(p) = problem {
+            problems.push(format!("{}: {p}", s.name));
+        }
+    }
+
+    let named = servers
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if problems.is_empty() {
+        return Check::ok("mcp", named);
+    }
+    Check::warn(
+        "mcp",
+        problems.join("; "),
+        format!(
+            "start it, or attach it with `docker network connect {} <container>`; \
+             or fix its url in the config file",
+            mcp::NETWORK
+        ),
+    )
+}
+
+/// What is wrong with the container an MCP url names, if anything.
+///
+/// Only ever called once Docker is known to be answering, so `inspect` failing
+/// means the container does not exist -- which is the most likely thing to be
+/// wrong, and the one a sandbox reports as an MCP server that needs
+/// authentication.
+fn container_problem(name: &str) -> Option<String> {
+    let Some(out) = probe(&[
+        "docker",
+        "inspect",
+        name,
+        "--format",
+        "{{.State.Running}} {{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}",
+    ]) else {
+        return Some(format!(
+            "there is no container named `{name}`, so no sandbox can resolve that url"
+        ));
+    };
+    let mut parts = out.split_whitespace();
+    let running = parts.next() == Some("true");
+    let networks: Vec<&str> = parts.collect();
+    if !running {
+        return Some(format!("container `{name}` is not running"));
+    }
+    if !networks.contains(&mcp::NETWORK) {
+        return Some(format!(
+            "container `{name}` is not on the `{}` network, so no sandbox can resolve it",
+            mcp::NETWORK
+        ));
+    }
+    None
+}
+
+/// The address `host.openshell.internal` resolves to inside a sandbox.
+fn bridge_gateway() -> Option<String> {
+    probe(&[
+        "docker",
+        "network",
+        "inspect",
+        mcp::NETWORK,
+        "--format",
+        "{{(index .IPAM.Config 0).Gateway}}",
+    ])
+    .filter(|ip| !ip.is_empty())
+}
+
+fn port_of(s: &mcp::Server) -> &str {
+    s.endpoint.rsplit_once(':').map_or("", |(_, p)| p)
+}
+
+fn port_open(host: &str, port: &str) -> bool {
+    let Ok(mut addrs) = format!("{host}:{port}").to_socket_addrs() else {
+        return false;
+    };
+    addrs.any(|a| TcpStream::connect_timeout(&a, MCP_CONNECT_TIMEOUT).is_ok())
+}
+
+/// Whether the skills the config names are where it says they are.
+///
+/// A skill is a directory the agent loads on sight, so the failure is quiet in
+/// the same way a stale provider name is: nothing errors, the session simply
+/// comes up without it and the agent no longer knows how to do the thing you
+/// wrote down. Here is the only place that can be said before it happens.
+fn check_skills(configured: &[skills::Skill]) -> Check {
+    let problems: Vec<String> = configured
+        .iter()
+        .filter_map(|s| s.problem().map(|p| format!("{}: {p}", s.name)))
+        .collect();
+    let named = configured
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if problems.is_empty() {
+        return Check::ok("skills", named);
+    }
+    Check::warn(
+        "skills",
+        problems.join("; "),
+        format!(
+            "a skill is a directory with a SKILL.md in it; `skills` takes a name              under {} or a path to one",
+            skills::host_skills_dir().display()
+        ),
+    )
+}
+
 /// `config` is the load result rather than a [`Config`], because a file that
 /// cannot be read is exactly the kind of thing this command exists to say out
 /// loud -- every other command refuses to run until it is fixed, so this is the
@@ -219,6 +379,18 @@ pub fn run(client: &dyn OpenShell, config: &Result<Config, config::Error>) -> Ve
         && !cfg.providers().is_empty()
     {
         checks.push(check_config_providers(client, cfg.providers()));
+    }
+    // Same reasoning: the check is about the file being right, so it only runs
+    // when the file says something.
+    if let Ok(cfg) = config
+        && !cfg.mcp().is_empty()
+    {
+        checks.push(check_mcp(cfg.mcp()));
+    }
+    if let Ok(cfg) = config
+        && !cfg.skills().is_empty()
+    {
+        checks.push(check_skills(cfg.skills()));
     }
     checks
 }

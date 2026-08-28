@@ -131,16 +131,23 @@ ENV LANG=C.UTF-8 \
 # environment through to an exec.
 ENV DISABLE_AUTOUPDATER=1
 
-# Skip Claude Code's first-run onboarding.
+# Skip Claude Code's first-run onboarding, and turn copy-on-select off.
 #
 # A fresh sandbox has a fresh HOME, so without this every session opens on the
 # theme picker and then the "do you trust this folder?" prompt, and the agent
 # never reaches its task. lastOnboardingVersion is pinned to the version baked
 # into this image so a future upgrade can legitimately re-run onboarding.
+#
+# copyOnSelect defaults to true, and this is the file it is read from -- it is
+# the `/config` toggle labelled "Copy on select", not a setting.json key. In a
+# sandbox it is worse than on a host: selecting text to read it takes the
+# clipboard, and the terminal it takes it from is one you are borrowing to watch
+# an agent work.
 RUN CLAUDE_VERSION="$(claude --version 2>/dev/null | awk '{print $1}')" \
     && jq -n --arg v "$CLAUDE_VERSION" '{ \
          hasCompletedOnboarding: true, \
          lastOnboardingVersion: $v, \
+         copyOnSelect: false, \
          projects: { \
            "/sandbox": {hasTrustDialogAccepted: true, projectOnboardingSeenCount: 1}, \
            "/sandbox/repo": {hasTrustDialogAccepted: true, projectOnboardingSeenCount: 1} \

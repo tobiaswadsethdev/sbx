@@ -415,6 +415,20 @@ mod tests {
     }
 
     /// The defaults a session starts with, which are the whole point of baking a
+    /// Copy-on-select is on unless something says otherwise, and the thing that
+    /// says otherwise is the global config file, not `settings.json`.
+    #[test]
+    fn the_image_turns_copy_on_select_off() {
+        assert!(
+            DOCKERFILE.contains("copyOnSelect: false"),
+            "the generated /sandbox/.claude.json must turn it off"
+        );
+        assert!(
+            !CLAUDE_SETTINGS.contains("copyOnSelect"),
+            "settings.json does not carry it; putting it there does nothing"
+        );
+    }
+
     /// settings file rather than leaving the agent on its own.
     #[test]
     fn the_baked_settings_choose_a_model_and_a_permission_mode() {
@@ -443,6 +457,15 @@ mod tests {
         ] {
             assert_eq!(v["env"][quiet], "1", "{quiet}");
         }
+
+        // Empty strings, which is how Claude Code is told to write no
+        // attribution at all -- the key being absent means the default trailer,
+        // not silence. A sandboxed agent's commits already carry the host's git
+        // identity (see `seed::host_git_identity`), so a co-author trailer would
+        // credit the tool for work attributed to the person running it, and a
+        // branch full of them is a branch that reads as machine-written.
+        assert_eq!(v["attribution"]["commit"], "");
+        assert_eq!(v["attribution"]["pr"], "");
     }
 
     #[test]

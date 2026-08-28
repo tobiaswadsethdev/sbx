@@ -7,10 +7,12 @@ use openshell_client::{CreateOpts, Error as OsError, OpenShell, PolicyRevision, 
 use crate::endpoints;
 use crate::events;
 use crate::forge;
+use crate::mcp;
 use crate::policy;
 use crate::publish;
 use crate::seed;
 use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session, State};
+use crate::skills;
 use crate::status;
 use crate::store::{self, Store};
 
@@ -84,7 +86,10 @@ pub fn refresh_with(
                 store::update(|store| store.upsert(record))?;
                 out.sessions.push(s);
             }
-            Err(e) => out.warnings.push(format!("could not adopt {sandbox}: {e}")),
+            // Phrased as the sandbox's state rather than as a failure of this
+            // code, since the usual cause is a create in flight in another
+            // process and the next refresh adopts it.
+            Err(e) => out.warnings.push(format!("{sandbox} {e}")),
         }
     }
 
@@ -157,6 +162,15 @@ pub struct Draft {
     /// Policy template name, or a path to a YAML file.
     pub policy: String,
     pub providers: Vec<String>,
+    /// Skills copied into the sandbox, resolved from the config file. Same
+    /// reasoning as `mcp`: global, and on the draft so both front ends describe
+    /// a session the same way.
+    pub skills: Vec<skills::Skill>,
+    /// MCP servers the agent is given, from the config file rather than from a
+    /// per-session choice. Carried on the draft anyway, so both front ends hand
+    /// [`create`] one complete description of the session and neither can
+    /// create one this module then quietly changes.
+    pub mcp: Vec<mcp::Server>,
     /// Whether to start the agent once the clone is done.
     pub start: bool,
 }
@@ -183,12 +197,15 @@ impl Step {
 
     /// The step a seeder's own report corresponds to.
     ///
-    /// The seeder names its steps (`clone`, `branch`, `meta`, `agent`) and this
-    /// maps them onto what the interface already shows. `branch` and `meta` are
-    /// part of cloning as far as anyone watching is concerned.
+    /// The seeder names its steps (`clone`, `branch`, `meta`, `skills`, `mcp`,
+    /// `agent`) and this maps them onto what the interface already shows.
+    /// Everything between the clone and the agent is part of cloning as far as
+    /// anyone watching is
+    /// concerned: each is a fraction of a second, and a stage that flashes past
+    /// is noise rather than progress.
     pub fn for_seed(step: &str) -> Option<Step> {
         match step {
-            "clone" | "branch" | "meta" => Some(Step::Clone),
+            "clone" | "branch" | "meta" | "skills" | "mcp" => Some(Step::Clone),
             "agent" => Some(Step::Agent),
             _ => None,
         }
@@ -267,6 +284,36 @@ fn impose_lists(
     Ok(())
 }
 
+/// Open the endpoints of the session's MCP servers.
+///
+/// Separate from [`impose_lists`] and after it, because the two answer different
+/// questions -- that one is "what have I decided every session may reach", this
+/// one is "what tools does the agent have" -- and because a failure here means
+/// something different: an MCP server that could not be opened leaves a session
+/// whose agent starts, works, and reports a dead tool. Worth a warning, not
+/// worth refusing to create the session over, which is the same reading as a
+/// failed allow.
+fn impose_mcp(
+    client: &dyn OpenShell,
+    sandbox: &str,
+    servers: &[mcp::Server],
+    warnings: &mut Vec<String>,
+) {
+    let Some(update) = mcp::widen(servers) else {
+        return;
+    };
+    if let Err(e) = client.policy_update(sandbox, &update) {
+        warnings.push(format!(
+            "the mcp endpoints could not be opened, so the agent will report {} unreachable: {e}",
+            servers
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+}
+
 /// Create a sandbox, clone the repository, cut the work branch, start the agent.
 ///
 /// The order matters and is the reason this is one function rather than steps a
@@ -317,6 +364,8 @@ pub fn create(
     s.base_branch = draft.base.clone();
     s.policy = Some(resolved.label.clone());
     s.providers = draft.providers.clone();
+    s.mcp = draft.mcp.clone();
+    s.skills = draft.skills.clone();
 
     progress(Step::Sandbox);
     let opts = CreateOpts {
@@ -339,6 +388,20 @@ pub fn create(
         return Err(e.to_string());
     }
 
+    // The record is written the moment the sandbox exists, and before the policy
+    // calls below, because between those two points the sandbox is an *orphan*:
+    // labelled `sbx.managed`, with no record and no `meta.json` yet. A refresh
+    // landing in that window -- the TUI runs one a second, and a `sbx new` in
+    // another terminal is the normal case -- tries to adopt it, and reports
+    // `could not adopt sbx-x: cat: /sandbox/.sbx/meta.json: No such file or
+    // directory` about a session that is being created perfectly well.
+    //
+    // The window was always here and used to be microseconds; imposing MCP
+    // endpoints made it a `policy update --wait`, which is seconds. Saving first
+    // closes it: a record in `creating` is one the repair pass knows to leave
+    // alone until the seeder has something to say.
+    save(s.clone(), &mut warnings);
+
     // The global lists, imposed before anything runs inside the sandbox.
     //
     // Here rather than by editing the policy before `sandbox create`, because
@@ -351,6 +414,14 @@ pub fn create(
         save(s, &mut warnings);
         return Err(e);
     }
+    impose_mcp(client, &s.sandbox, &s.mcp, &mut warnings);
+
+    // The seeder packs the skills itself; this is the same pack, thrown away,
+    // for its warnings. A skill that cannot be read is worth saying out loud
+    // here -- the seeder runs detached and has nowhere to say it, and a session
+    // silently missing a skill looks like the agent forgetting how to do
+    // something it used to know.
+    warnings.extend(skills::pack(&s.skills).1);
 
     s.state = State::Seeding;
     save(s.clone(), &mut warnings);
@@ -667,6 +738,60 @@ pub fn publish(
 /// the window as usual; with nothing attached, tmux has no client size to apply
 /// and the wide one stands. Every part of it is best-effort: a session that has
 /// just been created by the fallback above is not worth failing an attach over.
+/// Hand the terminal to the agent, and take it back afterwards.
+///
+/// **The terminal has to be put in raw mode here**, because nothing else does
+/// it. `openshell sandbox exec --tty` allocates a pty at the *sandbox* end and
+/// leaves the local one exactly as it found it -- measured against 0.0.110:
+/// `ICANON`, `ECHO`, `ISIG` and `ICRNL` are all still set while the exec runs.
+/// A cooked terminal cannot drive a full-screen program:
+///
+/// * input is line-buffered, so arrow keys reach the agent in a batch when
+///   Enter is pressed, if at all -- a question with options cannot be answered;
+/// * `ICRNL` turns Enter into `\n` where the agent's input box submits on
+///   `\r`, so a typed line sits in the box and nothing happens;
+/// * `ISIG` catches Ctrl-C locally instead of passing `0x03` through, and
+///   Ctrl-B never reaches tmux, so there is no way to detach either.
+///
+/// The symptom is an agent that echoes what you type and ignores every key that
+/// matters, which reads as the agent being stuck rather than as the terminal
+/// being wrong. `sbx attach` and the TUI's attach share this for that reason:
+/// two copies would be one fixed and one not.
+///
+/// The guard restores the terminal on every path out, including a panic, and a
+/// terminal that cannot be put into raw mode -- output redirected, no tty --
+/// attaches anyway rather than refusing, since that is still useful for reading.
+pub fn attach_interactively(
+    client: &openshell_client::CliClient,
+    session: &Session,
+) -> std::io::Result<std::process::ExitStatus> {
+    let _raw = RawMode::enter();
+    let script = attach_script(session);
+    // Not `.output()` and never killed: the child must exit on its own, because
+    // killing an `exec --tty` wedges the exec path for that sandbox until it is
+    // recreated.
+    client
+        .interactive_exec(&session.sandbox, &["sh", "-c", &script])
+        .status()
+}
+
+/// Raw mode for as long as it is alive.
+struct RawMode(());
+
+impl RawMode {
+    fn enter() -> Option<Self> {
+        ratatui::crossterm::terminal::enable_raw_mode()
+            .ok()
+            .map(RawMode)
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+    }
+}
+
 pub fn attach_script(session: &Session) -> String {
     let (cols, rows) = session::SCRAPE_SIZE;
     format!(

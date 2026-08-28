@@ -42,3 +42,35 @@
 # is `git status` inside every live sandbox, so raise it on a large repository or
 # a long list, and lower it if the diff pane feels behind the agent. 250ms to 60s.
 # refresh = "1s"
+
+# MCP servers the agent gets, one table each. They run on the host -- in their
+# own containers, holding their own credentials -- and the sandbox is granted one
+# endpoint each, reachable only by the agent binary. Nothing else in the sandbox
+# can talk to them, and no token ever lands on the sandbox filesystem.
+#
+# The url is what the *sandbox* sees, which is not what your browser sees:
+# `localhost` in there is the sandbox itself and is refused outright. Use the
+# container's name when it has joined the gateway's own docker network
+# (`--network openshell-docker`, nothing published), or `host.openshell.internal`
+# for a port published on the host. `transport` is "http" (the default) or "sse".
+#
+# Applies to sessions created after the change; existing ones keep what they were
+# made with. See the MCP section of the README for the docker side.
+# [[mcp]]
+# name = "jira"
+# url = "http://mcp-atlassian:9000/mcp"
+#
+# [[mcp]]
+# name = "azure-devops"
+# url = "http://mcp-azure-devops:9001/mcp"
+# transport = "http"
+
+# Skills copied into every new session, by name or by path. A name is one of
+# your own, under ~/.claude/skills; anything with a `/` in it is a path, so a
+# skill living in a repository can be pointed at where it is.
+#
+# A copy, taken while the sandbox is seeded -- a symlink cannot cross into a
+# sandbox, and a bind mount would hand it the rest of your home directory. What
+# this file holds is the pointer, so editing the original changes the next
+# session; a running one keeps what it was created with.
+# skills = ["ship-pr", "~/dev/notes/.claude/skills/changelog"]

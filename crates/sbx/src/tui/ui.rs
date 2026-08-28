@@ -671,6 +671,27 @@ fn meta_lines(app: &App, session: &Session, width: usize) -> Vec<Line<'static>> 
     if !providers.is_empty() {
         lines.push(fact("providers", &providers, value_w));
     }
+    // The tools the agent has beyond its own, which is not visible anywhere else
+    // in the list: the policy pane shows the endpoint, but an endpoint does not
+    // say which MCP server it serves.
+    let mcp = session
+        .mcp
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !mcp.is_empty() {
+        lines.push(fact("mcp", &mcp, value_w));
+    }
+    let skills = session
+        .skills
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if !skills.is_empty() {
+        lines.push(fact("skills", &skills, value_w));
+    }
     lines.push(status_line(app, session));
     // A publish takes a push plus a REST call, so there is a visible gap where
     // nothing appears to be happening.
@@ -1282,6 +1303,74 @@ fn with_cursor(input: &Input, focused: bool) -> Vec<Span<'static>> {
     ]
 }
 
+/// The most rows the task field grows to.
+///
+/// A task is a prompt, not a word: it is routinely a sentence or three, and a
+/// single row shows the last few characters of one with the cursor off the edge
+/// of the modal -- you cannot see what you are typing, which is exactly the
+/// complaint. Four rows is most prompts whole; past that it scrolls with the
+/// cursor, so the end you are writing is always the end you can see.
+const TASK_ROWS_IN_FORM: usize = 4;
+
+/// Render a value wrapped over at most `max_rows` rows of `width`, with the
+/// cursor drawn in it and the window scrolled to keep the cursor visible.
+///
+/// Hard-wrapped at the column rather than word-wrapped, like the facts pane's
+/// task rows: a cursor position has to map to a row and a column, and it is the
+/// same text in two places, so the two should break in the same place.
+fn wrapped_with_cursor(
+    input: &Input,
+    focused: bool,
+    width: usize,
+    max_rows: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let chars: Vec<char> = input.text().chars().collect();
+    if width == 0 || max_rows == 0 {
+        return vec![vec![Span::raw(String::new())]];
+    }
+    let at = input.cursor().min(chars.len());
+
+    // The cursor can sit one past the last character, so the text it is drawn
+    // over is one cell longer than the text itself.
+    let cells: Vec<char> = chars.iter().copied().chain([' ']).collect();
+    let rows: Vec<Vec<char>> = cells.chunks(width).map(<[char]>::to_vec).collect();
+
+    // Scrolled by whole rows, and only as far as it must be: a task that fits
+    // starts at the top and stays there.
+    let cursor_row = at / width;
+    let first = (cursor_row + 1).saturating_sub(max_rows);
+    let last = (first + max_rows).min(rows.len());
+
+    rows[first..last]
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let row_index = first + i;
+            let text: String = row.iter().collect();
+            // The trailing cell exists to carry the cursor; without one it is a
+            // space nobody asked for.
+            let text = if row_index + 1 == rows.len() {
+                text.trim_end_matches(' ').to_string()
+            } else {
+                text
+            };
+            if !focused || row_index != cursor_row {
+                return vec![Span::raw(text)];
+            }
+            let col = at % width;
+            let cells: Vec<char> = row.to_vec();
+            let before: String = cells[..col].iter().collect();
+            let under = cells.get(col).copied().unwrap_or(' ').to_string();
+            let after: String = cells.get(col + 1..).unwrap_or(&[]).iter().collect();
+            vec![
+                Span::raw(before),
+                Span::styled(under, Style::default().add_modifier(Modifier::REVERSED)),
+                Span::raw(after.trim_end_matches(' ').to_string()),
+            ]
+        })
+        .collect()
+}
+
 fn draw_picker(frame: &mut Frame, picker: &Picker, area: Rect) {
     let rows = picker.rows();
     let shown = rows.len().min(PICKER_ROWS);
@@ -1424,6 +1513,25 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
         let Some(input) = form.input(field) else {
             continue;
         };
+        // The task wraps; the other two cannot outgrow their row, since a name
+        // is capped well under the field's width and a branch that long is not
+        // a branch anyone has.
+        if field == Field::Task {
+            for (i, row) in wrapped_with_cursor(input, field == focused, value_w, TASK_ROWS_IN_FORM)
+                .into_iter()
+                .enumerate()
+            {
+                // The label on the first row only, and the rest indented under
+                // it, so the value stays one column of text.
+                let head = if i == 0 {
+                    label(field)
+                } else {
+                    Span::raw(" ".repeat(LABEL_W))
+                };
+                lines.push(Line::from([vec![head], row].concat()));
+            }
+            continue;
+        }
         let mut spans = vec![label(field)];
         spans.extend(with_cursor(input, field == focused));
         // An empty base is not a missing answer, it is "the remote's default",
@@ -2364,6 +2472,55 @@ diff --git a/b b/b
         for row in &rows {
             assert!(row.chars().count() <= 100, "overflowed the frame: {row}");
         }
+    }
+
+    /// The complaint this exists for: a long task used to be one row, so the
+    /// cursor -- and everything being typed -- sat past the right edge of the
+    /// modal and was clipped.
+    #[test]
+    fn a_long_task_wraps_instead_of_running_off_the_edge() {
+        let long = "I want to add the MaxGaming Scala customer id to every environment file                     and then tighten the validation so an empty one fails at startup";
+        let input = Input::new(long);
+        let rows = wrapped_with_cursor(&input, true, 40, TASK_ROWS_IN_FORM);
+        assert!(rows.len() > 1, "a long task takes more than one row");
+        assert!(rows.len() <= TASK_ROWS_IN_FORM);
+        for row in &rows {
+            let width: usize = row.iter().map(|s| s.content.chars().count()).sum();
+            assert!(width <= 40, "row is {width} wide: {row:?}");
+        }
+
+        // The cursor is at the end, so the last row carries it.
+        let last = rows.last().expect("a row");
+        assert!(
+            last.iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "the cursor must be on screen: {last:?}"
+        );
+    }
+
+    /// Past four rows the window follows the cursor, so what you are typing is
+    /// what you can see.
+    #[test]
+    fn the_task_field_scrolls_to_the_cursor() {
+        let input = Input::new("x".repeat(400));
+        let rows = wrapped_with_cursor(&input, true, 40, TASK_ROWS_IN_FORM);
+        assert_eq!(rows.len(), TASK_ROWS_IN_FORM);
+        assert!(
+            rows.last()
+                .expect("a row")
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+            "the cursor is at the end of 400 characters and must still be drawn"
+        );
+
+        // A task that fits starts at the top rather than being scrolled to.
+        // Read unfocused, so the trailing cell the cursor is drawn on is not
+        // part of the text.
+        let short = Input::new("short one");
+        let rows = wrapped_with_cursor(&short, false, 40, TASK_ROWS_IN_FORM);
+        assert_eq!(rows.len(), 1);
+        let text: String = rows[0].iter().map(|s| s.content.to_string()).collect();
+        assert_eq!(text, "short one");
     }
 
     #[test]
