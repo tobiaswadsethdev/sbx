@@ -145,9 +145,8 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Not sure where to start? [docs/architecture.md](docs/architecture.md) is a tour
-of the crates and modules, and issues labelled `good first issue` are the ones
-that need no OpenShell gateway to work on.
+[docs/architecture.md](docs/architecture.md) is a tour of the crates and
+modules, and worth ten minutes before a first change.
 
 By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Security
 reports have their own route: [SECURITY.md](SECURITY.md).
