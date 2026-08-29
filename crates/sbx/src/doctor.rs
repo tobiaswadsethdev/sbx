@@ -83,7 +83,7 @@ fn check_openshell() -> Check {
             "openshell",
             "not on PATH",
             "install from the release tarballs into ~/.local/bin (see docs/manual-loop.md); \
-             install.sh only supports dpkg/rpm",
+             OpenShell's own install.sh supports dpkg/rpm only",
         ),
     }
 }
@@ -148,6 +148,33 @@ fn check_linger() -> Check {
             "linger",
             "could not query loginctl",
             "check systemd is running",
+        ),
+    }
+}
+
+/// Whether the tool running this is the newest one published.
+///
+/// Reported rather than acted on: nothing updates itself here, and a machine
+/// that cannot reach github is a machine this stays quiet about -- "could not
+/// ask" is not "up to date", but it is also not a problem with the setup, which
+/// is what every other check is about.
+fn check_version() -> Check {
+    match crate::update::check() {
+        crate::update::Status::Newer { running, latest } => Check::warn(
+            "version",
+            format!("sbx {running}; {latest} is out"),
+            "sbx update",
+        ),
+        crate::update::Status::Current(v) => Check::ok("version", format!("sbx {v}, newest")),
+        crate::update::Status::Ahead(v) => {
+            Check::ok("version", format!("sbx {v}, ahead of the newest release"))
+        }
+        crate::update::Status::Unknown => Check::ok(
+            "version",
+            format!(
+                "sbx {} (no release list to compare against)",
+                crate::update::current()
+            ),
         ),
     }
 }
@@ -365,6 +392,7 @@ fn check_skills(configured: &[skills::Skill]) -> Check {
 /// only place the error can be shown next to its fix.
 pub fn run(client: &dyn OpenShell, config: &Result<Config, config::Error>) -> Vec<Check> {
     let mut checks = vec![
+        check_version(),
         check_config(config),
         check_openshell(),
         check_gateway(client),

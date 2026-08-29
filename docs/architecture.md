@@ -57,6 +57,7 @@ index into them.
 | `repos.rs` | the git repositories on your own disk -- the only module that reads the host |
 | `config.rs` | `~/.config/sbx/config.toml`, and which default wins |
 | `doctor.rs` | the preflight checks, each carrying its fix |
+| `update.rs` | fetching, verifying and replacing the `sbx` binary itself |
 | `ansi.rs` | one tokenizer for captured screens, shared by the pane that shows them and the matcher that reads them |
 | `pane.rs` | the markup the text panes share, so styling stays in one place |
 | `tui/mod.rs` | `App`: state and key handling |

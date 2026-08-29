@@ -64,24 +64,37 @@ curl https://github.com                                 -> DENIED
 
 Linux with systemd and a Docker daemon -- the isolation is kernel-enforced, so
 nothing here is portable to macOS. You need [OpenShell](https://github.com/NVIDIA/OpenShell)
-0.0.110 with its gateway running, Docker 29.x, tmux, and Rust 1.89 or newer.
-[docs/install.md](docs/install.md) walks through all of it, including the
-providers that hold your credentials.
+0.0.110 with its gateway running, Docker 29.x and tmux -- plus Rust 1.89 or
+newer, but only to build it yourself. [docs/install.md](docs/install.md) walks
+through all of it, including the providers that hold your credentials.
 
 ```sh
-git clone https://github.com/tobiaswadsethdev/sbx && cd sbx
-cargo install --path crates/sbx      # -> ~/.cargo/bin/sbx
+curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.sh | sh
+
 sbx doctor                           # every prerequisite, and what to do about the missing ones
 sbx image build                      # the sandbox image (also happens on first `sbx new`)
 sbx new --repo <url> --task "fix the readme typo"
 sbx                                  # the TUI
 ```
 
+The script needs no checkout and no Rust toolchain: it fetches the newest
+release for your machine, checks it against the published `SHA256SUMS`, and
+puts the binary in `~/.local/bin` -- then runs `sbx doctor` to say what is still
+missing. It falls back to building with `cargo` when no release matches your
+machine, and `--bin-dir`, `--version` and `--from-source` are there when you
+want to decide those yourself. From a checkout, `cargo install --path
+crates/sbx` does the same job.
+
+`sbx update` later fetches, verifies and replaces the binary the same way.
+Nothing updates itself in the background; `sbx doctor` is what mentions that a
+newer release is out.
+
 `sbx doctor` is the one to run when something looks wrong -- it checks the
 gateway, Docker, tmux, lingering, the image and the Claude Code version in it,
 plus the providers, skills and MCP servers your config names:
 
 ```
+[  ok  ] version      sbx 0.1.0, newest
 [  ok  ] openshell    openshell 0.0.110
 [  ok  ] gateway      https://127.0.0.1:17670 0.0.110 (authenticated)
 [  ok  ] docker       server 29.6.0
@@ -105,6 +118,7 @@ sbx policies                                  # the policy templates shipped in 
 sbx config                                    # the defaults in force, and where they came from
 sbx config --init                             # write a commented ~/.config/sbx/config.toml
 sbx publish <name>                            # push the branch and open a pull request
+sbx update                                    # fetch and verify the newest release of sbx itself
 sbx rm <name>                                 # delete session and sandbox
 sbx                                           # the TUI: n starts a session, no shell needed
 ```
@@ -140,7 +154,7 @@ Contributions are welcome -- issues, questions and pull requests alike.
 strategy and what a reviewable change looks like here; the short version is:
 
 ```sh
-cargo test --workspace               # 388 tests, no gateway or Docker needed
+cargo test --workspace               # 397 tests, no gateway or Docker needed
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```

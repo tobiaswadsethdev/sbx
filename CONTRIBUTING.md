@@ -24,7 +24,7 @@ diff pane's wrapping.
 
 ```sh
 cargo build
-cargo test --workspace                                    # 388 tests
+cargo test --workspace                                    # 397 tests
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- doctor                                       # the CLI, from the tree
@@ -83,6 +83,28 @@ Commit messages: a short imperative summary, then a body explaining the
 reasoning if the change is not obvious. `git log` here is a record of decisions
 rather than a list of files touched, and [PLAN.md](PLAN.md) tracks the larger
 increments.
+
+## Releasing
+
+Releases are what `install.sh` and `sbx update` install, and both find them by
+name. Tagging is the whole process:
+
+```sh
+# bump `version` in the workspace Cargo.toml, commit it, then:
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` builds a static musl binary for
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, packs each as
+`sbx-<tag>-<target>.tar.gz` with the binary flat at the root, and publishes them
+with one `SHA256SUMS` covering both. Three files have to agree about those names
+-- the workflow, `install.sh` and `crates/sbx/src/update.rs` -- and a test in
+`update.rs` fails if they ever stop agreeing, so a rename in one of them is
+caught locally rather than by someone's broken install.
+
+Until the first tag exists there is nothing to download, and both installers
+say so and fall back to building from source. That is the intended behaviour,
+not a gap to work around.
 
 ## Reporting bugs
 
