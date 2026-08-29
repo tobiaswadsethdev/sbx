@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or idea
+    url: https://github.com/tobiaswadsethdev/sbx/discussions
+    about: Open-ended questions, setups that nearly work, and things you are not sure are bugs.
+  - name: Security report
+    url: https://github.com/tobiaswadsethdev/sbx/security/advisories/new
+    about: A way for a sandboxed agent to reach something it should not. Private, and not a public issue.
+  - name: Setting sbx up
+    url: https://github.com/tobiaswadsethdev/sbx/blob/main/docs/install.md
+    about: Prerequisites, the gateway, providers. `sbx doctor` names the fix for most of it.

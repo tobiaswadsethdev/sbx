@@ -1,0 +1,60 @@
+name: Bug report
+description: Something behaves differently from what it says it does
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. If this is a way for a sandboxed agent to
+        reach something it should not, please don't file it here -- see
+        [SECURITY.md](https://github.com/tobiaswadsethdev/sbx/blob/main/SECURITY.md).
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I ran `sbx new --repo ... --task "..."` and the session stopped at `seeding`.
+        I expected it to reach `ready`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The smallest version you have. A policy template, a repo URL and a task is usually enough.
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: sbx doctor
+      description: Output of `sbx doctor`. It pins the version of every moving part at once.
+      render: text
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: sbx version
+      description: A release, or the commit you built from.
+      placeholder: "0.1.0 (a166660)"
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: |
+        Logs, the events feed, `/sandbox/.sbx/seed.log` from inside the sandbox --
+        whatever you have. Please redact tokens.
+    validations:
+      required: false

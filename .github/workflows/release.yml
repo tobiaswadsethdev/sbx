@@ -1,0 +1,107 @@
+name: Release
+
+# Tag a version and this publishes the binaries `install.sh` and `sbx update`
+# download:
+#
+#     git tag v0.2.0 && git push origin v0.2.0
+#
+# The asset names are part of the contract with both of them, and a test in
+# `crates/sbx/src/update.rs` fails if the three ever disagree.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    # An architecture whose runner is unavailable must not take the other one
+    # down with it: a release with one binary in it beats a release with none.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # musl, so one binary runs on every distribution rather than on the ones
+      # whose glibc is new enough. The dependency tree is pure Rust, so this
+      # needs nothing but the linker.
+      - name: Install Rust and musl
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --bin sbx --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          set -eu
+          bin="target/${{ matrix.target }}/release/sbx"
+          "$bin" --version
+          # Flat, one file at the root of the archive: install.sh and
+          # `sbx update` both expect to find `sbx` and nothing else.
+          tar -czf "sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" sbx
+          sha256sum "sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbx-${{ matrix.target }}
+          path: |
+            sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            ${{ matrix.target }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # One SHA256SUMS covering every architecture, which is what install.sh
+      # verifies against with --ignore-missing and what `sbx update` reads the
+      # single line it needs out of.
+      - name: Collect checksums
+        run: |
+          set -eu
+          cd dist
+          cat ./*.sha256 > SHA256SUMS
+          rm -f ./*.sha256
+          cat SHA256SUMS
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

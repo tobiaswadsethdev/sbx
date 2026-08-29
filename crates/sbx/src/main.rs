@@ -19,6 +19,7 @@ mod skills;
 mod status;
 mod store;
 mod tui;
+mod update;
 
 use std::process::ExitCode;
 
@@ -124,6 +125,22 @@ enum Command {
     Image {
         #[command(subcommand)]
         action: ImageAction,
+    },
+
+    /// Update sbx itself to the newest published release.
+    #[command(alias = "self-update")]
+    Update {
+        /// Say what an update would do, and do none of it.
+        #[arg(long)]
+        check: bool,
+
+        /// Install one named release, like `v0.1.0`. Defaults to the newest.
+        #[arg(long)]
+        tag: Option<String>,
+
+        /// Install even when the newest release is what is already running.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Delete sessions and their sandboxes.
@@ -244,6 +261,7 @@ fn main() -> ExitCode {
         Some(Command::Image { action }) => match action {
             ImageAction::Build => image::build().map_err(Into::into),
         },
+        Some(Command::Update { check, tag, force }) => cmd_update(check, tag.as_deref(), force),
         Some(Command::Rm { names }) => cmd_rm(&client, names),
     };
 
@@ -333,6 +351,45 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
 /// The effective value and where it came from, rather than the file's contents:
 /// what a person wants to know is what the next `sbx new` will do, and the
 /// answer is a mix of the file and the built-in defaults.
+/// `sbx update`.
+///
+/// Prints what it is about to do before doing it, because replacing the binary
+/// the caller is running is not a thing to do quietly -- and `--check` is the
+/// same walk with the last step left out.
+fn cmd_update(check: bool, tag: Option<&str>, force: bool) -> Fallible {
+    if check {
+        match update::check() {
+            update::Status::Newer { running, latest } => {
+                println!("sbx {running} is running; {latest} is out");
+                println!("  update with: sbx update");
+            }
+            update::Status::Current(v) => println!("sbx {v} is the newest release"),
+            update::Status::Ahead(v) => {
+                println!("sbx {v} is ahead of the newest release (a build from a checkout)")
+            }
+            // Never "up to date": the question was not answered.
+            update::Status::Unknown => {
+                println!("sbx {}; could not read the release list", update::current())
+            }
+        }
+        return Ok(());
+    }
+
+    match update::install(tag, force)? {
+        update::Outcome::NoChange { version } => {
+            println!("sbx {version} is the newest release; nothing to do");
+            println!("  reinstall it anyway with: sbx update --force");
+        }
+        update::Outcome::Updated { from, to, at } => {
+            println!("sbx {from} -> {to}  ({})", at.display());
+            // The sandbox image is versioned separately and an update is the
+            // moment its recipe most likely changed underneath it.
+            println!("  `sbx image build` picks up any change to the sandbox image");
+        }
+    }
+    Ok(())
+}
+
 fn cmd_config(cfg: &Config, init: bool, path_only: bool) -> Fallible {
     if path_only {
         println!("{}", cfg.path.display());
