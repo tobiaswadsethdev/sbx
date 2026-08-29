@@ -1,0 +1,35 @@
+name: Idea or feature request
+description: Something sbx should do, or should do differently
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and where the current behaviour got in the way. The problem is more useful than the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+      description: If you have a shape in mind, describe it. If not, that is fine too.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you tried instead
+      description: Existing flags, config keys or workarounds you used, and why they were not enough.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: isolation
+    attributes:
+      label: Isolation
+      options:
+        - label: This would widen what a sandboxed agent can reach, and I've said why that trade is worth it above.
+          required: false
