@@ -21,6 +21,11 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # One resolved tag for both triggers. `github.ref_name` is the tag on a tag
+  # push and the *branch* on a workflow_dispatch, which would name every asset
+  # `sbx-main-...` and produce a release neither install.sh nor `sbx update`
+  # can find.
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -38,6 +43,15 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
+
+      # A dispatch takes the tag as free text, and a junk one would be baked
+      # into an asset name and a git tag that outlives the mistake.
+      - name: Check the tag looks like a version
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) echo "building $TAG" ;;
+            *) echo "TAG=$TAG is not a vX.Y.Z tag"; exit 1 ;;
+          esac
 
       # musl, so one binary runs on every distribution rather than on the ones
       # whose glibc is new enough. The dependency tree is pure Rust, so this
@@ -64,14 +78,14 @@ jobs:
           "$bin" --version
           # Flat, one file at the root of the archive: install.sh and
           # `sbx update` both expect to find `sbx` and nothing else.
-          tar -czf "sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" sbx
-          sha256sum "sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
+          tar -czf "sbx-${TAG}-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" sbx
+          sha256sum "sbx-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
           name: sbx-${{ matrix.target }}
           path: |
-            sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            sbx-${{ env.TAG }}-${{ matrix.target }}.tar.gz
             ${{ matrix.target }}.sha256
           if-no-files-found: error
 
@@ -99,7 +113,7 @@ jobs:
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ env.TAG }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

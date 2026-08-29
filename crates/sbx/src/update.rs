@@ -499,7 +499,7 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
             "install.sh names assets differently from asset_name"
         );
         assert!(
-            RELEASE_WORKFLOW.contains("sbx-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"),
+            RELEASE_WORKFLOW.contains("sbx-${TAG}-${{ matrix.target }}.tar.gz"),
             "the release workflow names assets differently from asset_name"
         );
         assert_eq!(
