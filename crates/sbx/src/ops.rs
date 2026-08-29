@@ -963,7 +963,7 @@ fn parse_poll(stdout: &str, now: u64) -> Poll {
         // Kept as captured, escapes and all: the pane redraws it with the colour
         // the agent chose. Emptiness is judged on the stripped copy, because a
         // screen of nothing but colour changes is a blank screen.
-        pane: Some(pane_part.trim_end().to_string()).filter(|_| !plain.trim().is_empty()),
+        pane: (!plain.trim().is_empty()).then_some(pane_part.trim_end().to_string()),
     }
 }
 

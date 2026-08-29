@@ -31,8 +31,10 @@ cargo run -- doctor                                       # the CLI, from the tr
 cargo run                                                 # the TUI, from the tree
 ```
 
-CI runs exactly those last three checks, so a green local run is a green pull
-request. The gateway contract lives in ignored tests that need a live gateway
+CI runs exactly those last three checks on the **newest stable**, so
+`rustup update stable` before pushing is what makes a green local run a green
+pull request: clippy gains lints with each release, and one of them can turn CI
+red on code nobody touched. The gateway contract lives in ignored tests that need a live gateway
 and Docker, and creates and deletes real sandboxes labelled `sbx.test`:
 
 ```sh
