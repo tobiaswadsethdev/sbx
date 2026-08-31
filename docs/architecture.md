@@ -52,6 +52,7 @@ index into them.
 | `forge.rs` | which git host a session works against, derived from the repo URL |
 | `publish.rs` | push and open a pull request, both from inside the sandbox |
 | `image.rs` | the sandbox image, with its whole build context embedded in the binary |
+| `toolchain.rs` | the toolchains, their image variants, and the registry each one opens |
 | `skills.rs` | packing host skills into a session |
 | `mcp.rs` | MCP servers on the host, and the endpoints granted for them |
 | `repos.rs` | the git repositories on your own disk -- the only module that reads the host |

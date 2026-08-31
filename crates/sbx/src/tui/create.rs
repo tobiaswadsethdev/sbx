@@ -20,6 +20,7 @@ use crate::ops;
 use crate::policy;
 use crate::repos::{Facts, LocalRepo};
 use crate::session;
+use crate::toolchain;
 
 /// A single-line text field with a cursor.
 ///
@@ -353,15 +354,17 @@ pub enum Field {
     Name,
     Base,
     Policy,
+    Toolchains,
     Providers,
 }
 
 impl Field {
-    const ORDER: [Field; 5] = [
+    const ORDER: [Field; 6] = [
         Field::Task,
         Field::Name,
         Field::Base,
         Field::Policy,
+        Field::Toolchains,
         Field::Providers,
     ];
 
@@ -377,12 +380,17 @@ impl Field {
             Field::Name => "name",
             Field::Base => "base",
             Field::Policy => "policy",
+            Field::Toolchains => "tools",
             Field::Providers => "providers",
         }
     }
 }
 
-/// One provider, and whether this session gets it.
+/// One thing a session can be given, and whether it is.
+///
+/// Shared by the two multi-select fields, because they are the same widget over
+/// different lists: `kind` is a provider's type in one and a toolchain's summary
+/// in the other, and both are the dimmed text beside the name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub name: String,
@@ -430,6 +438,22 @@ pub struct PolicyOption {
     pub summary: String,
 }
 
+/// Every toolchain, with the ones the checkout points at already ticked.
+///
+/// All of them are listed rather than only the detected ones: the list is three
+/// lines long, and a form that hid `dotnet` because the repository has no
+/// `.csproj` yet would be a form you cannot use to start writing one.
+fn toolchain_choices(detected: &[String]) -> Vec<Choice> {
+    toolchain::TOOLCHAINS
+        .iter()
+        .map(|t| Choice {
+            name: t.name.to_string(),
+            kind: t.summary.to_string(),
+            selected: detected.iter().any(|d| d == t.name),
+        })
+        .collect()
+}
+
 /// The templates, with a configured path in front of them when there is one.
 fn policy_options(configured: Option<&str>) -> Vec<PolicyOption> {
     let mut out: Vec<PolicyOption> = Vec::new();
@@ -464,6 +488,13 @@ pub struct Form {
     policy: usize,
     providers: Vec<Choice>,
     provider_cursor: usize,
+    toolchains: Vec<Choice>,
+    toolchain_cursor: usize,
+    /// Whether the toolchain list has been touched. Until it has, it follows
+    /// what the checkout turns out to contain -- git's answer arrives after the
+    /// form is already open, and a tick appearing under the cursor a moment
+    /// after it was cleared by hand would be the tool arguing.
+    toolchains_edited: bool,
     /// The config file's provider list, kept because the gateway's own list may
     /// arrive after the form is open and has to be ticked the same way then.
     configured_providers: Option<Vec<String>>,
@@ -526,6 +557,12 @@ impl Form {
             policies,
             providers: choices,
             provider_cursor: 0,
+            // Empty until `inspected` brings the checkout's answer: the form is
+            // built on a keystroke and this module does no I/O, which is the same
+            // reason the branch facts arrive late.
+            toolchains: toolchain_choices(&[]),
+            toolchain_cursor: 0,
+            toolchains_edited: false,
             configured_providers: defaults.providers.clone(),
             mcp: defaults.mcp.clone(),
             skills: defaults.skills.clone(),
@@ -545,6 +582,12 @@ impl Form {
     pub fn inspected(&mut self, facts: Facts) {
         if !facts.base_on_remote && !self.base.is_empty() {
             self.base.set("");
+        }
+        // Only while the list is untouched, so an answer arriving late cannot
+        // undo a choice made in the meantime -- the same rule the provider list
+        // follows in `providers_arrived`.
+        if !self.toolchains_edited {
+            self.toolchains = toolchain_choices(&facts.toolchains);
         }
         self.facts = Some(facts);
     }
@@ -581,7 +624,7 @@ impl Form {
             Field::Task => Some(&self.task),
             Field::Name => Some(&self.name),
             Field::Base => Some(&self.base),
-            Field::Policy | Field::Providers => None,
+            Field::Policy | Field::Toolchains | Field::Providers => None,
         }
     }
 
@@ -614,6 +657,29 @@ impl Form {
     fn cycle_policy(&mut self, delta: isize) {
         let len = self.policies.len() as isize;
         self.policy = ((self.policy as isize + delta).rem_euclid(len)) as usize;
+    }
+
+    pub fn toolchains(&self) -> &[Choice] {
+        &self.toolchains
+    }
+
+    pub fn toolchain_cursor(&self) -> usize {
+        self.toolchain_cursor
+    }
+
+    fn move_toolchain(&mut self, delta: isize) {
+        if self.toolchains.is_empty() {
+            return;
+        }
+        let last = self.toolchains.len() as isize - 1;
+        self.toolchain_cursor = (self.toolchain_cursor as isize + delta).clamp(0, last) as usize;
+    }
+
+    fn toggle_toolchain(&mut self) {
+        if let Some(c) = self.toolchains.get_mut(self.toolchain_cursor) {
+            c.selected = !c.selected;
+            self.toolchains_edited = true;
+        }
     }
 
     fn move_provider(&mut self, delta: isize) {
@@ -651,6 +717,17 @@ impl Form {
                 .collect(),
             mcp: self.mcp.clone(),
             skills: self.skills.clone(),
+            // Resolved here rather than carried as names, so the draft the TUI
+            // hands `ops::create` is the same shape `sbx new` hands it. A name
+            // that does not resolve is unreachable -- the list is built from
+            // `toolchain::TOOLCHAINS` -- and is dropped rather than failing a
+            // create over a list this module wrote itself.
+            toolchains: self
+                .toolchains
+                .iter()
+                .filter(|c| c.selected)
+                .filter_map(|c| toolchain::find(&c.name))
+                .collect(),
             start: true,
         })
     }
@@ -695,6 +772,21 @@ impl Form {
                 }
                 KeyCode::Right | KeyCode::Char('l') | KeyCode::Char(' ') => {
                     self.cycle_policy(1);
+                    return Action::None;
+                }
+                _ => {}
+            },
+            Field::Toolchains => match key.code {
+                KeyCode::Char(' ') => {
+                    self.toggle_toolchain();
+                    return Action::None;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.move_toolchain(-1);
+                    return Action::None;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.move_toolchain(1);
                     return Action::None;
                 }
                 _ => {}
@@ -1107,6 +1199,7 @@ mod tests {
             Field::Name,
             Field::Base,
             Field::Policy,
+            Field::Toolchains,
             Field::Providers,
             Field::Task,
         ];
@@ -1116,6 +1209,82 @@ mod tests {
         }
         f.on_key(key(KeyCode::BackTab));
         assert_eq!(f.field(), Field::Providers);
+    }
+
+    /// The whole point of detecting: a .NET repository comes up with dotnet
+    /// already ticked, so the common case is a form to press Enter on.
+    #[test]
+    fn the_toolchains_arrive_ticked_from_the_checkout() {
+        let mut f = form();
+        // Nothing until git has answered, and every toolchain listed either way.
+        assert_eq!(f.toolchains().len(), toolchain::TOOLCHAINS.len());
+        assert!(f.toolchains().iter().all(|c| !c.selected));
+        assert!(f.draft().unwrap().toolchains.is_empty());
+
+        f.inspected(Facts {
+            uncommitted: 0,
+            unpushed: None,
+            base_on_remote: true,
+            toolchains: vec!["dotnet".into()],
+        });
+        let ticked: Vec<&str> = f
+            .toolchains()
+            .iter()
+            .filter(|c| c.selected)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(ticked, ["dotnet"]);
+        assert_eq!(
+            f.draft()
+                .unwrap()
+                .toolchains
+                .iter()
+                .map(|t| t.name)
+                .collect::<Vec<_>>(),
+            ["dotnet"]
+        );
+    }
+
+    /// A guess is a guess: unticking has to hold, including against an answer
+    /// from git that arrives afterwards.
+    #[test]
+    fn a_toolchain_chosen_by_hand_survives_a_late_answer() {
+        let mut f = form();
+        while f.field() != Field::Toolchains {
+            f.on_key(key(KeyCode::Tab));
+        }
+        // The list is cursored and toggled like the provider list beside it.
+        f.on_key(key(KeyCode::Char('j')));
+        f.on_key(key(KeyCode::Char(' ')));
+        assert_eq!(
+            f.field(),
+            Field::Toolchains,
+            "space must not leave the field"
+        );
+        let picked: Vec<&str> = f
+            .toolchains()
+            .iter()
+            .filter(|c| c.selected)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(picked, ["node"], "the second row, cursored down to");
+
+        f.inspected(Facts {
+            uncommitted: 0,
+            unpushed: None,
+            base_on_remote: true,
+            toolchains: vec!["rust".into()],
+        });
+        assert_eq!(
+            f.draft()
+                .unwrap()
+                .toolchains
+                .iter()
+                .map(|t| t.name)
+                .collect::<Vec<_>>(),
+            ["node"],
+            "a detection landing late must not undo a choice"
+        );
     }
 
     #[test]
@@ -1490,6 +1659,7 @@ mod tests {
             uncommitted: 2,
             unpushed: Some(1),
             base_on_remote: false,
+            toolchains: Vec::new(),
         });
         assert_eq!(f.input(Field::Base).unwrap().text(), "");
         let draft = f.draft().unwrap();
@@ -1504,6 +1674,7 @@ mod tests {
             uncommitted: 0,
             unpushed: Some(0),
             base_on_remote: true,
+            toolchains: Vec::new(),
         });
         assert_eq!(f.draft().unwrap().base.as_deref(), Some("main"));
     }

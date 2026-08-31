@@ -10,9 +10,15 @@
 # rules block: `rules:` alone is default-deny, but `access:` grants its whole
 # method class, and the two combined grant the union.
 #
-# crates.io is not here, unlike the sketch in PLAN.md: the sandbox image ships
-# no Rust toolchain, so the endpoint would be unreachable decoration. Add it
-# alongside a cargo binary if the image ever grows one.
+# crates.io is not here, unlike the sketch in PLAN.md: this template cannot know
+# whether the sandbox has a cargo to use it, and an endpoint granted to a sandbox
+# with no binary able to reach it is decoration. That is now a *toolchain's* to
+# open rather than a template's -- `--toolchain rust` builds an image variant
+# carrying cargo and opens crates.io for it in that session and no other. See
+# `crates/sbx/src/toolchain.rs` and docs/toolchains.md.
+#
+# npm and PyPI stay here, because the base image really does ship node and uv, so
+# this template can promise something true about every sandbox it is applied to.
 version: 1
 
 filesystem_policy:

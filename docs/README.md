@@ -7,6 +7,7 @@
 | [configuration.md](configuration.md) | `~/.config/sbx/config.toml`, and which default wins |
 | [policy.md](policy.md) | the rules being enforced, the audit feed, and acting on a denial |
 | [git-hosts.md](git-hosts.md) | GitHub and Azure DevOps, and how publishing keeps the token off your host |
+| [toolchains.md](toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [skills.md](skills.md) | carrying your own skills into a sandbox |
 | [mcp.md](mcp.md) | MCP servers on the host, and what an MCP server costs you |
 | [sandbox-image.md](sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |

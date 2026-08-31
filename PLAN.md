@@ -1228,6 +1228,82 @@ Increments 0-21 are done. What is left is the unscheduled list below.
   watch an agent. A test asserts the Dockerfile sets it and that `settings.json`
   does not pretend to.
 
+- **27. Toolchains, per session** — DONE. A sandbox that can only clone and read
+  can only write code nobody has compiled: the base image has node and python
+  because the community image does, and nothing else. `--toolchain dotnet`,
+  `--toolchain dotnet,rust`, and a field on the create form.
+
+  **Installed in the image, not in the sandbox.** The same reasoning that decided
+  the agent's own version in increment 10: `/usr/local` is not writable by the
+  sandbox user and no template lets a sandbox reach a download host, so an agent
+  cannot install a toolchain -- and widening the policy far enough that it could
+  would hand every session a route to arbitrary tarballs. Each toolchain resolves
+  its version from the publisher's release manifest and verifies the download
+  against the checksum published beside it (SHA-512 for the .NET SDK, SHA-256 for
+  Rust), then verifies what it installed with `--version`, exactly like the Claude
+  Code step.
+
+  **One image per set, layered onto the base.** `sbx-base:dotnet`,
+  `sbx-base:dotnet-rust`, `FROM sbx-base:latest`. Docker shares the base's 5.17GB,
+  so `sbx-base:dotnet` costs 0.8GB and a Rust session never carries the .NET SDK.
+  The tag is a pure function of the *set* -- `TOOLCHAINS` order is imposed on the
+  input -- so `--toolchain rust,dotnet` and `--toolchain dotnet,rust` are one
+  image rather than two identical ones. Built on first use by `sbx new`, never by
+  the TUI, for the reason the base image is not: the build streams docker's output.
+
+  **A toolchain is also a policy change**, which is the half that makes this a
+  module rather than a longer Dockerfile. `net-open.yaml` had already argued it:
+  it refused to ship crates.io because "the sandbox image ships no Rust
+  toolchain, so the endpoint would be unreachable decoration. Add it alongside a
+  cargo binary if the image ever grows one." So the registry travels with the
+  toolchain -- `index.crates.io` and `static.crates.io` for cargo,
+  `api.nuget.org` for dotnet, `registry.npmjs.org` for node -- `read-only`, and
+  imposed on the session that asked, one `policy update` per distinct binary list
+  so cargo cannot reach nuget.
+
+  **rustup was the wrong tool, for a reason only this gateway shows.** Its
+  `cargo` is a proxy that execs
+  `$RUSTUP_HOME/toolchains/<channel>-<triple>/bin/cargo`, and the gateway matches
+  the kernel-resolved `/proc/<pid>/exe` -- the same trap `net-open.yaml`
+  documents for uv's managed python, where `pip install` is denied naming a path
+  nobody put in the policy. The standalone distribution lays down a real binary
+  at a path this project chooses, so the rule can name
+  `/usr/local/rust/bin/cargo` and be right on every architecture. Verified: that
+  is exactly what `readlink -f $(command -v cargo)` reports in the built image,
+  and `/usr/local/dotnet/dotnet` for the .NET muxer behind its symlink. A test
+  checks every rule's path against the layer that installs it.
+
+  **The environment had to go through tmux.** `ENV` in an image does not reach
+  the agent -- the gateway does not pass it through to an exec, which is why the
+  seeder exports the locale by hand -- so `CARGO_HOME`, `NUGET_PACKAGES`,
+  `DOTNET_CLI_HOME` and the two telemetry opt-outs are appended to
+  `/etc/tmux.conf` as `set-environment -g`, the way the base image already
+  handles `LANG`. Verified in a pane. Everything a build writes lands under
+  `/sandbox`; `/usr/local` stays read-only to the agent, so it cannot replace its
+  own compiler.
+
+  **The form arrives filled in**, in the spirit of increment 15: `repos::inspect`
+  now also reads the checkout for markers -- `Cargo.toml`, `package.json`, a
+  `.csproj` one level down -- and the create form ticks what it finds, skipping
+  build output and vendored dependencies, which contain every marker there is.
+  A tick changed by hand survives an answer that arrives afterwards.
+
+  **Verified against a live gateway**, which is where the last piece came from.
+  `cargo fetch` and `dotnet add package` both work through the gateway; `curl`
+  and `node` reaching the same hosts are denied at the CONNECT tunnel with a 403,
+  and the feed names the binary and the rule. The dotnet restore also left six
+  denials nobody would want -- NuGet checking its *signing* certificates against
+  `crl3.digicert.com`, `ocsp.digicert.com` and `www.microsoft.com/pkiops/crl` --
+  which is a soft-fail check the restore does not need. Allowing three more hosts
+  or not making the request: `NUGET_CERT_REVOCATION_MODE=offline` is the second,
+  and the same restore now leaves ten allows and no denials at all.
+
+  **`sbx doctor` says what each variant carries**, read from a manifest the
+  layers write inside the image rather than inferred from the tag, and warns when
+  a variant is older than the base it sits on -- rebuilding the base for a newer
+  agent leaves the variants on the old one, and nothing about that looks wrong
+  from outside.
+
 ### Later, unscheduled
 
 - **Warm pool** — less urgent than expected: sandbox creation is ~1s with the
@@ -1239,6 +1315,10 @@ Increments 0-21 are done. What is left is the unscheduled list below.
   forever for that sandbox. `sbx doctor <session>` could detect it (exec with a
   short timeout) and offer `sandbox stop && sandbox start` as a repair before
   falling back to recreating.
+- **More toolchains** — go, a JDK, and the build tool each one implies (`go` is
+  the cleanest: one tarball, a real binary, `proxy.golang.org`). A toolchain is
+  now a table entry in `toolchain.rs` plus a Dockerfile fragment, and the tests
+  there check the three halves against each other.
 - **Multiple agents** — the `agent` field is already stored per session and
   hardcoded to `claude`. codex, opencode and copilot are all in the community
   policy, so most of the work is policy templates plus a launch command.
