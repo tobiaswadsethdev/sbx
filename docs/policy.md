@@ -28,6 +28,22 @@ process sections are fixed when the sandbox is created, and the gateway will
 accept a change to them, report it as effective, and never enforce it, so the
 pane labels them and declines to offer it.
 
+`w` offers npm and PyPI and not crates.io or nuget, which is not an oversight:
+it grants them to `/usr/bin/node` and `/usr/local/bin/uv`, and those are in every
+sandbox because the base image has them. A rule for cargo in a sandbox with no
+cargo in it would be decoration -- the same argument `net-open.yaml` makes. A
+toolchain is what brings both halves: `sbx new --toolchain rust` runs the session
+on an image carrying cargo *and* opens crates.io for it, so a rule like
+
+```
+network - allow_index_crates_io_443
+  binaries    /usr/local/rust/bin/cargo
+  endpoint    index.crates.io:443  rest  enforce  read-only
+```
+
+in the pane came from `--toolchain`, granted at create to that binary and to
+nothing else in the sandbox. See [toolchains.md](toolchains.md).
+
 ## Acting on a denial
 
 `w` and `t` are one preset. The events feed is where the *specific* answer lives:

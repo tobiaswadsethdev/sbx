@@ -94,7 +94,8 @@ newer release is out.
 
 `sbx doctor` is the one to run when something looks wrong -- it checks the
 gateway, Docker, tmux, lingering, the image and the Claude Code version in it,
-plus the providers, skills and MCP servers your config names:
+plus the providers, skills and MCP servers your config names and the toolchain
+variants you have built:
 
 ```
 [  ok  ] version      sbx 0.1.0, newest
@@ -164,7 +165,7 @@ Contributions are welcome -- issues, questions and pull requests alike.
 strategy and what a reviewable change looks like here; the short version is:
 
 ```sh
-cargo test --workspace               # 397 tests, no gateway or Docker needed
+cargo test --workspace               # 403 tests, no gateway or Docker needed
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
