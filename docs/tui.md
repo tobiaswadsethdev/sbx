@@ -112,12 +112,15 @@ enter to choose -- and then a form for everything `sbx new` takes:
 │name       fix-the-readme                                                     │
 │base       main                                                               │
 │policy     < feature-work >  clone, agent, push (github + azure devops)       │
+│tools        [ ] dotnet     the .NET SDK, and nuget                           │
+│             [ ] node       node and npm (already in the base image), and t..  │
+│             [x] rust       rustc, cargo, fmt and clippy, and crates.io       │
 │providers    [x] claude-oauth          claude-code-oauth                      │
 │             [ ] azure-pat             azure-devops-pat                       │
 │                                                                              │
 │ staying on the host: 9 uncommitted file(s), 2 unpushed commit(s)             │
 └──────────────────────────────────────────────────────────────────────────────┘
- tab field  </> policy  space provider  enter create  esc back
+ tab field  </> policy  space toggle  enter create  esc back
 ```
 
 The repository on disk is how you *name a remote*, not what gets copied: the
@@ -132,6 +135,15 @@ in use: a second session in a repository that already has one derives
 `inet-server-2` rather than refusing to start until you rename it by hand. With
 no task typed the repository's own name is the guess, which is exactly when that
 collision happens.
+
+`tools` is the toolchains the sandbox image should carry, and it usually arrives
+answered: a checkout with a `Cargo.toml` in it comes up with `rust` ticked, one
+with a `.csproj` a level down with `dotnet`. Each set of toolchains is its own
+image variant, so a session asking for one that has not been built yet is
+refused with the `sbx image build --toolchain ...` that builds it -- that build
+streams docker's output, which a full-screen interface cannot host.
+[toolchains.md](toolchains.md) covers what each one installs and what it may
+reach.
 
 The policy is the same three templates `sbx policies` lists. The providers are
 the ones the gateway has: the agent's credential and the repository host's are

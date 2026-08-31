@@ -18,6 +18,7 @@ mod session;
 mod skills;
 mod status;
 mod store;
+mod toolchain;
 mod tui;
 mod update;
 
@@ -83,6 +84,9 @@ enum Command {
 
     /// List the policy templates shipped with this binary.
     Policies,
+
+    /// List the toolchains a sandbox image can be built with.
+    Toolchains,
 
     /// Show the defaults read from the config file, and where they came from.
     Config {
@@ -185,6 +189,15 @@ struct NewArgs {
     #[arg(long = "provider")]
     providers: Vec<String>,
 
+    /// Toolchain the sandbox should carry. Repeatable, or comma-separated.
+    ///
+    /// Each set of toolchains is its own image variant, layered onto the base
+    /// image and built on first use; `sbx toolchains` lists them. A toolchain
+    /// also opens its package registry for the binary that fetches from it, and
+    /// for nothing else in the sandbox.
+    #[arg(long = "toolchain", value_delimiter = ',')]
+    toolchains: Vec<String>,
+
     /// Create the sandbox and clone, but do not start the agent.
     #[arg(long)]
     no_start: bool,
@@ -193,7 +206,15 @@ struct NewArgs {
 #[derive(Subcommand)]
 enum ImageAction {
     /// Build the sandbox image (community base plus tmux).
-    Build,
+    Build {
+        /// Toolchain to layer in. Repeatable, or comma-separated.
+        ///
+        /// Builds `sbx-base:<toolchains>` on top of the base image, building the
+        /// base first if it is missing. Without this, the base image itself is
+        /// built, which is what a session with no toolchain runs.
+        #[arg(long = "toolchain", value_delimiter = ',')]
+        toolchains: Vec<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -240,6 +261,10 @@ fn main() -> ExitCode {
             println!("{}", policy::help());
             return ExitCode::SUCCESS;
         }
+        Some(Command::Toolchains) => {
+            println!("{}", toolchain::help());
+            return ExitCode::SUCCESS;
+        }
         Some(Command::Publish {
             name,
             title,
@@ -259,7 +284,10 @@ fn main() -> ExitCode {
             },
         ),
         Some(Command::Image { action }) => match action {
-            ImageAction::Build => image::build().map_err(Into::into),
+            ImageAction::Build { toolchains } => match toolchain::resolve(&toolchains) {
+                Ok(chains) => image::build_variant(&chains).map_err(Into::into),
+                Err(e) => Err(e.into()),
+            },
         },
         Some(Command::Update { check, tag, force }) => cmd_update(check, tag.as_deref(), force),
         Some(Command::Rm { names }) => cmd_rm(&client, names),
@@ -310,13 +338,17 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
         // a URL typed on a command line would be a policy hole opened by hand.
         mcp: cfg.mcp().to_vec(),
         skills: cfg.skills().to_vec(),
+        // Resolved before anything is created, so an unknown name fails here
+        // rather than as a docker tag nothing has ever built.
+        toolchains: toolchain::resolve(&args.toolchains)?,
         start: !args.no_start,
     };
 
     // Here rather than inside ops::create, which never builds the image: the
     // build streams docker's output to the terminal, which only a command-line
-    // caller can afford.
-    image::ensure()?;
+    // caller can afford. The first session wanting a toolchain pays for the
+    // variant; every one after it starts as fast as any other.
+    image::ensure_for(&draft.toolchains)?;
 
     let repo = draft.repo.clone();
     let created = ops::create(client, &draft, &mut |step| match step {
@@ -341,6 +373,9 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
     println!("session  {}", s.name);
     println!("sandbox  {}", s.sandbox);
     println!("policy   {}", s.policy.as_deref().unwrap_or("-"));
+    if !s.toolchains.is_empty() {
+        println!("tools    {}", s.toolchains.join(", "));
+    }
     println!("branch   {}", s.work_branch);
     println!("workdir  {}", session::REPO_PATH);
     Ok(())

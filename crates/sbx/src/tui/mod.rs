@@ -3579,6 +3579,7 @@ mod tests {
                 uncommitted: 9,
                 unpushed: None,
                 base_on_remote: false,
+                toolchains: Vec::new(),
             }),
         });
         match &app.create {

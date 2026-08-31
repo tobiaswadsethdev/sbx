@@ -121,12 +121,26 @@ fn spawn_create(client: CliClient, up_tx: Sender<Update>, draft: ops::Draft) {
         let name = draft.name.clone();
         // Checked here rather than built: `image::build` streams docker's output
         // to the terminal, which would tear the TUI apart mid-frame.
-        if !crate::image::exists() {
+        //
+        // The image the *draft* needs, not the base one: a session asking for a
+        // toolchain runs a variant, and a variant nobody has built yet fails at
+        // the gateway with docker's words about a manifest. The message names the
+        // command that builds it, which is a command line rather than a
+        // keystroke for the reason above.
+        let tag = crate::toolchain::tag(&draft.toolchains);
+        if !crate::image::exists_tag(&tag) {
+            let fix = if draft.toolchains.is_empty() {
+                "sbx image build".to_string()
+            } else {
+                format!(
+                    "sbx image build --toolchain {}",
+                    crate::toolchain::labels(&draft.toolchains).join(",")
+                )
+            };
             let _ = up_tx.send(Update::Created {
                 session: name,
                 result: Box::new(Err(format!(
-                    "the sandbox image {} is missing; run `sbx image build`",
-                    crate::session::IMAGE
+                    "the sandbox image {tag} is missing; run `{fix}`"
                 ))),
             });
             return;

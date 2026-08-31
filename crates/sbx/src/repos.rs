@@ -363,6 +363,10 @@ pub struct Facts {
     /// cannot be cloned from, so the form falls back to the remote's default
     /// branch rather than handing the gateway a clone that will fail.
     pub base_on_remote: bool,
+    /// Toolchains the checkout looks like it needs, by name. See
+    /// [`crate::toolchain::detect`]: the form ticks these rather than asking
+    /// what the repository has already answered.
+    pub toolchains: Vec<String>,
 }
 
 /// Ask git about a repository. One call site, on the repository actually
@@ -403,6 +407,10 @@ pub fn inspect(path: &Path, branch: Option<&str>) -> Facts {
         uncommitted,
         unpushed,
         base_on_remote,
+        // A `read_dir` of the root and one level under it, not a subprocess and
+        // not a walk: this runs on the worker thread beside the git calls above,
+        // and it is the cheapest thing in the function.
+        toolchains: crate::toolchain::labels(&crate::toolchain::detect(path)),
     }
 }
 

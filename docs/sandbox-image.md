@@ -40,6 +40,20 @@ download is checked against the release manifest's SHA-256.
 `--build-arg CLAUDE_VERSION=2.1.246` pins a specific one. `sbx doctor` reports
 what the built image carries and warns when a newer release is out.
 
+## Toolchains
+
+The image above is the *base*, and what a session with no toolchain runs. A
+session that has to compile something runs a variant of it -- `sbx-base:dotnet`,
+`sbx-base:dotnet-rust` -- built by layering the toolchain onto this image, so
+docker shares the several gigabytes underneath and a Rust session does not carry
+the .NET SDK.
+
+A toolchain is installed here for the reason Claude Code's version is: the agent
+has no writable install path and no route to a download host, so it could not do
+it from inside and widening the policy far enough that it could would defeat the
+point. [toolchains.md](toolchains.md) is the whole story -- the variants, the
+registry each toolchain opens, and what to change to add one.
+
 ---
 
 [← Documentation](README.md) · [README](../README.md)

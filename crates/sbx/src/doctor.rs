@@ -230,6 +230,73 @@ fn check_image() -> Check {
     }
 }
 
+/// The toolchain variants that are built, and whether they are still current.
+///
+/// Only when there are some: a variant is a per-session choice, so its absence is
+/// not a problem to report -- unlike the base image, which every session needs.
+///
+/// The staleness half is the part worth a check. A variant is `FROM
+/// sbx-base:latest`, so rebuilding the base for a newer agent leaves every
+/// variant behind it, and nothing about that looks wrong from outside: sessions
+/// start, the toolchain works, and the agent is whatever version it was when the
+/// variant was built.
+fn rebuild_commands(tags: &[String]) -> Vec<String> {
+    tags.iter()
+        .filter_map(|tag| tag.split_once(':'))
+        .map(|(_, toolchains)| {
+            format!(
+                "sbx image build --toolchain {}",
+                toolchains.replace('-', ",")
+            )
+        })
+        .collect()
+}
+
+fn check_toolchains() -> Option<Check> {
+    let variants = crate::image::variants();
+    if variants.is_empty() {
+        return None;
+    }
+
+    let stale = crate::image::stale_variants();
+    if !stale.is_empty() {
+        return Some(Check::warn(
+            "toolchains",
+            format!(
+                "{} older than {}, so still on its previous agent",
+                stale.join(", "),
+                crate::session::IMAGE
+            ),
+            // One command per variant, because each is its own build. The tag's
+            // toolchains are joined with `-` and `--toolchain` takes them
+            // comma-separated, so `sbx-base:dotnet-rust` turns back into
+            // `--toolchain dotnet,rust`.
+            rebuild_commands(&stale).join("; "),
+        ));
+    }
+
+    // What each one carries, read from the image's own manifest rather than
+    // inferred from its tag: the tag is a claim about what was asked for, the
+    // manifest is what the layers installed.
+    let built: Vec<String> = variants
+        .iter()
+        .map(|tag| {
+            let carried = crate::image::toolchains_in(tag)
+                .iter()
+                .map(|(name, version)| format!("{name} {version}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if carried.is_empty() {
+                tag.clone()
+            } else {
+                format!("{tag} ({carried})")
+            }
+        })
+        .collect();
+
+    Some(Check::ok("toolchains", built.join("; ")))
+}
+
 /// How long to wait for a published MCP port to answer.
 ///
 /// It is on the loopback bridge, so a server that is up answers in microseconds
@@ -401,6 +468,7 @@ pub fn run(client: &dyn OpenShell, config: &Result<Config, config::Error>) -> Ve
         check_linger(),
         check_image(),
     ];
+    checks.extend(check_toolchains());
     // Only when the file names some, since the check is about the file being
     // right rather than about providers existing.
     if let Ok(cfg) = config
@@ -488,5 +556,32 @@ pub fn report(checks: &[Check]) -> i32 {
     } else {
         println!("all checks passed");
         0
+    }
+}
+
+/// The fix a stale variant is given has to be the command that rebuilds *that*
+/// variant, not the base image: rebuilding the base is what made it stale.
+#[cfg(test)]
+mod toolchain_tests {
+    use super::rebuild_commands;
+
+    #[test]
+    fn a_stale_variant_is_told_how_to_rebuild_itself() {
+        assert_eq!(
+            rebuild_commands(&["sbx-base:dotnet".to_string()]),
+            ["sbx image build --toolchain dotnet"]
+        );
+        // The tag joins with `-`, the flag takes `,`.
+        assert_eq!(
+            rebuild_commands(&["sbx-base:dotnet-rust".to_string()]),
+            ["sbx image build --toolchain dotnet,rust"]
+        );
+        // One command each, since each is its own build.
+        assert_eq!(
+            rebuild_commands(&["sbx-base:dotnet".into(), "sbx-base:rust".into()]).len(),
+            2
+        );
+        // Nothing invented from something that is not a tag.
+        assert!(rebuild_commands(&["sbx-base".to_string()]).is_empty());
     }
 }

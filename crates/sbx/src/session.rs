@@ -44,6 +44,12 @@ pub const SEED_SCRIPT_PATH: &str = "/sandbox/.sbx/seed.sh";
 pub const TMUX_SESSION: &str = "agent";
 /// Container image sbx runs sandboxes from: the community base plus tmux.
 pub const IMAGE: &str = "sbx-base:latest";
+/// The repository half of [`IMAGE`], which the toolchain variants share.
+///
+/// Its own constant because a variant tag is built from it -- `sbx-base:dotnet`
+/// beside `sbx-base:latest` -- and two `format!`s spelling the name out would be
+/// two places to rename it. See [`crate::toolchain::tag`].
+pub const IMAGE_REPO: &str = "sbx-base";
 
 /// Gateway limit on a label value.
 const MAX_LABEL_VALUE: usize = 63;
@@ -342,6 +348,15 @@ pub struct Session {
     /// session is what it was actually created with.
     #[serde(default)]
     pub mcp: Vec<crate::mcp::Server>,
+    /// Toolchains this session's image carries, by name.
+    ///
+    /// Recorded for the reason the whole record exists: the sandbox is the source
+    /// of truth about itself. The image variant it was created from may have been
+    /// rebuilt or deleted since, and what matters for reading this session is
+    /// what it was actually given -- which is also what says why its policy holds
+    /// a registry endpoint no template grants.
+    #[serde(default)]
+    pub toolchains: Vec<String>,
     #[serde(default = "default_agent")]
     pub agent: String,
     /// Epoch seconds. Deliberately not a formatted timestamp: the display wants
@@ -386,6 +401,7 @@ impl Session {
             providers: Vec::new(),
             skills: Vec::new(),
             mcp: Vec::new(),
+            toolchains: Vec::new(),
             agent: default_agent(),
             created_at: now_epoch(),
             state: State::Creating,
@@ -403,6 +419,14 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A variant tag is `IMAGE_REPO` plus the toolchains, and the base image is
+    /// the same repository with `latest`. If those two drifted apart, every
+    /// variant would be built under a name nothing looks for.
+    #[test]
+    fn the_base_image_and_the_variants_share_a_repository() {
+        assert_eq!(IMAGE, format!("{IMAGE_REPO}:latest"));
+    }
 
     /// Two sessions in one repository is the normal case, and with no task typed
     /// both derive the repository's name. The second must not need hand-editing.

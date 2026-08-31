@@ -15,6 +15,7 @@ use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session, St
 use crate::skills;
 use crate::status;
 use crate::store::{self, Store};
+use crate::toolchain::{self, Toolchain};
 
 /// How much of the agent's pane to capture.
 ///
@@ -171,6 +172,13 @@ pub struct Draft {
     /// [`create`] one complete description of the session and neither can
     /// create one this module then quietly changes.
     pub mcp: Vec<mcp::Server>,
+    /// Toolchains the sandbox image carries, already resolved.
+    ///
+    /// Per-session, unlike `mcp` and `skills`: which toolchain a task needs is a
+    /// fact about the repository, and a session that does not need the .NET SDK
+    /// should not be carrying it. Resolved before it reaches here, so an unknown
+    /// name fails against a command line rather than against docker.
+    pub toolchains: Vec<&'static Toolchain>,
     /// Whether to start the agent once the clone is done.
     pub start: bool,
 }
@@ -314,6 +322,34 @@ fn impose_mcp(
     }
 }
 
+/// Open the package registries the session's toolchains need.
+///
+/// A warning rather than a failure, on the same reading as [`impose_mcp`]: a
+/// registry that could not be opened leaves a session whose agent builds against
+/// what is already vendored and reports a denial the moment it restores. The
+/// events pane says so out loud, which is the test for whether a failure is worth
+/// refusing to create a session over -- a *block* that does not land is silent,
+/// and that is the one that is fatal.
+///
+/// Costs one `policy update --wait` per distinct binary list -- about six seconds
+/// each, and at most one per toolchain. Only for a session that asked for one.
+fn impose_toolchains(
+    client: &dyn OpenShell,
+    sandbox: &str,
+    chains: &[&'static Toolchain],
+    warnings: &mut Vec<String>,
+) {
+    for update in toolchain::updates(chains) {
+        if let Err(e) = client.policy_update(sandbox, &update) {
+            warnings.push(format!(
+                "the toolchain registries could not be opened, so {} is not \
+                 reachable and a restore will be denied: {e}",
+                update.add_endpoints.join(", ")
+            ));
+        }
+    }
+}
+
 /// Create a sandbox, clone the repository, cut the work branch, start the agent.
 ///
 /// The order matters and is the reason this is one function rather than steps a
@@ -323,8 +359,9 @@ fn impose_mcp(
 ///
 /// The sandbox image is deliberately *not* built here. `image::build` streams
 /// docker's output to the terminal, which would tear a TUI apart; the CLI calls
-/// [`crate::image::ensure`] before this, and the TUI refuses to create until
-/// the image is there. See the doc comment on [`crate::image::ensure`].
+/// [`crate::image::ensure_for`] before this, and the TUI refuses to create until
+/// the image the draft's toolchains name is there. See the doc comment on
+/// [`crate::image::ensure`].
 pub fn create(
     client: &dyn OpenShell,
     draft: &Draft,
@@ -366,6 +403,7 @@ pub fn create(
     s.providers = draft.providers.clone();
     s.mcp = draft.mcp.clone();
     s.skills = draft.skills.clone();
+    s.toolchains = toolchain::labels(&draft.toolchains);
 
     progress(Step::Sandbox);
     let opts = CreateOpts {
@@ -373,7 +411,10 @@ pub fn create(
         labels: s.labels(),
         policy: Some(resolved.path().to_path_buf()),
         providers: draft.providers.clone(),
-        from: Some(session::IMAGE.to_string()),
+        // The base image for a session with no toolchain, and the variant
+        // carrying exactly the ones asked for otherwise. Not built here, for the
+        // reason the base image is not: see the note above about docker's output.
+        from: Some(toolchain::tag(&draft.toolchains)),
         // Keep the sandbox alive after the create command exits.
         command: vec!["true".into()],
         ..Default::default()
@@ -415,6 +456,7 @@ pub fn create(
         return Err(e);
     }
     impose_mcp(client, &s.sandbox, &s.mcp, &mut warnings);
+    impose_toolchains(client, &s.sandbox, &draft.toolchains, &mut warnings);
 
     // The seeder packs the skills itself; this is the same pack, thrown away,
     // for its warnings. A skill that cannot be read is worth saying out loud

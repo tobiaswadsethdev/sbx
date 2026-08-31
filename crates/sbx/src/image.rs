@@ -8,12 +8,22 @@
 //! `COPY` has nothing to copy from without one, and the alternative -- heredocs
 //! in the Dockerfile -- silently requires BuildKit: the legacy builder ignores
 //! the `# syntax=` directive and fails with "no source files were specified".
+//!
+//! **Two kinds of image.** The base, `sbx-base:latest`, is what a session with no
+//! toolchain runs. A *variant* -- `sbx-base:dotnet`, `sbx-base:dotnet-rust` -- is
+//! the base plus one layer per toolchain, so docker shares the base's several
+//! gigabytes and only the toolchains asked for are ever built. The base is a
+//! prerequisite of every variant, which is why the variant build ensures it
+//! first: a variant whose `FROM` is missing fails with docker's words about a
+//! manifest, several lines away from the thing to do about it. See
+//! [`crate::toolchain`] for what a toolchain is beyond its install.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::session::IMAGE;
+use crate::session::{IMAGE, IMAGE_REPO};
+use crate::toolchain::{self, Toolchain};
 
 const DOCKERFILE: &str = include_str!("../../../images/sbx-base/Dockerfile");
 /// Writes `/sandbox/.sbx/status.json` from Claude Code's hooks.
@@ -29,8 +39,14 @@ const CONTEXT: [(&str, &str); 3] = [
 ];
 
 pub fn exists() -> bool {
+    exists_tag(IMAGE)
+}
+
+/// Whether a particular tag is built. The base image or one of the toolchain
+/// variants; see [`crate::toolchain::tag`].
+pub fn exists_tag(tag: &str) -> bool {
     Command::new("docker")
-        .args(["image", "inspect", IMAGE])
+        .args(["image", "inspect", tag])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -106,6 +122,163 @@ fn run_build(dir: &Path, claude: Option<&str>) -> Result<(), String> {
         return Err(format!("docker build exited with {status}"));
     }
     Ok(())
+}
+
+/// Build the variant image carrying `chains`, and the base image under it if it
+/// is not there yet.
+///
+/// Streams docker's output like [`build`], and for the same reason: a toolchain
+/// layer is a several-hundred-megabyte download, and a build that says nothing
+/// for two minutes looks hung.
+///
+/// Nothing to do when the variant is already built. That is not a cache: the tag
+/// is a pure function of the set of toolchains ([`crate::toolchain::tag`]), so a
+/// tag that exists carries exactly what was asked for. What it does *not*
+/// guarantee is that the base underneath it is still the one in front of you --
+/// rebuilding the base for a newer agent leaves the variants behind it, which is
+/// what [`stale_variants`] exists to say out loud.
+pub fn build_variant(chains: &[&'static Toolchain]) -> Result<(), String> {
+    if chains.is_empty() {
+        return build();
+    }
+    let tag = toolchain::tag(chains);
+    ensure()?;
+
+    let dir = write_variant_context(chains)?;
+    println!("building {tag} ({})", toolchain::labels(chains).join(", "));
+    let result = run_variant_build(&dir, &tag);
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+/// The variant's context: one generated Dockerfile and nothing else.
+///
+/// A directory rather than stdin for the reason the base build uses one -- and
+/// unlike the base there is nothing to `COPY`, so this is the one case where
+/// piping would work. It writes a file anyway, because a build that fails is
+/// worth being able to read, and because the two builds then differ in their
+/// content rather than in their mechanism.
+fn write_variant_context(chains: &[&'static Toolchain]) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join(format!("sbx-variant-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
+    let path = dir.join("Dockerfile");
+    fs::write(&path, toolchain::dockerfile(chains))
+        .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(dir)
+}
+
+/// The variant `docker build` argv. Split out for the same reason as
+/// [`build_argv`]: the wiring is worth a test that does not need docker.
+fn variant_build_argv(dir: &Path, tag: &str) -> Vec<String> {
+    vec![
+        "build".to_string(),
+        "-t".to_string(),
+        tag.to_string(),
+        dir.display().to_string(),
+    ]
+}
+
+fn run_variant_build(dir: &Path, tag: &str) -> Result<(), String> {
+    let status = Command::new("docker")
+        .args(variant_build_argv(dir, tag))
+        .status()
+        .map_err(|e| format!("could not run docker: {e}"))?;
+    if !status.success() {
+        return Err(format!("docker build exited with {status}"));
+    }
+    Ok(())
+}
+
+/// The toolchains a built image records carrying, as `(name, version)`.
+///
+/// Read from the image rather than inferred from its tag, because a tag is a
+/// claim and the manifest is what the layers actually installed. A container
+/// start, so it belongs where the answer is the point -- `sbx doctor` -- and
+/// never on a path a session waits on.
+///
+/// An empty vector for the base image, which carries no manifest: that is the
+/// honest answer, not a failure.
+pub fn toolchains_in(tag: &str) -> Vec<(String, String)> {
+    let out = Command::new("docker")
+        .args([
+            "run",
+            "--rm",
+            "--entrypoint",
+            "cat",
+            tag,
+            toolchain::MANIFEST_PATH,
+        ])
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .map(|(name, version)| (name.to_string(), version.trim().to_string()))
+        .collect()
+}
+
+/// Variant tags that exist, newest first, as docker reports them.
+pub fn variants() -> Vec<String> {
+    let out = Command::new("docker")
+        .args([
+            "image",
+            "ls",
+            "--filter",
+            &format!("reference={IMAGE_REPO}"),
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ])
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty() && *tag != IMAGE && !tag.ends_with(":<none>"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Variants built before the base image they sit on.
+///
+/// A variant is `FROM sbx-base:latest`, so rebuilding the base -- which is what
+/// picks up a newer Claude Code -- leaves every variant on the old one. Nothing
+/// about that looks wrong: sessions start, the toolchain works, and the agent is
+/// the version it was months ago. This is the check that says so.
+///
+/// Timestamps compare as strings because docker reports RFC 3339 in UTC, where
+/// lexical and chronological order agree. Anything that cannot be read is
+/// treated as not-stale, for the reason [`is_older`] stays quiet on a version
+/// scheme it does not understand: a `doctor` that nags about what it cannot
+/// establish is one people stop reading.
+pub fn stale_variants() -> Vec<String> {
+    let Some(base) = created(IMAGE) else {
+        return Vec::new();
+    };
+    variants()
+        .into_iter()
+        .filter(|tag| created(tag).is_some_and(|built| built < base))
+        .collect()
+}
+
+/// When an image was built, as docker reports it.
+fn created(tag: &str) -> Option<String> {
+    let out = Command::new("docker")
+        .args(["image", "inspect", tag, "--format", "{{.Created}}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let created = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!created.is_empty()).then_some(created)
 }
 
 /// Whether the built image carries the status reporter.
@@ -211,6 +384,24 @@ pub fn ensure() -> Result<bool, String> {
     }
     println!("building {IMAGE} (first run, this takes a minute) ...");
     build()?;
+    Ok(true)
+}
+
+/// Build the image a session with these toolchains needs, if it is missing.
+///
+/// The same contract as [`ensure`] and the same caller: a command line, never the
+/// TUI, because the build streams docker's output. A first `--toolchain dotnet`
+/// pays for the SDK once and every session after it starts as fast as any other.
+pub fn ensure_for(chains: &[&'static Toolchain]) -> Result<bool, String> {
+    if chains.is_empty() {
+        return ensure();
+    }
+    let tag = toolchain::tag(chains);
+    if exists_tag(&tag) {
+        return Ok(false);
+    }
+    println!("building {tag} (first use of these toolchains, this takes a while) ...");
+    build_variant(chains)?;
     Ok(true)
 }
 
@@ -367,6 +558,41 @@ mod tests {
         let argv = build_argv(dir, None);
         assert!(!argv.iter().any(|a| a == "--build-arg"), "{argv:?}");
         assert_eq!(argv.last().unwrap(), "/tmp/ctx");
+    }
+
+    /// A variant is built from a generated Dockerfile and no other context, and
+    /// it must be tagged with the toolchains rather than over the base image --
+    /// a variant built as `sbx-base:latest` would replace the thing it is
+    /// layered on.
+    #[test]
+    fn a_variant_builds_from_its_own_context_under_its_own_tag() {
+        let chains = toolchain::resolve(&["rust".to_string()]).expect("rust");
+        let dir = write_variant_context(&chains).expect("write context");
+        let written = fs::read_to_string(dir.join("Dockerfile")).expect("Dockerfile");
+        assert_eq!(written, toolchain::dockerfile(&chains));
+        assert_eq!(
+            fs::read_dir(&dir).unwrap().count(),
+            1,
+            "a variant needs nothing to COPY"
+        );
+        fs::remove_dir_all(&dir).expect("cleanup");
+
+        let argv = variant_build_argv(Path::new("/tmp/ctx"), "sbx-base:rust");
+        assert_eq!(argv, ["build", "-t", "sbx-base:rust", "/tmp/ctx"]);
+        assert_ne!(
+            argv[2], IMAGE,
+            "a variant must not overwrite the base image"
+        );
+    }
+
+    /// `variants` lists the toolchain images and not the base, since the base is
+    /// reported by its own check and would otherwise be named twice.
+    #[test]
+    fn the_variant_filter_is_the_image_repository() {
+        // The filter docker is given, spelled out here so a rename of either
+        // constant is caught by a test rather than by an empty list.
+        assert_eq!(IMAGE_REPO, "sbx-base");
+        assert!(IMAGE.starts_with(IMAGE_REPO));
     }
 
     /// Reaches the network, so it is not part of the default run. Kept because

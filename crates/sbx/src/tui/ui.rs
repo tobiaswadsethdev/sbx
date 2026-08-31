@@ -667,6 +667,10 @@ fn meta_lines(app: &App, session: &Session, width: usize) -> Vec<Line<'static>> 
     ] {
         lines.push(fact(label, value, value_w));
     }
+    let toolchains = session.toolchains.join(", ");
+    if !toolchains.is_empty() {
+        lines.push(fact("tools", &toolchains, value_w));
+    }
     let providers = session.providers.join(", ");
     if !providers.is_empty() {
         lines.push(fact("providers", &providers, value_w));
@@ -1124,7 +1128,10 @@ const KEYS_PICK: &[Group] = &[
     &[("enter", "pick"), ("esc", "cancel")],
 ];
 const KEYS_FORM: &[Group] = &[
-    &[("tab", "field"), ("</>", "policy"), ("space", "provider")],
+    // `toggle` rather than `provider`: space acts on whichever of the two
+    // multi-select fields has the cursor, and naming one of them read as the
+    // other not being togglable.
+    &[("tab", "field"), ("</>", "policy"), ("space", "toggle")],
     &[("enter", "create"), ("esc", "back")],
 ];
 
@@ -1558,6 +1565,34 @@ fn draw_form(frame: &mut Frame, form: &Form, area: Rect) {
         ),
     ]));
 
+    // The same widget as the provider list below, over a list this module did
+    // not have to be told about: every toolchain, with the ones the checkout
+    // points at already ticked.
+    for (i, choice) in form.toolchains().iter().enumerate() {
+        let cursor = form.field() == Field::Toolchains && i == form.toolchain_cursor();
+        lines.push(Line::from(vec![
+            if i == 0 {
+                label(Field::Toolchains)
+            } else {
+                Span::raw(" ".repeat(LABEL_W))
+            },
+            Span::raw(if cursor { "> " } else { "  " }),
+            Span::styled(
+                if choice.selected { "[x] " } else { "[ ] " },
+                if choice.selected {
+                    Style::default().fg(Color::Green)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            ),
+            Span::raw(format!("{:<9}", truncate(&choice.name, 9))),
+            Span::styled(
+                truncate(&choice.kind, value_w.saturating_sub(15)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
     let providers = form.providers();
     if providers.is_empty() {
         lines.push(Line::from(vec![
@@ -1895,6 +1930,7 @@ diff --git a/b b/b
                 uncommitted: 0,
                 unpushed: Some(0),
                 base_on_remote: true,
+                toolchains: Vec::new(),
             })),
             None,
             "in sync: no warning to give"
@@ -1904,6 +1940,7 @@ diff --git a/b b/b
             uncommitted: 3,
             unpushed: Some(2),
             base_on_remote: true,
+            toolchains: Vec::new(),
         }))
         .unwrap();
         assert!(note.contains("3 uncommitted"), "{note}");
@@ -1914,6 +1951,7 @@ diff --git a/b b/b
             uncommitted: 0,
             unpushed: None,
             base_on_remote: false,
+            toolchains: Vec::new(),
         }))
         .unwrap();
         assert!(note.contains("no upstream"), "{note}");
@@ -2535,13 +2573,20 @@ diff --git a/b b/b
                 uncommitted: 9,
                 unpushed: Some(2),
                 base_on_remote: true,
+                toolchains: vec!["dotnet".into()],
             }),
         });
 
-        let rows = render(&mut app, 100, 26);
+        let rows = render(&mut app, 100, 30);
         let body = rows.join("\n");
         assert!(body.contains("new session"), "{body}");
         assert!(body.contains("feature-work"), "the default policy: {body}");
+        // Every toolchain is offered, and the one the checkout points at is
+        // already ticked -- the field exists so the TUI can answer this at all,
+        // and it earns its rows by usually being right.
+        assert!(body.contains("[x] dotnet"), "detected, so ticked: {body}");
+        assert!(body.contains("[ ] rust"), "offered, not ticked: {body}");
+        assert!(body.contains("[ ] node"), "{body}");
         // The agent's credential, and the one for this repository's host: an
         // Azure repo with exactly one Azure PAT defined leaves no ambiguity.
         assert!(body.contains("[x] claude-oauth"), "preselected: {body}");

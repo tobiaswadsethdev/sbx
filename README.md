@@ -54,6 +54,9 @@ curl https://github.com                                 -> DENIED
   changing a rule for a running session.
 * **Several agents at once, without babysitting.** A session blocked on a
   permission prompt says so in the list, so watching is cheaper than attaching.
+* **A toolchain when the task needs one.** `--toolchain dotnet` runs the session
+  on an image variant carrying the SDK, and opens nuget for the SDK's binary and
+  nothing else. The create form ticks it from what the repository contains.
 * **The parts of your setup that matter, carried in.** Skills are copied into
   each sandbox; MCP servers run on the host, holding their own credentials, and
   are granted per-binary like everything else.
@@ -108,6 +111,7 @@ plus the providers, skills and MCP servers your config names:
 ```sh
 sbx doctor                                    # check gateway, docker, tmux, image
 sbx image build                               # build the sandbox image (automatic on first use)
+sbx image build --toolchain dotnet,rust       # ... plus toolchains, as their own image variant
 sbx new --repo <url> --task "what to do"      # sandbox + clone + branch + agent
 sbx ls                                        # sessions, reconciled with the gateway
 sbx attach <name>                             # attach to the agent; Ctrl-b d to detach
@@ -115,6 +119,7 @@ sbx diff <name>                               # what the agent has changed so fa
 sbx policy <name>                             # the policy the gateway is enforcing
 sbx events <name>                             # recent allow/deny decisions
 sbx policies                                  # the policy templates shipped in the binary
+sbx toolchains                                # the toolchains a sandbox image can be built with
 sbx config                                    # the defaults in force, and where they came from
 sbx config --init                             # write a commented ~/.config/sbx/config.toml
 sbx publish <name>                            # push the branch and open a pull request
@@ -132,6 +137,10 @@ in the binary, and `feature-work` is the default:
 | `feature-work` | clone, agent, push, open PRs; nothing else reachable |
 | `net-open` | `feature-work` plus the npm and PyPI registries |
 
+A package registry is otherwise a *toolchain's* to open, not a template's:
+`--toolchain rust` grants crates.io to cargo, in that session, and to nothing
+else. See [docs/toolchains.md](docs/toolchains.md).
+
 ## Documentation
 
 | | |
@@ -141,6 +150,7 @@ in the binary, and `feature-work` is the default:
 | [Configuration](docs/configuration.md) | `~/.config/sbx/config.toml`, and which default wins |
 | [Policy and events](docs/policy.md) | what is enforced, the audit feed, and acting on a denial |
 | [Git hosts](docs/git-hosts.md) | GitHub and Azure DevOps, and how publishing keeps the token away |
+| [Toolchains](docs/toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [Skills](docs/skills.md) | carrying your own skills into a sandbox |
 | [MCP servers](docs/mcp.md) | servers on the host, and what an MCP server costs you |
 | [The sandbox image](docs/sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |
