@@ -16,7 +16,7 @@ is portable to macOS, because the isolation is kernel-enforced.
 systemd lingering is enabled, and says what to do about whatever is missing:
 
 ```
-[  ok  ] version      sbx 0.1.0, newest
+[  ok  ] version      sbx 0.2.0, newest
 [  ok  ] openshell    openshell 0.0.110
 [  ok  ] gateway      https://127.0.0.1:17670 0.0.110 (authenticated)
 [  ok  ] docker       server 29.6.0
@@ -128,7 +128,7 @@ build` after an update is what picks up a change to the image recipe.
 doctor` reports when a newer release is out, and that is the whole of it.
 
 ```
-[ warn ] version      sbx 0.1.0; 0.2.0 is out
+[ warn ] version      sbx 0.2.0; 0.3.0 is out
          fix: sbx update
 ```
 

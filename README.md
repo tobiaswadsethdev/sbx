@@ -98,7 +98,7 @@ plus the providers, skills and MCP servers your config names and the toolchain
 variants you have built:
 
 ```
-[  ok  ] version      sbx 0.1.0, newest
+[  ok  ] version      sbx 0.2.0, newest
 [  ok  ] openshell    openshell 0.0.110
 [  ok  ] gateway      https://127.0.0.1:17670 0.0.110 (authenticated)
 [  ok  ] docker       server 29.6.0
@@ -180,7 +180,8 @@ reports have their own route: [SECURITY.md](SECURITY.md).
 
 Early, and honest about it. [PLAN.md](PLAN.md) is the record of what has been
 built increment by increment and what is still on the list; interfaces are still
-moving, and the version is `0.1.0` for a reason.
+moving, and the version is `0.2.0` for a reason -- the minor bump is toolchains
+being a thing a session now has, not a promise that anything has settled.
 
 ## License
 
