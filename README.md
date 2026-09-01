@@ -127,6 +127,11 @@ sbx publish <name>                            # push the branch and open a pull 
 sbx update                                    # fetch and verify the newest release of sbx itself
 sbx rm <name>                                 # delete session and sandbox
 sbx                                           # the TUI: n starts a session, no shell needed
+
+sbxd pair <client>                            # a string that pairs a client with this machine
+sbxd serve                                    # serve this machine's sessions over one TLS port
+sbx connect <string>                          # pair with a server
+sbx --server=<name> ls                        # ... and ask it instead of the local gateway
 ```
 
 `--policy` takes a template name or a path to a YAML file. Three templates ship
@@ -148,6 +153,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 | ------------------------------------------ | --------------------------------------------------------------------- |
 | [Install](docs/install.md)                 | prerequisites, the gateway, providers, and `sbx` itself               |
 | [The TUI](docs/tui.md)                     | the list, the panes, starting and ending sessions, names and branches |
+| [The server](docs/server.md)               | running `sbxd`, pairing a client, WSL, and what a token is worth      |
 | [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |
 | [Policy and events](docs/policy.md)        | what is enforced, the audit feed, and acting on a denial              |
 | [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |

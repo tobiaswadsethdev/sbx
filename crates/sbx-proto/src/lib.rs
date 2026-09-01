@@ -42,6 +42,15 @@ use sbx_core::session::Session;
 /// would have produced anyway.
 pub const VERSION: u32 = 1;
 
+/// The port `sbxd` listens on unless told otherwise.
+///
+/// Here rather than in the server because three things need to agree about it:
+/// the server that binds it, `sbxd pair` which puts it in the string, and
+/// `sbx doctor`, which tells a Windows user what to dial. Next to the gateway's
+/// own 17670 so the pair are memorable together, and out of the ephemeral range
+/// so it can be bound reliably.
+pub const DEFAULT_PORT: u16 = 17671;
+
 /// What `GET /version` answers, to anyone, without a token.
 ///
 /// Unauthenticated on purpose. A client that cannot even tell whether it is
@@ -367,6 +376,14 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// Three things agree about this: the server that binds it, the pairing
+    /// string, and the advice `sbx doctor` gives a Windows client.
+    #[test]
+    fn the_default_port_is_not_the_gateways() {
+        assert_eq!(DEFAULT_PORT, 17671);
+        assert_ne!(DEFAULT_PORT, 17670, "that is the openshell gateway");
     }
 
     #[test]

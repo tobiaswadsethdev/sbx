@@ -39,7 +39,7 @@ pub struct Check {
 }
 
 impl Check {
-    fn ok(name: &'static str, detail: impl Into<String>) -> Self {
+    pub fn ok(name: &'static str, detail: impl Into<String>) -> Self {
         Check {
             name,
             level: Level::Ok,
@@ -48,7 +48,7 @@ impl Check {
         }
     }
 
-    fn warn(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub fn warn(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
         Check {
             name,
             level: Level::Warn,
@@ -57,7 +57,7 @@ impl Check {
         }
     }
 
-    fn fail(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
+    pub fn fail(name: &'static str, detail: impl Into<String>, fix: impl Into<String>) -> Self {
         Check {
             name,
             level: Level::Fail,
@@ -457,6 +457,124 @@ fn check_skills(configured: &[skills::Skill]) -> Check {
 /// cannot be read is exactly the kind of thing this command exists to say out
 /// loud -- every other command refuses to run until it is fixed, so this is the
 /// only place the error can be shown next to its fix.
+/// Which way WSL2 is wired, when this is WSL2 at all.
+///
+/// Two ways of being reachable, and the difference is invisible from inside:
+/// with mirrored networking the Windows side reaches this at `localhost`, and
+/// with the default NAT it reaches it at an address that changes whenever WSL
+/// restarts. Getting it wrong looks exactly like a firewall problem and is not
+/// one, which is why this is a check rather than a paragraph in a document.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum WslNetworking {
+    Mirrored,
+    Nat,
+}
+
+/// `None` when this is not WSL, so an ordinary Linux box gets no line about it.
+pub fn wsl_networking() -> Option<WslNetworking> {
+    if !is_wsl() {
+        return None;
+    }
+    Some(if mirrored() {
+        WslNetworking::Mirrored
+    } else {
+        WslNetworking::Nat
+    })
+}
+
+fn is_wsl() -> bool {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|s| {
+            let s = s.to_ascii_lowercase();
+            s.contains("microsoft") || s.contains("wsl")
+        })
+        .unwrap_or(false)
+}
+
+/// Mirrored mode, from what it *does* rather than from what was configured.
+///
+/// The `loopback0` interface is mirrored networking's own, and unlike
+/// `.wslconfig` it does not depend on `/mnt/c` being mounted or on guessing
+/// which Windows user's file is in force. The config file is still consulted,
+/// because a machine where the interface naming changes should still get the
+/// right answer from the thing that decided it.
+fn mirrored() -> bool {
+    if std::path::Path::new("/sys/class/net/loopback0").exists() {
+        return true;
+    }
+    let Ok(users) = std::fs::read_dir("/mnt/c/Users") else {
+        return false;
+    };
+    users
+        .flatten()
+        .filter_map(|u| std::fs::read_to_string(u.path().join(".wslconfig")).ok())
+        .any(|text| wslconfig_is_mirrored(&text))
+}
+
+/// Whether a `.wslconfig` selects mirrored networking.
+///
+/// Windows is not fussy about the case of either half, and the file is edited
+/// by hand often enough to have stray spaces in it.
+fn wslconfig_is_mirrored(text: &str) -> bool {
+    text.lines()
+        .filter_map(|l| l.split_once('='))
+        .any(|(k, v)| {
+            k.trim().eq_ignore_ascii_case("networkingMode")
+                && v.trim().eq_ignore_ascii_case("mirrored")
+        })
+}
+
+/// What a client on Windows should dial to reach a server running here.
+///
+/// The port is passed in rather than known here: it belongs to the protocol,
+/// and the protocol crate is built *on* this one, so importing it would be a
+/// cycle. One caller with both is cheaper than a second copy of the number.
+pub fn check_wsl(port: u16) -> Option<Check> {
+    match wsl_networking()? {
+        WslNetworking::Mirrored => Some(Check::ok(
+            "wsl",
+            format!("mirrored networking: a client on Windows uses localhost:{port}"),
+        )),
+        WslNetworking::Nat => {
+            let addrs = own_addresses();
+            let address = addrs.first().cloned().unwrap_or_else(|| "<this vm>".into());
+            Some(Check::warn(
+                "wsl",
+                format!("NAT networking: a client on Windows uses {address}:{port}, not localhost"),
+                "that address changes when WSL restarts, and every restart then needs \
+                 pairing again with the new one. `networkingMode=mirrored` in \
+                 %USERPROFILE%\\.wslconfig makes it localhost and keeps it there",
+            ))
+        }
+    }
+}
+
+/// This machine's non-loopback addresses, best effort.
+fn own_addresses() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string("/proc/net/fib_trie") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut lines = text.lines().peekable();
+    while let Some(line) = lines.next() {
+        let Some(addr) = line.trim().strip_prefix("|-- ") else {
+            continue;
+        };
+        if !lines.peek().is_some_and(|n| n.contains("LOCAL")) {
+            continue;
+        }
+        if let Ok(ip) = addr.trim().parse::<std::net::IpAddr>()
+            && !ip.is_loopback()
+        {
+            let s = ip.to_string();
+            if !out.contains(&s) {
+                out.push(s);
+            }
+        }
+    }
+    out
+}
+
 pub fn run(client: &dyn OpenShell, config: &Result<Config, config::Error>) -> Vec<Check> {
     let mut checks = vec![
         check_version(),
@@ -583,5 +701,52 @@ mod toolchain_tests {
         );
         // Nothing invented from something that is not a tag.
         assert!(rebuild_commands(&["sbx-base".to_string()]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod wsl_tests {
+    use super::*;
+
+    /// Windows is not fussy about case and the file is hand-edited, so neither
+    /// half can be matched exactly.
+    #[test]
+    fn a_wslconfig_selecting_mirrored_is_recognised_however_it_is_written() {
+        for yes in [
+            "[wsl2]\nnetworkingMode=mirrored",
+            "[wsl2]\nnetworkingMode = Mirrored\n",
+            "[wsl2]\nNETWORKINGMODE=MIRRORED",
+            "[wsl2]\nmemory=8GB\nnetworkingMode=mirrored\nswap=0",
+        ] {
+            assert!(wslconfig_is_mirrored(yes), "{yes:?}");
+        }
+        for no in [
+            "",
+            "[wsl2]\nmemory=8GB",
+            "[wsl2]\nnetworkingMode=nat",
+            // A mode named in a comment is not the mode in force.
+            "[wsl2]\n# networkingMode is mirrored on the other machine",
+        ] {
+            assert!(!wslconfig_is_mirrored(no), "{no:?}");
+        }
+    }
+
+    /// The check has to be silent on an ordinary Linux box: a line about WSL
+    /// where there is no WSL is noise in the one command people read closely.
+    #[test]
+    fn there_is_no_wsl_line_unless_this_is_wsl() {
+        assert_eq!(check_wsl(17671).is_some(), wsl_networking().is_some());
+        if !is_wsl() {
+            assert!(check_wsl(17671).is_none());
+        }
+    }
+
+    /// Whichever way it is wired, the advice names the port a client dials --
+    /// which is the whole content of it.
+    #[test]
+    fn the_wsl_advice_carries_the_port_it_was_given() {
+        if let Some(check) = check_wsl(12345) {
+            assert!(check.detail.contains("12345"), "{}", check.detail);
+        }
     }
 }

@@ -10,8 +10,9 @@
 | [toolchains.md](toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [skills.md](skills.md) | carrying your own skills into a sandbox |
 | [mcp.md](mcp.md) | MCP servers on the host, and what an MCP server costs you |
+| [server.md](server.md) | running `sbxd`, pairing a client with it, and what a token is worth |
 | [sandbox-image.md](sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |
-| [architecture.md](architecture.md) | the crates, the modules, and two rules worth knowing before changing them |
+| [architecture.md](architecture.md) | the crates, the modules, and three rules worth knowing before changing them |
 | [manual-loop.md](manual-loop.md) | the whole thing run by hand, with the versions it was verified against |
 | [openshell-gateway.service](openshell-gateway.service) | the systemd user unit for the gateway |
 

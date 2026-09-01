@@ -32,13 +32,15 @@ has the decisions and the increments that got here; this is the map.
    clone+agent         clone+agent          clone+agent
 ```
 
-Three crates:
+Five crates:
 
 | | |
 | --- | --- |
 | `crates/openshell-client` | everything the rest of the tool knows about OpenShell, behind one trait. OpenShell is a fast-moving `0.0.x` project, so version churn lands in one file -- and the trait is what lets the gRPC API replace the subprocess later without touching callers |
 | `crates/sbx-core` | everything `sbx` *does*: sessions, policy, events, seeding, publishing. No renderer may appear in it, which is what lets something other than a terminal sit on top |
-| `crates/sbx` | the clap CLI and the ratatui TUI, plus the one piece of attaching that is about the terminal this process was started in |
+| `crates/sbx-proto` | one definition of every message on the wire, so a server and a client cannot drift. Built on `sbx-core`, because the types it carries are the core's own rather than a second set kept in step by hand |
+| `crates/sbxd` | the server: TLS, one token check, and `/rpc`. Async, because it is the only part that is -- everything it calls is blocking, and goes to `spawn_blocking` |
+| `crates/sbx` | the clap CLI and the ratatui TUI, the one piece of attaching that is about the terminal this process was started in, and the client for a remote `sbxd` |
 
 ## Where things live
 
@@ -77,6 +79,10 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `tui/create.rs` | *(sbx)* the repo picker and the create form, as pure state machines |
 | `tui/ansi.rs` | *(sbx)* the captured screen mapped into ratatui's own styles |
 | `tui/attach.rs` | *(sbx)* suspending the interface around an attach, and putting it back |
+| `remote/mod.rs` | *(sbx)* the servers this machine is paired with, and one request against one |
+| `remote/pin.rs` | *(sbx)* judging a server by its certificate's fingerprint and nothing else |
+| `remote/http.rs` | *(sbx)* enough HTTP/1.1 to ask an `sbxd` a question |
+| `state.rs` | where secrets live: keys, tokens, and saved connections |
 
 ## Three rules worth knowing before you change anything
 

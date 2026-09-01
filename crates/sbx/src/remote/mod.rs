@@ -232,6 +232,81 @@ impl Remotes {
     }
 }
 
+/// One `doctor` line per paired server.
+///
+/// Asked in two steps, because the answers point in different directions: a
+/// `/version` that does not come back is the address or the certificate, and a
+/// request that comes back 401 after it is the token. One error apiece is worth
+/// two round trips on a command whose whole job is saying what is wrong.
+pub fn checks() -> Vec<sbx_core::doctor::Check> {
+    let remotes = match Remotes::load() {
+        Ok(r) => r,
+        Err(e) => {
+            return vec![sbx_core::doctor::Check::warn(
+                "servers",
+                format!("could not read the paired servers: {e}"),
+                format!("look at {}", Remotes::default_path().display()),
+            )];
+        }
+    };
+
+    // No line at all when nothing is paired. Running everything locally is the
+    // ordinary case and does not need a check saying so.
+    if remotes.is_empty() {
+        return Vec::new();
+    }
+
+    remotes.list().iter().map(check_one).collect()
+}
+
+fn check_one(remote: &Remote) -> sbx_core::doctor::Check {
+    let hello = match remote.hello() {
+        Ok(h) => h,
+        Err(e) => {
+            return sbx_core::doctor::Check::fail(
+                "servers",
+                format!("{}: {e}", remote.name),
+                format!(
+                    "check it is running, and that `{}` is the address this machine \
+                     should dial. `sbx remotes --forget {}` drops it",
+                    remote.address(),
+                    remote.name
+                ),
+            );
+        }
+    };
+
+    if !hello.speaks(sbx_proto::VERSION) {
+        return sbx_core::doctor::Check::fail(
+            "servers",
+            format!(
+                "{}: speaks protocol {}, this sbx speaks {}",
+                remote.name,
+                hello.protocol,
+                sbx_proto::VERSION
+            ),
+            "update whichever of the two is older".to_string(),
+        );
+    }
+
+    match remote.call(Request::Ls) {
+        Ok(_) => sbx_core::doctor::Check::ok(
+            "servers",
+            format!(
+                "{}: {} (sbxd {})",
+                remote.name,
+                remote.address(),
+                hello.version
+            ),
+        ),
+        Err(e) => sbx_core::doctor::Check::fail(
+            "servers",
+            format!("{}: reachable, but {e}", remote.name),
+            "`sbxd pair` on the server, then `sbx connect` here with the new string".to_string(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1731,16 +1731,52 @@ for free, with nothing persisted client-side.
   work. It belongs in increment 24, where `sbx-proto` will say what shape the
   structured version actually needs to be. Designing it now, against no consumer,
   would have been guessing.
-- **24. `sbx-proto` and `sbxd`** — the wire types with generated TypeScript, the
-  server, TLS, tokens, pairing, `/rpc` and the multiplexed websocket. No GUI:
-  verified with `sbx --server <url> ls`, which is also the thing that proves the
-  protocol is not secretly shaped like one particular client. `sbx doctor` learns
-  reachability, including the WSL modes. Also where the structured `PolicyView`
-  and diff that increment 23 deferred get their shape, since this is the first
-  point at which there is a consumer to shape them for.
+- **24. `sbx-proto` and `sbxd`** — DONE, apart from the two halves that turned
+  out to want a UI first; see below. The wire types, the server, TLS, tokens,
+  pairing, `/rpc`, and `sbx` itself as a client of it. `sbx doctor` learns the
+  paired servers and the WSL networking modes. 485 tests.
+
+  The types on the wire are the core's own rather than a second set of DTOs.
+  That couples the protocol to the core's structs -- renaming a field is a
+  protocol break -- and `VERSION` behind an unauthenticated `/version` is what
+  makes the break loud. A second definition would only have moved the coupling
+  somewhere a compiler cannot see it.
+
+  Errors are an envelope and not a status, because a request that failed for a
+  reason the client should act on is not a transport failure: the round trip
+  worked. A status is kept for what really is transport. The one in between is
+  an `op` an older server has never heard of, which comes back as `unsupported`,
+  because a client can explain that and cannot explain a 400.
+
+  Pairing is `sbx://host:port/<token>#<fingerprint>`, and the fingerprint is the
+  part that matters: it means the *first* connection is verified too, which is
+  the hole in ordinary trust-on-first-use. The client checks it and nothing
+  else -- deliberately not the hostname, since the fingerprint answers a stronger
+  question and a name check would only break a server reached at an address that
+  is not in its certificate, which is the WSL case exactly.
+
+  **Building `sbx --server` before any UI paid for itself three times**, in ways
+  the type checker could not have found. `--server ls` parsed as a server called
+  `ls` and fell through to the TUI. `TcpStream::connect` has no timeout, so the
+  read and write timeouts set immediately after it -- and the comment claiming
+  they covered a port with nothing on it -- were both wrong. And the token set
+  was read once at startup, so `sbxd revoke` did nothing until someone restarted
+  the server, which is the opposite of what revoking is for.
+
+  **Two parts moved out, because they wanted a consumer first.** The multiplexed
+  websocket carries the events feed, agent status and the PTY, and every one of
+  those is shaped by what the UI does with it -- the PTY especially, which is
+  increment 26's whole subject. The TypeScript generation wants a UI build to
+  generate into. `PolicyView` moved with them for the same reason it was deferred
+  out of 23: `Reply::Policy` currently carries the revision and the global lists,
+  which the CLI renders with the same code the TUI uses, and the structured
+  version should be designed against the thing that will draw it.
 - **25. The shell** — Tauri v2, the session list, and Facts/Policy/Events
-  read-only. The first screenshot.
-- **26. Terminal** — xterm.js over the websocket, resize, reconnect.
+  read-only. The first screenshot. Carries what increment 24 left: the
+  TypeScript generated from `sbx-proto`, and the structured `PolicyView` the
+  panes want instead of markup.
+- **26. Terminal** — the multiplexed websocket, then xterm.js over it: resize,
+  reconnect, and the events and status channels alongside the PTY.
 - **27. Create** — the repo picker and the create form as a GUI: policy,
   toolchain, skills, MCP servers.
 - **28. Diff** — the three sections, and inline comments batched back to the agent.

@@ -68,9 +68,7 @@ struct Serve {
     sans: Vec<String>,
 }
 
-/// Chosen to sit near the gateway's own 17670 without colliding with it, and
-/// out of the ephemeral range so it can be bound reliably.
-const DEFAULT_PORT: u16 = 17671;
+use sbx_proto::DEFAULT_PORT;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -253,14 +251,6 @@ fn revoke(name: &str) -> Fallible {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The port is a constant three places refer to -- the server, `pair`, and
-    /// the client's default -- and it must not collide with the gateway's.
-    #[test]
-    fn the_default_port_is_not_the_gateways() {
-        assert_eq!(DEFAULT_PORT, 17671);
-        assert_ne!(DEFAULT_PORT, 17670, "that is the openshell gateway");
-    }
 
     #[test]
     fn the_default_host_is_a_name_and_never_empty() {

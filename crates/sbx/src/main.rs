@@ -275,7 +275,12 @@ fn main() -> ExitCode {
         // No subcommand: the TUI is the point of the tool.
         None => tui::run(client, cfg),
         Some(Command::Doctor) => {
-            let checks = doctor::run(&client, &loaded);
+            let mut checks = doctor::run(&client, &loaded);
+            // Appended here rather than inside `doctor::run`, because both need
+            // things the core does not have: the protocol's port, and a client
+            // for it.
+            checks.extend(doctor::check_wsl(sbx_proto::DEFAULT_PORT));
+            checks.extend(remote::checks());
             return match doctor::report(&checks) {
                 0 => ExitCode::SUCCESS,
                 _ => ExitCode::FAILURE,
