@@ -23,10 +23,9 @@ use serde::{Deserialize, Serialize};
 pub mod pairing;
 pub use pairing::Pairing;
 
-use openshell_client::PolicyRevision;
-use sbx_core::endpoints::Lists;
 use sbx_core::events::Event;
 use sbx_core::ops::{Poll, Refreshed};
+use sbx_core::policy::View as PolicyView;
 use sbx_core::session::Session;
 
 /// The protocol this build speaks.
@@ -142,18 +141,16 @@ pub enum Reply {
     Diff {
         body: String,
     },
-    Policy {
-        revision: PolicyRevision,
-        /// The template the session was created from, which is recorded rather
-        /// than derived and is not in the revision.
-        template: Option<String>,
-        /// The global allow and block lists, which apply to every *new* session
-        /// and are therefore not in the revision either. Sent because the pane
-        /// that answers "what may this reach?" is wrong without them: a standing
-        /// decision applied to every session and visible in none of them is the
-        /// kind of state that becomes a bug report about the gateway.
-        lists: Lists,
-    },
+    /// The policy as facts, not as a rendering.
+    ///
+    /// A `PolicyView` rather than the gateway's own `PolicyRevision`, which
+    /// keeps `openshell-client` off the wire entirely. That matters more than
+    /// it sounds: those types belong to a `0.0.x` project, and putting them in
+    /// the protocol would make their churn protocol churn. The view also
+    /// carries the two things the revision does not -- the template the session
+    /// was created from, and the global lists -- so a client has everything the
+    /// pane needs from one request.
+    Policy(PolicyView),
     Events {
         events: Vec<Event>,
     },
@@ -384,6 +381,40 @@ mod tests {
     fn the_default_port_is_not_the_gateways() {
         assert_eq!(DEFAULT_PORT, 17671);
         assert_ne!(DEFAULT_PORT, 17670, "that is the openshell gateway");
+    }
+
+    /// The policy reply carries a view, and the view carries the two things the
+    /// gateway's own revision does not: the template, and the global lists.
+    #[test]
+    fn a_policy_reply_carries_a_view_and_not_a_revision() {
+        let view = PolicyView {
+            template: Some("feature-work".into()),
+            revision: sbx_core::policy::Revision {
+                version: 1,
+                active_version: 1,
+                settled: true,
+                source: None,
+                hash: None,
+            },
+            network: Some(Vec::new()),
+            lists: None,
+            locked: None,
+        };
+        let out: Outcome = Reply::Policy(view.clone()).into();
+
+        let json = serde_json::to_string(&out).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["ok"]["reply"], "policy");
+        assert_eq!(v["ok"]["template"], "feature-work");
+
+        match serde_json::from_str::<Outcome>(&json)
+            .unwrap()
+            .into_result()
+            .unwrap()
+        {
+            Reply::Policy(back) => assert_eq!(back, view),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

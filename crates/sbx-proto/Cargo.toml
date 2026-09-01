@@ -9,7 +9,6 @@ description = "The wire between an sbx client and sbxd"
 
 [dependencies]
 sbx-core = { path = "../sbx-core" }
-openshell-client = { path = "../openshell-client" }
 serde.workspace = true
 
 [dev-dependencies]

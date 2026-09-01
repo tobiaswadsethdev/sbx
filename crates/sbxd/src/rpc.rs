@@ -11,7 +11,7 @@
 
 use openshell_client::OpenShell;
 use sbx_core::store::Store;
-use sbx_core::{endpoints, ops, session::Session};
+use sbx_core::{endpoints, ops, policy, session::Session};
 use sbx_proto::{Failure, Outcome, Reply, Request};
 
 /// Answer one request.
@@ -43,11 +43,11 @@ fn ls(client: &dyn OpenShell) -> Outcome {
 
 fn policy(client: &dyn OpenShell, session: &Session) -> Result<Reply, Failure> {
     let revision = ops::policy(client, session).map_err(Failure::gateway)?;
-    Ok(Reply::Policy {
-        revision,
-        template: session.policy.clone(),
-        lists: lists(),
-    })
+    Ok(Reply::Policy(policy::View::of(
+        &revision,
+        session.policy.as_deref(),
+        &lists(),
+    )))
 }
 
 fn events(client: &dyn OpenShell, session: &Session) -> Result<Reply, Failure> {

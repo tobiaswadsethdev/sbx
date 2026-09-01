@@ -851,7 +851,11 @@ fn policy_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
         Err(e) => return vec![Line::from(e.clone()).style(Style::default().fg(Color::Red))],
     };
 
-    let body = sbx_core::policy::render(rev, session.policy.as_deref(), app.lists());
+    let body = sbx_core::policy::render(&sbx_core::policy::View::of(
+        rev,
+        session.policy.as_deref(),
+        app.lists(),
+    ));
     body.lines().map(marked_line).collect()
 }
 

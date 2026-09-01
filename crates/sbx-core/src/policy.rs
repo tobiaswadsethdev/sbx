@@ -239,35 +239,323 @@ pub fn preset_rule_names(policy: &Policy, preset: &Preset) -> Vec<String> {
         .collect()
 }
 
-/// Render a revision as the policy pane's body.
+/// The policy pane's content, as facts rather than as text.
+///
+/// Introduced when a second thing had to draw it. `render` used to build marked
+/// up text straight out of the gateway's reply, which is fine for one renderer
+/// and wrong for two: a web view would have had to parse the terminal's markup
+/// back into structure it never should have lost, and the wire would have
+/// carried a rendering rather than an answer.
+///
+/// **Facts, not prose.** There is no `notices: Vec<String>` here, though the
+/// terminal draws several. Every one of them is a conclusion from something in
+/// this struct -- `revision.settled`, `template` beside `revision.version`,
+/// `revision.source` -- so each renderer states them in its own voice rather
+/// than being handed English it must display verbatim. The derivations are one
+/// line each, and [`View::changed_since_creation`] and friends are them.
+///
+/// It also keeps `openshell-client` off the wire entirely, which is worth more
+/// than it sounds: the gateway's own types are a `0.0.x` project's, and pinning
+/// a protocol to them would mean their churn is protocol churn.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct View {
+    /// The template the session was created from, which is recorded on the
+    /// session rather than derivable from the policy.
+    pub template: Option<String>,
+    pub revision: Revision,
+    /// `None` when the gateway returned a revision with no policy in it, which
+    /// is different from a policy that grants nothing.
+    pub network: Option<Vec<Rule>>,
+    /// Omitted when the global lists are empty, which is the common case.
+    pub lists: Option<ListsView>,
+    /// `None` for the same reason as `network`.
+    pub locked: Option<Locked>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Revision {
+    pub version: u32,
+    pub active_version: u32,
+    /// Whether the submitted revision is the one being enforced.
+    pub settled: bool,
+    pub source: Option<String>,
+    pub hash: Option<String>,
+}
+
+impl View {
+    pub fn of(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> Self {
+        let revision = Revision {
+            version: rev.version,
+            active_version: rev.active_version,
+            settled: rev.is_settled(),
+            source: (!rev.policy_source.is_empty()).then(|| rev.policy_source.clone()),
+            hash: (!rev.hash.is_empty()).then(|| rev.hash.clone()),
+        };
+
+        let Some(policy) = &rev.policy else {
+            return View {
+                template: template.map(str::to_string),
+                revision,
+                network: None,
+                lists: None,
+                locked: None,
+            };
+        };
+
+        View {
+            template: template.map(str::to_string),
+            revision,
+            network: Some(policy.network_policies.iter().map(Rule::of).collect()),
+            lists: ListsView::of(policy, lists),
+            locked: Some(Locked::of(policy)),
+        }
+    }
+
+    /// Whether the rules have moved away from the template since creation.
+    ///
+    /// A widen, a tighten, or one endpoint allowed from the events feed. Worth
+    /// saying, because the pane names a template whose rules are visibly not
+    /// the ones below, which reads as a bug rather than as history.
+    pub fn changed_since_creation(&self) -> bool {
+        self.revision.version > 1 && self.template.is_some()
+    }
+
+    /// Whether a gateway-global lock outranks this sandbox's own policy.
+    pub fn globally_locked(&self) -> bool {
+        self.revision.source.as_deref() == Some("global")
+    }
+}
+
+/// One network rule: what may be reached, by which binaries.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Rule {
+    /// What `policy update` addresses, which is not always the display name.
+    pub key: String,
+    /// Only when it differs from the key.
+    pub name: Option<String>,
+    /// Absolute paths, as the kernel resolves them. Empty means the rule grants
+    /// nothing at all.
+    pub binaries: Vec<String>,
+    pub endpoints: Vec<Endpoint>,
+}
+
+impl Rule {
+    fn of((key, rule): (&String, &openshell_client::NetworkPolicy)) -> Self {
+        let name = rule
+            .name
+            .as_deref()
+            .filter(|n| *n != key)
+            .map(str::to_string);
+        Rule {
+            key: key.clone(),
+            name,
+            binaries: rule.binaries.iter().map(|b| b.path.clone()).collect(),
+            endpoints: rule.endpoints.iter().map(Endpoint::of).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Endpoint {
+    pub host_port: String,
+    pub protocol: Option<String>,
+    pub enforcement: Option<String>,
+    pub access: Access,
+    /// Method and path rules, when the endpoint has any.
+    pub l7: Vec<L7>,
+    pub tls: Tls,
+}
+
+impl Endpoint {
+    fn of(e: &openshell_client::Endpoint) -> Self {
+        Endpoint {
+            host_port: e.host_port(),
+            protocol: e.protocol.clone(),
+            enforcement: e.enforcement.clone(),
+            access: match &e.access {
+                Some(a) => Access::Class(a.clone()),
+                // Absence is the meaningful case: no access class and a rules
+                // block is default-deny, which is stricter than anything
+                // `access:` can express.
+                None if !e.rules.is_empty() => Access::RulesOnly,
+                None => Access::None,
+            },
+            l7: e.rules.iter().filter_map(L7::of).collect(),
+            tls: match e.tls.as_deref() {
+                Some("skip") => Tls::Skip,
+                Some("terminate") => Tls::Terminate,
+                _ => Tls::Default,
+            },
+        }
+    }
+
+    /// Whether both an access class and method rules are set, which grants the
+    /// union of the two and surprises people who expect the intersection.
+    pub fn access_and_rules(&self) -> bool {
+        matches!(self.access, Access::Class(_)) && !self.l7.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    /// `read-only`, `read-write`, `full`.
+    Class(String),
+    /// Governed only by its method rules.
+    RulesOnly,
+    /// Nothing is granted.
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Tls {
+    Default,
+    Skip,
+    /// Deprecated: termination is automatic now.
+    Terminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct L7 {
+    pub allow: bool,
+    pub method: String,
+    pub path: String,
+}
+
+impl L7 {
+    fn of(rule: &openshell_client::Rule) -> Option<Self> {
+        if let Some(a) = &rule.allow {
+            return Some(L7 {
+                allow: true,
+                method: a.method.clone(),
+                path: a.path.clone(),
+            });
+        }
+        rule.deny.as_ref().map(|d| L7 {
+            allow: false,
+            method: d.method.clone(),
+            path: d.path.clone(),
+        })
+    }
+}
+
+/// The global lists, each said against what this policy actually holds.
+///
+/// The third column is the one worth having: a list entry only describes what a
+/// *new* session gets, and this session may predate the entry or have moved
+/// since.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListsView {
+    pub allow: Vec<ListedAllow>,
+    pub block: Vec<ListedBlock>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListedAllow {
+    pub endpoint: String,
+    pub binaries: Vec<String>,
+    pub in_policy: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListedBlock {
+    pub endpoint: String,
+    pub still_in_policy: bool,
+}
+
+impl ListsView {
+    fn of(policy: &Policy, lists: &Lists) -> Option<Self> {
+        if lists.is_empty() {
+            return None;
+        }
+        let present = |endpoint: &str| {
+            policy
+                .network_policies
+                .values()
+                .any(|r| r.endpoints.iter().any(|e| e.host_port() == endpoint))
+        };
+        Some(ListsView {
+            allow: lists
+                .allow
+                .iter()
+                .map(|a| ListedAllow {
+                    endpoint: a.endpoint.clone(),
+                    binaries: a.binaries.clone(),
+                    in_policy: present(&a.endpoint),
+                })
+                .collect(),
+            block: lists
+                .block
+                .iter()
+                .map(|e| ListedBlock {
+                    endpoint: e.clone(),
+                    still_in_policy: present(e),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// The sections Landlock froze at creation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Locked {
+    pub include_workdir: bool,
+    pub read_write: Vec<String>,
+    pub read_only: Vec<String>,
+    /// `user:group`, when the policy sets one.
+    pub run_as: Option<String>,
+}
+
+impl Locked {
+    fn of(policy: &Policy) -> Self {
+        let fs = &policy.filesystem_policy;
+        Locked {
+            include_workdir: fs.include_workdir,
+            read_write: fs.read_write.clone(),
+            read_only: fs.read_only.clone(),
+            run_as: policy.process.run_as_user.as_ref().map(|u| {
+                let group = policy.process.run_as_group.as_deref().unwrap_or("-");
+                format!("{u}:{group}")
+            }),
+        }
+    }
+}
+
+/// Render a [`View`] as the policy pane's body.
 ///
 /// Network first: it is the section that can be changed while the agent runs,
 /// and the one worth reading. Filesystem and process come last, under a notice,
 /// because they are frozen at creation -- and the gateway does not say so.
-pub fn render(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> String {
+///
+/// The prose is this renderer's, not the view's. Every notice below is a
+/// sentence about something the view states as a fact, so a different renderer
+/// says it differently rather than repeating a terminal's wording.
+pub fn render(view: &View) -> String {
     let mut out = String::new();
 
     pane::section(&mut out, "policy");
-    pane::field(&mut out, "template", template.unwrap_or("(none recorded)"));
-    let revision = if rev.is_settled() {
-        format!("{} (loaded)", rev.version)
+    pane::field(
+        &mut out,
+        "template",
+        view.template.as_deref().unwrap_or("(none recorded)"),
+    );
+    let r = &view.revision;
+    let revision = if r.settled {
+        format!("{} (loaded)", r.version)
     } else {
-        format!("{} submitted, {} loaded", rev.version, rev.active_version)
+        format!("{} submitted, {} loaded", r.version, r.active_version)
     };
     pane::field(&mut out, "revision", revision);
-    if !rev.policy_source.is_empty() {
-        pane::field(&mut out, "source", &rev.policy_source);
+    if let Some(source) = &r.source {
+        pane::field(&mut out, "source", source);
     }
-    if !rev.hash.is_empty() {
+    if let Some(hash) = &r.hash {
         // The first 12 characters are what the CLI itself prints on an update,
         // so the two can be compared by eye.
-        pane::field(
-            &mut out,
-            "hash",
-            rev.hash.chars().take(12).collect::<String>(),
-        );
+        pane::field(&mut out, "hash", hash.chars().take(12).collect::<String>());
     }
-    if !rev.is_settled() {
+    if !r.settled {
         pane::notice(
             &mut out,
             "a newer revision has been submitted; the rules below are the ones loaded",
@@ -277,7 +565,7 @@ pub fn render(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> St
     // after a widen or a tighten has moved the policy away from it. Without
     // this the pane names a template whose rules are visibly not the ones
     // below, which reads as a bug rather than as history.
-    if rev.version > 1 && template.is_some() {
+    if view.changed_since_creation() {
         pane::notice(
             &mut out,
             "the network rules have been changed since creation; the template names",
@@ -287,22 +575,26 @@ pub fn render(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> St
             "what the session started from, not what it has now",
         );
     }
-    if rev.policy_source == "global" {
+    if view.globally_locked() {
         pane::notice(
             &mut out,
             "a gateway-global policy lock is in force and outranks this sandbox's own",
         );
     }
 
-    let Some(policy) = &rev.policy else {
+    let Some(network) = &view.network else {
         out.push('\n');
         pane::notice(&mut out, "the gateway returned no policy payload");
         return out;
     };
 
-    render_network(&mut out, policy);
-    render_lists(&mut out, policy, lists);
-    render_locked(&mut out, policy);
+    render_network(&mut out, network);
+    if let Some(lists) = &view.lists {
+        render_lists(&mut out, lists);
+    }
+    if let Some(locked) = &view.locked {
+        render_locked(&mut out, locked);
+    }
     out
 }
 
@@ -311,29 +603,13 @@ pub fn render(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> St
 /// Drawn here because this is the pane someone opens to answer "what may this
 /// reach?", and a standing decision that is applied to every new session but
 /// visible in no pane is exactly the kind of state that turns into a bug report
-/// about the gateway. Omitted entirely when the lists are empty, which is the
-/// common case and does not need a heading saying so.
-///
-/// The third column is the one worth having. A list entry only describes what a
-/// *new* session gets; this session may have been created before the entry
-/// existed, or moved since with `e`, `w` or `t` -- so each row says whether the
-/// policy above actually agrees.
-fn render_lists(out: &mut String, policy: &Policy, lists: &Lists) {
-    if lists.is_empty() {
-        return;
-    }
-    let present = |endpoint: &str| {
-        policy
-            .network_policies
-            .values()
-            .any(|r| r.endpoints.iter().any(|e| e.host_port() == endpoint))
-    };
-
+/// about the gateway.
+fn render_lists(out: &mut String, lists: &ListsView) {
     out.push('\n');
     pane::section(out, "global lists - applied to every new session");
 
     for a in &lists.allow {
-        let state = if present(&a.endpoint) {
+        let state = if a.in_policy {
             "in this policy"
         } else {
             "NOT in this policy"
@@ -343,16 +619,16 @@ fn render_lists(out: &mut String, policy: &Policy, lists: &Lists) {
             pane::field(out, "", b.clone());
         }
     }
-    for e in &lists.block {
+    for b in &lists.block {
         // Reversed, and deliberately not "not in this policy": for a block,
         // absent is the outcome asked for, and phrasing it as a negative would
         // make the healthy case read as the alarming one.
-        let state = if present(e) {
+        let state = if b.still_in_policy {
             "STILL in this policy"
         } else {
             "gone from this policy"
         };
-        pane::field(out, "block", format!("{e}  {state}"));
+        pane::field(out, "block", format!("{}  {state}", b.endpoint));
     }
 
     // The thing "blacklist" invites people to assume, said once where it will
@@ -369,22 +645,20 @@ fn render_lists(out: &mut String, policy: &Policy, lists: &Lists) {
     );
 }
 
-fn render_network(out: &mut String, policy: &Policy) {
+fn render_network(out: &mut String, network: &[Rule]) {
     out.push('\n');
-    if policy.network_policies.is_empty() {
+    if network.is_empty() {
         pane::section(out, "network");
         pane::notice(out, "no network rules: nothing in this sandbox has egress");
         return;
     }
 
-    for (key, rule) in &policy.network_policies {
+    for rule in network {
         // The key and the display name differ (`github_git` vs `github-git`),
         // and the key is what `policy update` addresses, so it leads.
-        let name = rule.name.as_deref().unwrap_or(key);
-        let heading = if name == key {
-            format!("network - {key}")
-        } else {
-            format!("network - {key}  ({name})")
+        let heading = match &rule.name {
+            Some(name) => format!("network - {}  ({name})", rule.key),
+            None => format!("network - {}", rule.key),
         };
         pane::section(out, heading);
 
@@ -396,46 +670,38 @@ fn render_network(out: &mut String, policy: &Policy) {
             // to compare against a denial message character by character.
             for (i, b) in rule.binaries.iter().enumerate() {
                 let label = if i == 0 { "binaries" } else { "" };
-                pane::field(out, label, &b.path);
+                pane::field(out, label, b);
             }
         }
 
         for e in &rule.endpoints {
-            let mut line = e.host_port();
+            let mut line = e.host_port.clone();
             for v in [&e.protocol, &e.enforcement].into_iter().flatten() {
                 let _ = write!(line, "  {v}");
             }
             match &e.access {
-                Some(a) => {
+                Access::Class(a) => {
                     let _ = write!(line, "  {a}");
                 }
-                // Absence is the meaningful case: no access class and a rules
-                // block is default-deny, which is stricter than anything
-                // `access:` can express. Saying nothing would read as an
-                // oversight.
-                None if !e.rules.is_empty() => line.push_str("  (rules only)"),
-                None => line.push_str("  no access granted"),
+                Access::RulesOnly => line.push_str("  (rules only)"),
+                Access::None => line.push_str("  no access granted"),
             }
-            if e.tls.as_deref() == Some("skip") {
+            if e.tls == Tls::Skip {
                 line.push_str("  tls:skip");
             }
             pane::field(out, "endpoint", line);
 
-            for rule in &e.rules {
-                if let Some(a) = &rule.allow {
-                    pane::field(out, "", format!("allow  {} {}", a.method, a.path));
-                }
-                if let Some(d) = &rule.deny {
-                    pane::field(out, "", format!("deny   {} {}", d.method, d.path));
-                }
+            for l7 in &e.l7 {
+                let verdict = if l7.allow { "allow " } else { "deny  " };
+                pane::field(out, "", format!("{verdict} {} {}", l7.method, l7.path));
             }
-            if e.access.is_some() && !e.rules.is_empty() {
+            if e.access_and_rules() {
                 pane::notice(
                     out,
                     "access and rules together grant the union, not the intersection",
                 );
             }
-            if e.tls.as_deref() == Some("terminate") {
+            if e.tls == Tls::Terminate {
                 pane::notice(
                     out,
                     "`tls: terminate` is deprecated; termination is automatic now",
@@ -446,21 +712,23 @@ fn render_network(out: &mut String, policy: &Policy) {
 }
 
 /// The sections that cannot be changed after creation.
-fn render_locked(out: &mut String, policy: &Policy) {
-    let fs = &policy.filesystem_policy;
+fn render_locked(out: &mut String, locked: &Locked) {
     out.push('\n');
     pane::section(out, "filesystem and process - locked at creation");
 
     pane::field(
         out,
         "workdir",
-        if fs.include_workdir {
+        if locked.include_workdir {
             "included"
         } else {
             "excluded"
         },
     );
-    for (label, paths) in [("read-write", &fs.read_write), ("read-only", &fs.read_only)] {
+    for (label, paths) in [
+        ("read-write", &locked.read_write),
+        ("read-only", &locked.read_only),
+    ] {
         if paths.is_empty() {
             continue;
         }
@@ -468,9 +736,8 @@ fn render_locked(out: &mut String, policy: &Policy) {
             pane::field(out, if i == 0 { label } else { "" }, p);
         }
     }
-    if let Some(u) = &policy.process.run_as_user {
-        let group = policy.process.run_as_group.as_deref().unwrap_or("-");
-        pane::field(out, "run as", format!("{u}:{group}"));
+    if let Some(run_as) = &locked.run_as {
+        pane::field(out, "run as", run_as);
     }
 
     // Measured, not assumed: `policy set` with an extra read_write path returns
@@ -498,7 +765,7 @@ mod tests {
     /// about the sandbox's own rules, so the lists go through a shim rather than
     /// a third argument at twenty call sites.
     fn render(rev: &PolicyRevision, template: Option<&str>) -> String {
-        super::render(rev, template, &Lists::default())
+        super::render(&View::of(rev, template, &Lists::default()))
     }
 
     fn revision(policy: Option<Policy>) -> PolicyRevision {
@@ -528,11 +795,11 @@ mod tests {
         lists.block("registry.npmjs.org:443");
         lists.block("nowhere.example.com:443");
 
-        let body = pane::to_plain(&super::render(
+        let body = pane::to_plain(&super::render(&View::of(
             &revision(Some(policy_with("npm", "registry.npmjs.org"))),
             Some("net-open"),
             &lists,
-        ));
+        )));
 
         assert!(body.contains("global lists"), "{body}");
         // Asked for and not there: the allow entry postdates this sandbox.
@@ -558,6 +825,75 @@ mod tests {
     }
 
     /// Empty lists are the common case and do not need a heading saying so.
+    /// The view is what a second renderer gets, so what it drops is what that
+    /// renderer can never show. Checked field by field against a policy with
+    /// one of everything in it.
+    #[test]
+    fn the_view_keeps_what_the_pane_needs() {
+        let rev = revision(Some(policy_with("npm", "registry.npmjs.org")));
+        let view = View::of(&rev, Some("net-open"), &Lists::default());
+
+        assert_eq!(view.template.as_deref(), Some("net-open"));
+        assert!(view.revision.settled);
+        assert!(view.lists.is_none(), "empty lists are omitted, not empty");
+
+        let network = view.network.expect("a policy payload means rules");
+        let rule = network.iter().find(|r| r.key == "npm").expect("the rule");
+        assert!(!rule.binaries.is_empty());
+        let endpoint = &rule.endpoints[0];
+        assert_eq!(endpoint.host_port, "registry.npmjs.org:443");
+
+        // And the locked half, which no amount of `policy update` can change.
+        assert!(view.locked.is_some());
+    }
+
+    /// A revision the gateway answered with no policy in it is not the same as
+    /// a policy that grants nothing, and the view has to keep them apart.
+    #[test]
+    fn a_revision_with_no_payload_has_no_network_rather_than_no_rules() {
+        let view = View::of(&revision(None), None, &Lists::default());
+        assert!(view.network.is_none());
+        assert!(view.locked.is_none());
+        assert!(render(&revision(None), None).contains("no policy payload"));
+    }
+
+    /// The notices the terminal prints are conclusions from these two, so a
+    /// renderer that words them differently still agrees about when to.
+    #[test]
+    fn the_derived_facts_are_what_the_notices_are_built_from() {
+        let mut rev = revision(Some(policy_with("npm", "registry.npmjs.org")));
+
+        // Version 1 with a template: untouched since creation.
+        assert!(!View::of(&rev, Some("net-open"), &Lists::default()).changed_since_creation());
+        // Moved since, by a widen or one endpoint allowed from the feed.
+        rev.version = 4;
+        rev.active_version = 4;
+        assert!(View::of(&rev, Some("net-open"), &Lists::default()).changed_since_creation());
+        // No template recorded: there is nothing for it to have moved away from.
+        assert!(!View::of(&rev, None, &Lists::default()).changed_since_creation());
+
+        assert!(!View::of(&rev, None, &Lists::default()).globally_locked());
+        rev.policy_source = "global".into();
+        assert!(View::of(&rev, None, &Lists::default()).globally_locked());
+    }
+
+    /// The view crosses a wire, so it has to survive one.
+    #[test]
+    fn a_view_round_trips_through_json() {
+        let mut lists = Lists::default();
+        lists.block("registry.npmjs.org:443");
+        let view = View::of(
+            &revision(Some(policy_with("npm", "registry.npmjs.org"))),
+            Some("net-open"),
+            &lists,
+        );
+
+        let back: View = serde_json::from_str(&serde_json::to_string(&view).unwrap()).unwrap();
+        assert_eq!(back, view);
+        // And renders identically on the far side, which is the whole point.
+        assert_eq!(super::render(&back), super::render(&view));
+    }
+
     #[test]
     fn empty_global_lists_add_nothing_to_the_pane() {
         let body = render(&revision(Some(Policy::default())), Some("net-open"));

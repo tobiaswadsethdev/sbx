@@ -1783,7 +1783,6 @@ dependencies = [
 name = "sbx-proto"
 version = "0.2.0"
 dependencies = [
- "openshell-client",
  "sbx-core",
  "serde",
  "serde_json",

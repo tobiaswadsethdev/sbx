@@ -514,17 +514,14 @@ fn remote_diff(remote: &remote::Remote, name: &str) -> Fallible {
 }
 
 fn remote_policy(remote: &remote::Remote, name: &str) -> Fallible {
-    let sbx_proto::Reply::Policy {
-        revision,
-        template,
-        lists,
-    } = remote.call(sbx_proto::Request::Policy { name: name.into() })?
+    let sbx_proto::Reply::Policy(view) =
+        remote.call(sbx_proto::Request::Policy { name: name.into() })?
     else {
         return Err("the server answered something other than a policy".into());
     };
-    // The server's lists, not this machine's: the rules being described are the
-    // ones it is enforcing, and the global lists are part of that picture.
-    print_policy(&revision, template.as_deref(), &lists);
+    // The server's view, not one assembled here: the template and the global
+    // lists in it are the ones that machine is enforcing with.
+    print_policy(&view);
     Ok(())
 }
 
@@ -856,16 +853,12 @@ fn cmd_policy(client: &dyn OpenShell, name: &str) -> Fallible {
     // empty, so a failure reads the same as never having used the feature --
     // which is why the TUI, where the lists are edited, reports it instead.
     let lists = endpoints::Lists::load().unwrap_or_default();
-    print_policy(&rev, session.policy.as_deref(), &lists);
+    print_policy(&policy::View::of(&rev, session.policy.as_deref(), &lists));
     Ok(())
 }
 
-fn print_policy(
-    rev: &openshell_client::PolicyRevision,
-    template: Option<&str>,
-    lists: &endpoints::Lists,
-) {
-    print!("{}", pane::to_plain(&policy::render(rev, template, lists)));
+fn print_policy(view: &policy::View) {
+    print!("{}", pane::to_plain(&policy::render(view)));
 }
 
 fn cmd_events(client: &dyn OpenShell, name: &str) -> Fallible {
