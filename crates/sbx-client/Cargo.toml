@@ -1,0 +1,16 @@
+[package]
+name = "sbx-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The client half of the sbx protocol: paired servers, and one pinned TLS connection to each"
+
+[dependencies]
+sbx-core = { path = "../sbx-core" }
+sbx-proto = { path = "../sbx-proto" }
+serde.workspace = true
+serde_json.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"

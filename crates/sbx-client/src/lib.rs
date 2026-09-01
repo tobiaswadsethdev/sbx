@@ -4,10 +4,17 @@
 //! directory beside anything else secret this machine holds. `sbx connect`
 //! writes one; `--server` picks one; everything else is [`Remote::call`].
 //!
-//! This is also the second implementation of the protocol, which is the point
-//! of it existing before there is a UI. A wire format only has one consumer
-//! until it has two, and the shortcuts it has taken are invisible until the
-//! second one tries to use it.
+//! **A crate rather than a module in the CLI, because the desktop application
+//! needs exactly this.** The certificate is pinned by fingerprint, and a webview
+//! cannot do that -- `fetch` has no say in which certificate it will accept -- so
+//! the connection has to be made on the Rust side of Tauri, by the same code
+//! the CLI uses. Two clients that pin differently would be one client that
+//! pins.
+//!
+//! It is also the second implementation of the protocol, which was the point of
+//! it existing before there was a UI. A wire format only has one consumer until
+//! it has two, and the shortcuts it has taken are invisible until the second one
+//! tries to use it.
 
 mod http;
 mod pin;

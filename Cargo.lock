@@ -1749,6 +1749,17 @@ dependencies = [
  "clap",
  "openshell-client",
  "ratatui",
+ "sbx-client",
+ "sbx-core",
+ "sbx-proto",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "sbx-client"
+version = "0.2.0"
+dependencies = [
  "rustls",
  "sbx-core",
  "sbx-proto",

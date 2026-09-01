@@ -13,12 +13,11 @@ path = "src/main.rs"
 
 [dependencies]
 sbx-core = { path = "../sbx-core" }
+sbx-client = { path = "../sbx-client" }
 sbx-proto = { path = "../sbx-proto" }
 openshell-client = { path = "../openshell-client" }
 clap = { version = "4", features = ["derive"] }
 ratatui = "0.30.2"
 serde.workspace = true
 serde_json.workspace = true
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-sha2 = "0.10"
 

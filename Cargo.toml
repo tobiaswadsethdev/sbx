@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/openshell-client", "crates/sbx-core", "crates/sbx-proto", "crates/sbxd", "crates/sbx"]
+members = ["crates/openshell-client", "crates/sbx-core", "crates/sbx-proto", "crates/sbx-client", "crates/sbxd", "crates/sbx"]
 
 [workspace.package]
 version = "0.2.0"

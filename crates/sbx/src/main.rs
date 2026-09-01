@@ -7,13 +7,13 @@
 //! process was started in.
 
 mod attach;
-mod remote;
 mod tui;
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use openshell_client::{CliClient, OpenShell};
+use sbx_client as remote;
 use sbx_core::{
     config, doctor, endpoints, events, forge, image, ops, pane, policy, publish, repos, session,
     store, toolchain, update,
