@@ -1,0 +1,28 @@
+[package]
+name = "sbxd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The sbx server: sessions and their sandboxes, over one authenticated TLS port"
+
+[[bin]]
+name = "sbxd"
+path = "src/main.rs"
+
+[dependencies]
+sbx-core = { path = "../sbx-core" }
+sbx-proto = { path = "../sbx-proto" }
+openshell-client = { path = "../openshell-client" }
+clap = { version = "4", features = ["derive"] }
+serde.workspace = true
+serde_json.workspace = true
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.14"
+rand = "0.9"
+sha2 = "0.10"
+subtle = "2"

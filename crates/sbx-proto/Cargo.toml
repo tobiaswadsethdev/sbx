@@ -1,0 +1,16 @@
+[package]
+name = "sbx-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The wire between an sbx client and sbxd"
+
+[dependencies]
+sbx-core = { path = "../sbx-core" }
+openshell-client = { path = "../openshell-client" }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

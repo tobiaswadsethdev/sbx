@@ -39,7 +39,7 @@
 //! running agent is never read as idle merely for having an input box on screen.
 //! The specimens for both are committed next to the older ones.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::session::State;
 
@@ -83,13 +83,14 @@ const CURSOR: char = '❯';
 /// Where a report came from. Kept because "the pane says waiting but the hooks
 /// say running" is the normal case, not an error, and being able to see which
 /// one won makes the difference between a bug and a misunderstanding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Source {
     Hook,
     Pane,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
     pub state: State,
     /// Tool name or prompt message, when one is known.

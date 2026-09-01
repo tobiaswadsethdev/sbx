@@ -26,7 +26,7 @@ use crate::toolchain::{self, Toolchain};
 /// left tall by an attach from a big terminal cannot turn a poll into a flood.
 const PANE_LINES: usize = 120;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Refreshed {
     pub sessions: Vec<Session>,
     /// Sessions recovered from a sandbox the cache did not know about.
@@ -576,7 +576,7 @@ const DIFF_LINE_CAP: usize = 2000;
 pub use crate::pane::{NOTICE as DIFF_NOTICE, SECTION as DIFF_SECTION};
 
 /// How much a session's working copy has diverged from its base branch.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffStat {
     pub added: u32,
     pub removed: u32,
@@ -807,7 +807,7 @@ pub fn attach_script(session: &Session) -> String {
 const UTF8_ENV: &str = "LANG=C.UTF-8 LC_ALL=C.UTF-8 COLORTERM=truecolor";
 
 /// What destroying a session did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Destroyed {
     /// The gateway deleted the sandbox.
     Sandbox,
@@ -858,7 +858,7 @@ pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> 
 /// Kept together deliberately. Exec on a sandbox is serialised gateway-side, so
 /// two separate polls would not just double the traffic -- they would queue
 /// behind each other. One script, one round trip, both answers.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Poll {
     pub stat: Option<DiffStat>,
     pub status: Option<status::Report>,
