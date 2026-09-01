@@ -1,4 +1,4 @@
-# ai-sandboxer (`sbx`)
+# sbx
 
 [![CI](https://github.com/tobiaswadsethdev/sbx/actions/workflows/ci.yml/badge.svg)](https://github.com/tobiaswadsethdev/sbx/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -45,22 +45,22 @@ curl https://github.com                                 -> DENIED
 
 ## What it does
 
-* **One sandbox per session.** The agent clones the repository inside it and
+- **One sandbox per session.** The agent clones the repository inside it and
   works on `sbx/<name>`; your worktree is never handed over.
-* **Credentials the sandbox never sees.** OpenShell providers hold the tokens
+- **Credentials the sandbox never sees.** OpenShell providers hold the tokens
   and the gateway substitutes them into outgoing requests.
-* **Isolation you can look at.** The policy pane shows the rules being enforced,
+- **Isolation you can look at.** The policy pane shows the rules being enforced,
   the events feed shows every allow and deny, and both are keys away from
   changing a rule for a running session.
-* **Several agents at once, without babysitting.** A session blocked on a
+- **Several agents at once, without babysitting.** A session blocked on a
   permission prompt says so in the list, so watching is cheaper than attaching.
-* **A toolchain when the task needs one.** `--toolchain dotnet` runs the session
+- **A toolchain when the task needs one.** `--toolchain dotnet` runs the session
   on an image variant carrying the SDK, and opens nuget for the SDK's binary and
   nothing else. The create form ticks it from what the repository contains.
-* **The parts of your setup that matter, carried in.** Skills are copied into
+- **The parts of your setup that matter, carried in.** Skills are copied into
   each sandbox; MCP servers run on the host, holding their own credentials, and
   are granted per-binary like everything else.
-* **Publish from inside.** `sbx publish` pushes the branch and opens a pull
+- **Publish from inside.** `sbx publish` pushes the branch and opens a pull
   request on GitHub or Azure DevOps without the token ever reaching your host.
 
 ## Quickstart
@@ -132,31 +132,31 @@ sbx                                           # the TUI: n starts a session, no 
 `--policy` takes a template name or a path to a YAML file. Three templates ship
 in the binary, and `feature-work` is the default:
 
-| Template | Egress |
-| --- | --- |
-| `readonly-explore` | clone and read; no model API, no push, no PRs |
-| `feature-work` | clone, agent, push, open PRs; nothing else reachable |
-| `net-open` | `feature-work` plus the npm and PyPI registries |
+| Template           | Egress                                               |
+| ------------------ | ---------------------------------------------------- |
+| `readonly-explore` | clone and read; no model API, no push, no PRs        |
+| `feature-work`     | clone, agent, push, open PRs; nothing else reachable |
+| `net-open`         | `feature-work` plus the npm and PyPI registries      |
 
-A package registry is otherwise a *toolchain's* to open, not a template's:
+A package registry is otherwise a _toolchain's_ to open, not a template's:
 `--toolchain rust` grants crates.io to cargo, in that session, and to nothing
 else. See [docs/toolchains.md](docs/toolchains.md).
 
 ## Documentation
 
-| | |
-| --- | --- |
-| [Install](docs/install.md) | prerequisites, the gateway, providers, and `sbx` itself |
-| [The TUI](docs/tui.md) | the list, the panes, starting and ending sessions, names and branches |
-| [Configuration](docs/configuration.md) | `~/.config/sbx/config.toml`, and which default wins |
-| [Policy and events](docs/policy.md) | what is enforced, the audit feed, and acting on a denial |
-| [Git hosts](docs/git-hosts.md) | GitHub and Azure DevOps, and how publishing keeps the token away |
-| [Toolchains](docs/toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
-| [Skills](docs/skills.md) | carrying your own skills into a sandbox |
-| [MCP servers](docs/mcp.md) | servers on the host, and what an MCP server costs you |
-| [The sandbox image](docs/sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |
-| [Architecture](docs/architecture.md) | how the pieces fit, for anyone reading the code |
-| [The manual loop](docs/manual-loop.md) | the verified setup, run by hand |
+|                                            |                                                                       |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| [Install](docs/install.md)                 | prerequisites, the gateway, providers, and `sbx` itself               |
+| [The TUI](docs/tui.md)                     | the list, the panes, starting and ending sessions, names and branches |
+| [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |
+| [Policy and events](docs/policy.md)        | what is enforced, the audit feed, and acting on a denial              |
+| [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |
+| [Toolchains](docs/toolchains.md)           | node, .NET and Rust in a sandbox, and the registry each one may reach |
+| [Skills](docs/skills.md)                   | carrying your own skills into a sandbox                               |
+| [MCP servers](docs/mcp.md)                 | servers on the host, and what an MCP server costs you                 |
+| [The sandbox image](docs/sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode          |
+| [Architecture](docs/architecture.md)       | how the pieces fit, for anyone reading the code                       |
+| [The manual loop](docs/manual-loop.md)     | the verified setup, run by hand                                       |
 
 ## Contributing
 
