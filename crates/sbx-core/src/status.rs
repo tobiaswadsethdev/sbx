@@ -83,6 +83,7 @@ const CURSOR: char = '❯';
 /// Where a report came from. Kept because "the pane says waiting but the hooks
 /// say running" is the normal case, not an error, and being able to see which
 /// one won makes the difference between a bug and a misunderstanding.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
@@ -90,6 +91,7 @@ pub enum Source {
     Pane,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Report {
     pub state: State,

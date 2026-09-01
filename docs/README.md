@@ -10,6 +10,7 @@
 | [toolchains.md](toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [skills.md](skills.md) | carrying your own skills into a sandbox |
 | [mcp.md](mcp.md) | MCP servers on the host, and what an MCP server costs you |
+| [desktop.md](desktop.md) | the window onto a server: running it, and why the webview never connects |
 | [server.md](server.md) | running `sbxd`, pairing a client with it, and what a token is worth |
 | [sandbox-image.md](sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |
 | [architecture.md](architecture.md) | the crates, the modules, and three rules worth knowing before changing them |

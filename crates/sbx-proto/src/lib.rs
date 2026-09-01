@@ -57,6 +57,7 @@ pub const DEFAULT_PORT: u16 = 17671;
 /// nothing here worth withholding: the version of a thing you are already
 /// connected to is not a secret, and the alternative is a pairing flow that
 /// fails identically for a wrong token and an unsupported server.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hello {
     /// Always `"sbxd"`. What distinguishes this from any other server that
@@ -91,6 +92,7 @@ impl Hello {
 ///
 /// Tagged by `op` rather than positionally, so a message stays readable in a log
 /// and an unknown variant is a name rather than an index.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Request {
@@ -121,6 +123,7 @@ impl Request {
 }
 
 /// What the server sends back when it worked.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "reply", rename_all = "kebab-case")]
 pub enum Reply {
@@ -179,6 +182,7 @@ impl From<Poll> for Reply {
 /// stale-session error wants to drop it from the list, and one showing a
 /// gateway error wants to keep it and say the gateway is unreachable. Matching
 /// on rendered English to tell those apart is how a client ends up wrong.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Failure {
     pub kind: FailureKind,
@@ -186,6 +190,7 @@ pub struct Failure {
     pub message: String,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailureKind {
@@ -244,6 +249,7 @@ impl std::error::Error for Failure {}
 /// reason the client should act on is not a transport failure: the round trip
 /// worked. Statuses stay for the things that really are transport -- no token,
 /// a body that is not a request at all.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Outcome {

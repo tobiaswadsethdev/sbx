@@ -16,6 +16,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// Verdict of a policy decision.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     Allowed,
@@ -29,6 +30,7 @@ pub enum Verdict {
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Severity {
     Info,
     Medium,
@@ -53,10 +55,16 @@ impl Severity {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     /// Epoch seconds. The gateway prints fractional seconds; the fraction is
     /// dropped because the feed shows a wall-clock time, not a duration.
+    // `number`, not the `bigint` ts-rs assumes for a u64: serde_json writes it
+    // as a JSON number and `JSON.parse` reads one back, so `bigint` would be a
+    // type the runtime never produces. Epoch seconds are exact in a double
+    // until the year 285000000.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub at: u64,
     /// `NET:OPEN`, `HTTP:GET`, `CONFIG:VALIDATED`.
     pub class: String,

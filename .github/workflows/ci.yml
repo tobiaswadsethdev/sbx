@@ -25,6 +25,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
       - name: Formatting
         run: cargo fmt --all --check
 
@@ -35,6 +41,23 @@ jobs:
       # need a live gateway are #[ignore]d and are not run here.
       - name: Tests
         run: cargo test --workspace
+
+      # The desktop application's types are generated from the Rust ones. A
+      # checked-in binding that no longer matches its type is a shape mismatch
+      # discovered at runtime in a webview, so it is a build failure here.
+      - name: TypeScript bindings are current
+        run: |
+          ./scripts/gen-bindings.sh
+          git diff --exit-code -- apps/desktop/src/gen \
+            || { echo "::error::bindings are stale; run ./scripts/gen-bindings.sh"; exit 1; }
+
+      # The desktop application is not a workspace member -- building it needs a
+      # GUI toolkit -- so what CI checks is the half that does not: the types it
+      # is generated from, and that its own TypeScript agrees with them.
+      - name: Desktop types
+        run: |
+          npm --prefix apps/desktop ci
+          npm --prefix apps/desktop exec -- tsc --noEmit
 
       - name: Build
         run: cargo build --workspace --release

@@ -38,6 +38,7 @@ use crate::store::Store;
 const ACCESS: &str = "full";
 
 /// An endpoint opened for every new session, and what may reach it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Allow {
     /// `host:port`, which is what `policy update` addresses.
@@ -50,6 +51,7 @@ pub struct Allow {
 }
 
 /// The lists, as they are on disk.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Lists {

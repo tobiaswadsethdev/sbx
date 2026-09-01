@@ -281,6 +281,7 @@ pub fn validate_name(name: &str) -> Result<(), NameError> {
 /// The agent-derived states (`Running`, `Waiting`, `Idle`) are not set yet;
 /// status detection arrives in a later increment. Until then a healthy session
 /// sits in `Ready`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
@@ -316,6 +317,7 @@ impl std::fmt::Display for State {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub name: String,
@@ -361,6 +363,11 @@ pub struct Session {
     pub agent: String,
     /// Epoch seconds. Deliberately not a formatted timestamp: the display wants
     /// a relative age, and storing epoch avoids a date-library dependency.
+    // `number`, not the `bigint` ts-rs assumes for a u64: serde_json writes it
+    // as a JSON number and `JSON.parse` reads one back, so `bigint` would be a
+    // type the runtime never produces. Epoch seconds are exact in a double
+    // until the year 285000000.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub created_at: u64,
     pub state: State,
 }

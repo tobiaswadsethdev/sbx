@@ -10,6 +10,10 @@ description = "The wire between an sbx client and sbxd"
 [dependencies]
 sbx-core = { path = "../sbx-core" }
 serde.workspace = true
+ts-rs = { version = "12", optional = true }
+
+[features]
+ts = ["dep:ts-rs", "sbx-core/ts"]
 
 [dev-dependencies]
 serde_json.workspace = true

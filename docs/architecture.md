@@ -32,7 +32,7 @@ has the decisions and the increments that got here; this is the map.
    clone+agent         clone+agent          clone+agent
 ```
 
-Five crates:
+Five crates, and an application:
 
 | | |
 | --- | --- |
@@ -40,7 +40,9 @@ Five crates:
 | `crates/sbx-core` | everything `sbx` *does*: sessions, policy, events, seeding, publishing. No renderer may appear in it, which is what lets something other than a terminal sit on top |
 | `crates/sbx-proto` | one definition of every message on the wire, so a server and a client cannot drift. Built on `sbx-core`, because the types it carries are the core's own rather than a second set kept in step by hand |
 | `crates/sbxd` | the server: TLS, one token check, and `/rpc`. Async, because it is the only part that is -- everything it calls is blocking, and goes to `spawn_blocking` |
-| `crates/sbx` | the clap CLI and the ratatui TUI, the one piece of attaching that is about the terminal this process was started in, and the client for a remote `sbxd` |
+| `crates/sbx-client` | the client half: paired servers, and one certificate-pinned connection to each. Its own crate because the CLI and the desktop application both need it, and a webview cannot pin a certificate for itself |
+| `crates/sbx` | the clap CLI and the ratatui TUI, plus the one piece of attaching that is about the terminal this process was started in |
+| `apps/desktop` | Tauri v2 and React. Deliberately *not* a workspace member: `cargo build --workspace` would otherwise need a GUI toolkit installed to check that a session store reconciles |
 
 ## Where things live
 
@@ -57,7 +59,7 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `store.rs` | the local cache and its reconciliation against the gateway; every write is locked |
 | `seed.rs` | the detached script that clones, cuts the branch, writes the record and starts the agent |
 | `status.rs` | what the agent is doing, from hooks and from its screen |
-| `policy.rs` | the templates, the mid-run widen/tighten, and the policy pane's body |
+| `policy.rs` | the templates, the mid-run widen/tighten, and `View`: the policy pane as facts, which each renderer words for itself |
 | `endpoints.rs` | the global allow and block lists applied to every new session |
 | `events.rs` | the allow/deny feed, merged and kept on disk per session |
 | `forge.rs` | which git host a session works against, derived from the repo URL |
@@ -79,9 +81,9 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `tui/create.rs` | *(sbx)* the repo picker and the create form, as pure state machines |
 | `tui/ansi.rs` | *(sbx)* the captured screen mapped into ratatui's own styles |
 | `tui/attach.rs` | *(sbx)* suspending the interface around an attach, and putting it back |
-| `remote/mod.rs` | *(sbx)* the servers this machine is paired with, and one request against one |
-| `remote/pin.rs` | *(sbx)* judging a server by its certificate's fingerprint and nothing else |
-| `remote/http.rs` | *(sbx)* enough HTTP/1.1 to ask an `sbxd` a question |
+| `lib.rs` | *(sbx-client)* the servers this machine is paired with, and one request against one |
+| `pin.rs` | *(sbx-client)* judging a server by its certificate's fingerprint and nothing else |
+| `http.rs` | *(sbx-client)* enough HTTP/1.1 to ask an `sbxd` a question |
 | `state.rs` | where secrets live: keys, tokens, and saved connections |
 
 ## Three rules worth knowing before you change anything

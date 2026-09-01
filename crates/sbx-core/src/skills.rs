@@ -41,6 +41,7 @@ const MANIFEST: &str = "SKILL.md";
 const MAX_PAYLOAD: usize = 256 * 1024;
 
 /// One skill, as the config file points at it and as the sandbox records it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Skill {
     /// The directory name, which is what the agent calls the skill.

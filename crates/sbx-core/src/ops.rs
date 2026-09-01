@@ -26,6 +26,7 @@ use crate::toolchain::{self, Toolchain};
 /// left tall by an attach from a big terminal cannot turn a poll into a flood.
 const PANE_LINES: usize = 120;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Refreshed {
     pub sessions: Vec<Session>,
@@ -576,6 +577,7 @@ const DIFF_LINE_CAP: usize = 2000;
 pub use crate::pane::{NOTICE as DIFF_NOTICE, SECTION as DIFF_SECTION};
 
 /// How much a session's working copy has diverged from its base branch.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DiffStat {
     pub added: u32,
@@ -858,6 +860,7 @@ pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> 
 /// Kept together deliberately. Exec on a sandbox is serialised gateway-side, so
 /// two separate polls would not just double the traffic -- they would queue
 /// behind each other. One script, one round trip, both answers.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Poll {
     pub stat: Option<DiffStat>,

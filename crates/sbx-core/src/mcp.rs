@@ -77,6 +77,7 @@ pub const HOST_ALIAS: &str = "host.openshell.internal";
 /// feature with a different security story -- it would need the package
 /// registries open and it would hold its credentials in the sandbox. Wrap a
 /// stdio server in an HTTP shim on the host instead; the README shows how.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Transport {
@@ -107,6 +108,7 @@ impl Transport {
 }
 
 /// One MCP server, as the config file names it and as the sandbox records it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Server {
     /// What the agent calls it. Also the tool prefix the agent shows, so it is

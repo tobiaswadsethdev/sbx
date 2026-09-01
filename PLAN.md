@@ -1771,10 +1771,47 @@ for free, with nothing persisted client-side.
   out of 23: `Reply::Policy` currently carries the revision and the global lists,
   which the CLI renders with the same code the TUI uses, and the structured
   version should be designed against the thing that will draw it.
-- **25. The shell** — Tauri v2, the session list, and Facts/Policy/Events
-  read-only. The first screenshot. Carries what increment 24 left: the
-  TypeScript generated from `sbx-proto`, and the structured `PolicyView` the
-  panes want instead of markup.
+- **25. The shell** — DONE. Tauri v2 and React, the session list, and
+  facts/policy/events read-only, against a live `sbxd`. Carried what increment
+  24 left with it: `policy::View` and the generated TypeScript.
+
+  `sbx-client` is its own crate now, because the desktop application needs the
+  same connection the CLI makes and a webview cannot make it -- `fetch` has no
+  say in which certificate it will accept, so pinning has to happen on the Rust
+  side of Tauri. The webview never speaks to the server at all.
+
+  `policy::View` replaced the marked-up string the pane used to be. That also
+  took `openshell-client` off the wire, which is worth more than it sounds: a
+  protocol pinned to a `0.0.x` project's types has that project's churn as
+  protocol churn.
+
+  **The generated types earned their keep the first time they were used.**
+  `State` is lowercase on the wire and `Verdict` is PascalCase -- an
+  inconsistency that has to stay, because events are persisted as JSONL and a
+  rename would make every file on disk unreadable. The hand-written
+  `e.verdict === "denied"` compiled, ran, and would have painted every denial as
+  neutral. Generated, it was a type error.
+
+  `apps/desktop` is deliberately not a workspace member, so `cargo build
+  --workspace` does not need a GUI toolkit installed to check that a session
+  store reconciles.
+
+  **Most of the time this took went on a bug that did not exist.** A development
+  build loads the frontend from Vite's dev server; running the binary directly
+  without that server gives a window reading `Operation was cancelled`, then a
+  blank one, which reads exactly like a broken frontend. Three fixes went in for
+  it -- stripping `crossorigin` from Vite's tags, disabling WebKit's DMABUF
+  renderer, and disabling WebKit's sandbox -- each with a confident comment
+  explaining why it was necessary. Tested afterwards against the working path,
+  none of them were, and all three are gone. The sandbox one is the one worth
+  remembering: a security-relevant change, made on a guess, documented as though
+  it had been established.
+
+  Two things from that detour stayed, both real. Debug builds open the web
+  inspector, which is the only way to see a console message from inside that
+  window. And a screenshot has to name the window id: `x11grab` on a region of
+  the screen returns solid black for a redirected window, which is what made the
+  first captures lie about what was on screen.
 - **26. Terminal** — the multiplexed websocket, then xterm.js over it: resize,
   reconnect, and the events and status channels alongside the PTY.
 - **27. Create** — the repo picker and the create form as a GUI: policy,

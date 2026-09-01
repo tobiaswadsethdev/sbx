@@ -154,6 +154,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 | [Install](docs/install.md)                 | prerequisites, the gateway, providers, and `sbx` itself               |
 | [The TUI](docs/tui.md)                     | the list, the panes, starting and ending sessions, names and branches |
 | [The server](docs/server.md)               | running `sbxd`, pairing a client, WSL, and what a token is worth      |
+| [The desktop app](docs/desktop.md)         | the window onto a server, and why the webview never connects itself   |
 | [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |
 | [Policy and events](docs/policy.md)        | what is enforced, the audit feed, and acting on a denial              |
 | [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |

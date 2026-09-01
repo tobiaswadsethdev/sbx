@@ -257,6 +257,7 @@ pub fn preset_rule_names(policy: &Policy, preset: &Preset) -> Vec<String> {
 /// It also keeps `openshell-client` off the wire entirely, which is worth more
 /// than it sounds: the gateway's own types are a `0.0.x` project's, and pinning
 /// a protocol to them would mean their churn is protocol churn.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct View {
     /// The template the session was created from, which is recorded on the
@@ -272,6 +273,7 @@ pub struct View {
     pub locked: Option<Locked>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Revision {
     pub version: u32,
@@ -327,6 +329,7 @@ impl View {
 }
 
 /// One network rule: what may be reached, by which binaries.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Rule {
     /// What `policy update` addresses, which is not always the display name.
@@ -355,6 +358,7 @@ impl Rule {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Endpoint {
     pub host_port: String,
@@ -396,6 +400,7 @@ impl Endpoint {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Access {
@@ -407,6 +412,7 @@ pub enum Access {
     None,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Tls {
@@ -416,6 +422,7 @@ pub enum Tls {
     Terminate,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct L7 {
     pub allow: bool,
@@ -445,12 +452,14 @@ impl L7 {
 /// The third column is the one worth having: a list entry only describes what a
 /// *new* session gets, and this session may predate the entry or have moved
 /// since.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListsView {
     pub allow: Vec<ListedAllow>,
     pub block: Vec<ListedBlock>,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListedAllow {
     pub endpoint: String,
@@ -458,6 +467,7 @@ pub struct ListedAllow {
     pub in_policy: bool,
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ListedBlock {
     pub endpoint: String,
@@ -498,6 +508,7 @@ impl ListsView {
 }
 
 /// The sections Landlock froze at creation.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Locked {
     pub include_workdir: bool,
