@@ -8,7 +8,6 @@
 mod auth;
 mod rpc;
 mod serve;
-mod state;
 mod tls;
 
 use std::net::SocketAddr;
@@ -20,6 +19,7 @@ use openshell_client::CliClient;
 use sbx_proto::Pairing;
 
 use auth::Tokens;
+use sbx_core::state;
 
 #[derive(Parser)]
 #[command(

@@ -35,6 +35,7 @@ pub mod repos;
 pub mod seed;
 pub mod session;
 pub mod skills;
+pub mod state;
 pub mod status;
 pub mod store;
 pub mod toolchain;

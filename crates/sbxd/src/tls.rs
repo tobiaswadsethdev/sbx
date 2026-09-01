@@ -18,7 +18,7 @@ use std::path::Path;
 use sha2::{Digest, Sha256};
 
 use crate::auth::hex;
-use crate::state;
+use sbx_core::state;
 
 pub struct Identity {
     pub cert_pem: String,

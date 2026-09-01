@@ -1,0 +1,336 @@
+//! Talking to an `sbxd` somewhere else.
+//!
+//! A saved connection is a [`Pairing`] with a name on it, kept in the state
+//! directory beside anything else secret this machine holds. `sbx connect`
+//! writes one; `--server` picks one; everything else is [`Remote::call`].
+//!
+//! This is also the second implementation of the protocol, which is the point
+//! of it existing before there is a UI. A wire format only has one consumer
+//! until it has two, and the shortcuts it has taken are invisible until the
+//! second one tries to use it.
+
+mod http;
+mod pin;
+
+use std::io;
+use std::path::PathBuf;
+
+use sbx_core::state;
+use sbx_proto::{Failure, Hello, Outcome, Pairing, Reply, Request};
+use serde::{Deserialize, Serialize};
+
+/// A server this machine has been paired with.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Remote {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub token: String,
+    pub fingerprint: String,
+}
+
+impl Remote {
+    pub fn from_pairing(name: &str, p: Pairing) -> Self {
+        Self {
+            name: name.to_string(),
+            host: p.host,
+            port: p.port,
+            token: p.token,
+            fingerprint: p.fingerprint,
+        }
+    }
+
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    /// What the server says it is, without presenting a token.
+    ///
+    /// The first thing `connect` asks, because it separates the three ways a
+    /// pairing can be wrong -- nothing listening, something else listening, and
+    /// a certificate that is not the paired one -- from the fourth, a token
+    /// that is not accepted. One error each beats one error for all four.
+    pub fn hello(&self) -> Result<Hello, Error> {
+        let response = http::request(
+            &self.host,
+            self.port,
+            &self.fingerprint,
+            "GET",
+            "/version",
+            None,
+            None,
+        )?;
+        if response.status != 200 {
+            return Err(Error::Server(format!(
+                "asked for the version and got HTTP {}",
+                response.status
+            )));
+        }
+        serde_json::from_str(&response.body).map_err(|_| {
+            // The fingerprint matched, so this really is the paired server --
+            // which makes an unparseable answer a version problem, not an
+            // impostor.
+            Error::Server(
+                "that is not an sbxd, or it is one this build is too old to understand".into(),
+            )
+        })
+    }
+
+    /// Make one request.
+    pub fn call(&self, request: Request) -> Result<Reply, Error> {
+        let body = serde_json::to_string(&request).map_err(|e| Error::Server(e.to_string()))?;
+        let response = http::request(
+            &self.host,
+            self.port,
+            &self.fingerprint,
+            "POST",
+            "/rpc",
+            Some(&self.token),
+            Some(&body),
+        )?;
+
+        match response.status {
+            200 => {}
+            401 => {
+                return Err(Error::Server(format!(
+                    "`{}` did not accept this token. It may have been revoked; \
+                     run `sbxd pair` on the server and `sbx connect` here again",
+                    self.name
+                )));
+            }
+            400 => {
+                return Err(Error::Server(
+                    "the server could not read the request, which means these two \
+                     builds disagree about the protocol"
+                        .into(),
+                ));
+            }
+            other => return Err(Error::Server(format!("HTTP {other}"))),
+        }
+
+        let outcome: Outcome = serde_json::from_str(&response.body)
+            .map_err(|e| Error::Server(format!("could not read the reply: {e}")))?;
+        outcome.into_result().map_err(Error::Failed)
+    }
+}
+
+#[derive(Debug)]
+pub enum Error {
+    /// The connection itself, before any request was answered.
+    Transport(http::Error),
+    /// The server answered, but not with a reply.
+    Server(String),
+    /// The server answered with a failure, which is a normal outcome.
+    Failed(Failure),
+}
+
+impl From<http::Error> for Error {
+    fn from(e: http::Error) -> Self {
+        Error::Transport(e)
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Transport(e) => write!(f, "{e}"),
+            Error::Server(e) => write!(f, "{e}"),
+            Error::Failed(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+/// The servers this machine knows about.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Remotes {
+    #[serde(default)]
+    remotes: Vec<Remote>,
+}
+
+impl Remotes {
+    pub fn default_path() -> PathBuf {
+        state::dir().join("remotes.json")
+    }
+
+    pub fn load() -> io::Result<Self> {
+        Self::load_from(Self::default_path())
+    }
+
+    pub fn load_from(path: impl Into<PathBuf>) -> io::Result<Self> {
+        match std::fs::read_to_string(path.into()) {
+            Ok(text) => serde_json::from_str(&text).map_err(io::Error::other),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        self.save_to(Self::default_path())
+    }
+
+    pub fn save_to(&self, path: impl Into<PathBuf>) -> io::Result<()> {
+        let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        state::write_private(&path.into(), &text)
+    }
+
+    pub fn list(&self) -> &[Remote] {
+        &self.remotes
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Remote> {
+        self.remotes.iter().find(|r| r.name == name)
+    }
+
+    /// Add one, replacing any with the same name.
+    ///
+    /// Replacing rather than refusing: pairing again is what you do when a
+    /// server was rebuilt and its certificate changed, and having to remove the
+    /// old one first would make the common repair a two-step one.
+    pub fn insert(&mut self, remote: Remote) {
+        self.remotes.retain(|r| r.name != remote.name);
+        self.remotes.push(remote);
+    }
+
+    pub fn remove(&mut self, name: &str) -> bool {
+        let before = self.remotes.len();
+        self.remotes.retain(|r| r.name != name);
+        before != self.remotes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.remotes.is_empty()
+    }
+
+    /// Which server a command should use.
+    ///
+    /// A name if one was given. Otherwise the only one there is, because a
+    /// machine with exactly one paired server has no ambiguity worth making
+    /// somebody type -- and nothing at all when there are several, because
+    /// guessing which of two servers to create a session on is the wrong kind
+    /// of convenience.
+    pub fn select(&self, name: Option<&str>) -> Result<&Remote, String> {
+        match name {
+            Some(name) => self.get(name).ok_or_else(|| {
+                format!("no server named `{name}`; `sbx remotes` lists the paired ones")
+            }),
+            None => match self.remotes.as_slice() {
+                [] => {
+                    Err("no server is paired; run `sbxd pair` there and `sbx connect` here".into())
+                }
+                [only] => Ok(only),
+                many => Err(format!(
+                    "several servers are paired ({}); say which with --server",
+                    many.iter()
+                        .map(|r| r.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )),
+            },
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FP: &str = "3b1f0a9c4d2e8b7a6f5c4d3e2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0998";
+
+    fn remote(name: &str) -> Remote {
+        Remote {
+            name: name.into(),
+            host: "localhost".into(),
+            port: 17671,
+            token: "tok".into(),
+            fingerprint: FP.into(),
+        }
+    }
+
+    #[test]
+    fn a_pairing_string_becomes_a_named_remote() {
+        let pairing: Pairing = format!("sbx://box.lan:17671/abc#{FP}").parse().unwrap();
+        let r = Remote::from_pairing("work", pairing);
+        assert_eq!(r.name, "work");
+        assert_eq!(r.address(), "box.lan:17671");
+        assert_eq!(r.token, "abc");
+        assert_eq!(r.fingerprint, FP);
+    }
+
+    #[test]
+    fn one_paired_server_needs_no_naming_and_several_do() {
+        let mut remotes = Remotes::default();
+        assert!(remotes.select(None).is_err(), "none paired");
+
+        remotes.insert(remote("wsl"));
+        assert_eq!(remotes.select(None).unwrap().name, "wsl");
+        assert_eq!(remotes.select(Some("wsl")).unwrap().name, "wsl");
+
+        remotes.insert(remote("cloud"));
+        let err = remotes.select(None).unwrap_err();
+        assert!(err.contains("--server"), "{err}");
+        // Both are named, so the message is also the list.
+        assert!(err.contains("wsl") && err.contains("cloud"), "{err}");
+        assert_eq!(remotes.select(Some("cloud")).unwrap().name, "cloud");
+    }
+
+    #[test]
+    fn a_name_that_is_not_paired_says_where_to_look() {
+        let remotes = Remotes::default();
+        let err = remotes.select(Some("nope")).unwrap_err();
+        assert!(err.contains("nope"), "{err}");
+        assert!(err.contains("sbx remotes"), "{err}");
+    }
+
+    /// Pairing again is the repair for a rebuilt server, so it replaces rather
+    /// than adding a second entry under the same name.
+    #[test]
+    fn pairing_again_replaces_rather_than_duplicating() {
+        let mut remotes = Remotes::default();
+        remotes.insert(remote("wsl"));
+        let mut updated = remote("wsl");
+        updated.fingerprint = "ff".repeat(32);
+        remotes.insert(updated);
+
+        assert_eq!(remotes.list().len(), 1);
+        assert_eq!(remotes.get("wsl").unwrap().fingerprint, "ff".repeat(32));
+    }
+
+    #[test]
+    fn remotes_survive_a_round_trip_through_the_file() {
+        let path = std::env::temp_dir().join(format!("sbx-remotes-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut remotes = Remotes::default();
+        remotes.insert(remote("wsl"));
+        remotes.save_to(&path).unwrap();
+
+        let back = Remotes::load_from(&path).unwrap();
+        assert_eq!(back.list().len(), 1);
+        assert_eq!(back.get("wsl").unwrap().token, "tok");
+
+        // A token is a credential, so the file is the owner's alone.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "mode was {mode:o}");
+
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn a_missing_file_is_no_servers_rather_than_an_error() {
+        let path = std::env::temp_dir().join("sbx-remotes-definitely-absent.json");
+        let _ = std::fs::remove_file(&path);
+        assert!(Remotes::load_from(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn removing_says_whether_there_was_anything_to_remove() {
+        let mut remotes = Remotes::default();
+        remotes.insert(remote("wsl"));
+        assert!(remotes.remove("wsl"));
+        assert!(!remotes.remove("wsl"));
+        assert!(remotes.is_empty());
+    }
+}

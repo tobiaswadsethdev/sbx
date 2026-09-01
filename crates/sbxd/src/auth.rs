@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::state;
+use sbx_core::state;
 
 /// A token, as it is kept: named, hashed, dated.
 #[derive(Debug, Clone, Serialize, Deserialize)]

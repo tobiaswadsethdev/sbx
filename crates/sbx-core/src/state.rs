@@ -1,12 +1,16 @@
-//! Where the server keeps what only it may see.
+//! Where secrets live: keys, tokens, and the connections that carry them.
+//!
+//! Used by the server for its certificate and its tokens, and by a client for
+//! the servers it has been paired with. Both are the same kind of thing: a
+//! secret this machine holds.
 //!
 //! `$XDG_STATE_HOME/sbx`, falling back to `~/.local/state/sbx` -- deliberately
 //! not `$XDG_CONFIG_HOME/sbx`, where the session cache and `config.toml`
 //! already live and where one fewer directory would have been convenient. A
 //! private key and a file of token hashes are state a machine generated, not
 //! configuration a person edits; config directories are the ones people copy
-//! between machines and check into dotfile repositories, and a server's private
-//! key following someone onto a second machine is the whole failure.
+//! between machines and check into dotfile repositories, and a private key or a
+//! bearer token following someone onto a second machine is the whole failure.
 
 use std::io;
 use std::path::{Path, PathBuf};
