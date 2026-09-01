@@ -17,5 +17,5 @@ clap = { version = "4", features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-toml = { version = "0.9", default-features = false, features = ["std", "parse", "serde"] }
+toml = { version = "1.1", default-features = false, features = ["std", "parse", "serde"] }
 ratatui = "0.30.2"
