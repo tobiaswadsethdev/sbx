@@ -4,7 +4,7 @@
 //! it was drawn with. Two things need that text: the pane that shows it, which
 //! wants the colour, and [`crate::status`], which matches markers in it and must
 //! not have an escape sequence land in the middle of a phrase it is looking for.
-//! Both come out of the same tokenizer here -- [`to_line`] and [`strip`] -- so
+//! Both come out of the same tokenizer here -- [`spans`] and [`strip`] -- so
 //! they can never disagree about where the text is.
 //!
 //! Deliberately not a terminal emulator. There is no cursor, no scroll region and
@@ -12,16 +12,124 @@
 //! per line, so the only sequences that carry meaning are the colour ones. Every
 //! other escape is skipped rather than guessed at, which is the difference
 //! between this and a dependency.
+//!
+//! The style types here are this crate's own rather than a renderer's. They were
+//! ratatui's until the core was pulled out from under the TUI: a tokenizer that
+//! speaks in one renderer's vocabulary cannot be used by a second one, and this
+//! is the same screen whether it is drawn into a terminal or sent to a client
+//! that will draw it somewhere else. The mapping to ratatui now lives with the
+//! TUI, which is the only place that needs it.
 
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use serde::{Deserialize, Serialize};
+
+/// A colour a captured screen can carry.
+///
+/// The eight base colours are named rather than indexed so the *renderer's*
+/// theme decides what they look like -- the same reason the rest of the
+/// interface uses names. [`Color::Reset`] is "whatever was there before this
+/// text", which is not the same as black.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Color {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+    DarkGray,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
+    White,
+    /// One of the 256 palette entries.
+    Indexed(u8),
+    /// Direct colour.
+    Rgb(u8, u8, u8),
+    /// Back to the surface's own colour.
+    Reset,
+}
+
+/// The attributes a run of text can carry, as a set.
+///
+/// A bitset rather than a struct of booleans because SGR turns several of them
+/// off together -- `22` clears bold *and* dim -- and that reads as one operation
+/// here rather than two assignments that could drift apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Modifiers(u16);
+
+impl Modifiers {
+    pub const BOLD: Self = Self(1 << 0);
+    pub const DIM: Self = Self(1 << 1);
+    pub const ITALIC: Self = Self(1 << 2);
+    pub const UNDERLINED: Self = Self(1 << 3);
+    pub const SLOW_BLINK: Self = Self(1 << 4);
+    pub const REVERSED: Self = Self(1 << 5);
+    pub const CROSSED_OUT: Self = Self(1 << 6);
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for Modifiers {
+    type Output = Self;
+    fn bitor(self, rhs: Self) -> Self {
+        Self(self.0 | rhs.0)
+    }
+}
+
+/// The style in force over a run of text.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Style {
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
+    pub modifiers: Modifiers,
+}
+
+impl Style {
+    fn fg(mut self, colour: Color) -> Self {
+        self.fg = Some(colour);
+        self
+    }
+
+    fn bg(mut self, colour: Color) -> Self {
+        self.bg = Some(colour);
+        self
+    }
+
+    fn add_modifier(mut self, m: Modifiers) -> Self {
+        self.modifiers = Modifiers(self.modifiers.0 | m.0);
+        self
+    }
+
+    fn remove_modifier(mut self, m: Modifiers) -> Self {
+        self.modifiers = Modifiers(self.modifiers.0 & !m.0);
+        self
+    }
+}
+
+/// A run of text and the style in force where it starts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub style: Style,
+    pub text: String,
+}
 
 /// Split a line into runs of text, each with the style in force where it starts.
 ///
-/// The caller decides what to do with them; [`to_line`] draws them and
-/// [`strip`] throws the styles away.
-fn runs(line: &str) -> Vec<(Style, String)> {
-    let mut out: Vec<(Style, String)> = Vec::new();
+/// The caller decides what to do with them: the TUI turns them into ratatui
+/// spans and [`strip`] throws the styles away.
+pub fn spans(line: &str) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
     let mut style = Style::default();
     let mut text = String::new();
     let mut chars = line.chars().peekable();
@@ -52,7 +160,10 @@ fn runs(line: &str) -> Vec<(Style, String)> {
                 // dropped rather than interpreted.
                 if final_byte == Some('m') {
                     if !text.is_empty() {
-                        out.push((style, std::mem::take(&mut text)));
+                        out.push(Span {
+                            style,
+                            text: std::mem::take(&mut text),
+                        });
                     }
                     style = apply_sgr(style, &params);
                 }
@@ -80,7 +191,7 @@ fn runs(line: &str) -> Vec<(Style, String)> {
     }
 
     if !text.is_empty() {
-        out.push((style, text));
+        out.push(Span { style, text });
     }
     out
 }
@@ -91,18 +202,9 @@ fn runs(line: &str) -> Vec<(Style, String)> {
 /// findable in a string where tmux has coloured `esc` separately.
 pub fn strip(text: &str) -> String {
     text.lines()
-        .map(|line| runs(line).into_iter().map(|(_, t)| t).collect::<String>())
+        .map(|line| spans(line).into_iter().map(|s| s.text).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// One captured line, as spans carrying the colour it was drawn with.
-pub fn to_line(line: &str) -> Line<'static> {
-    let spans: Vec<Span<'static>> = runs(line)
-        .into_iter()
-        .map(|(style, text)| Span::styled(text, style))
-        .collect();
-    Line::from(spans)
 }
 
 /// Apply one `m` sequence's parameters to the style in force.
@@ -125,17 +227,17 @@ fn apply_sgr(mut style: Style, params: &str) -> Style {
         };
         match code {
             0 => style = Style::default(),
-            1 => style = style.add_modifier(Modifier::BOLD),
-            2 => style = style.add_modifier(Modifier::DIM),
-            3 => style = style.add_modifier(Modifier::ITALIC),
-            4 => style = style.add_modifier(Modifier::UNDERLINED),
-            5 => style = style.add_modifier(Modifier::SLOW_BLINK),
-            7 => style = style.add_modifier(Modifier::REVERSED),
-            9 => style = style.add_modifier(Modifier::CROSSED_OUT),
-            22 => style = style.remove_modifier(Modifier::BOLD | Modifier::DIM),
-            23 => style = style.remove_modifier(Modifier::ITALIC),
-            24 => style = style.remove_modifier(Modifier::UNDERLINED),
-            27 => style = style.remove_modifier(Modifier::REVERSED),
+            1 => style = style.add_modifier(Modifiers::BOLD),
+            2 => style = style.add_modifier(Modifiers::DIM),
+            3 => style = style.add_modifier(Modifiers::ITALIC),
+            4 => style = style.add_modifier(Modifiers::UNDERLINED),
+            5 => style = style.add_modifier(Modifiers::SLOW_BLINK),
+            7 => style = style.add_modifier(Modifiers::REVERSED),
+            9 => style = style.add_modifier(Modifiers::CROSSED_OUT),
+            22 => style = style.remove_modifier(Modifiers::BOLD | Modifiers::DIM),
+            23 => style = style.remove_modifier(Modifiers::ITALIC),
+            24 => style = style.remove_modifier(Modifiers::UNDERLINED),
+            27 => style = style.remove_modifier(Modifiers::REVERSED),
             30..=37 => style = style.fg(ansi16(code - 30)),
             39 => style = style.fg(Color::Reset),
             40..=47 => style = style.bg(ansi16(code - 40)),
@@ -186,9 +288,7 @@ fn extended<'a>(it: &mut impl Iterator<Item = &'a str>) -> Option<Color> {
     }
 }
 
-/// The eight ANSI colours, as ratatui names them. Names rather than indices, so
-/// the user's terminal theme decides what they look like -- the same reason the
-/// rest of the interface uses them.
+/// The eight ANSI colours, by name.
 fn ansi16(n: u8) -> Color {
     match n {
         0 => Color::Black,
@@ -219,15 +319,15 @@ fn bright16(n: u8) -> Color {
 mod tests {
     use super::*;
 
-    fn text_of(line: &Line<'_>) -> String {
-        line.spans.iter().map(|s| s.content.to_string()).collect()
+    fn text_of(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
     }
 
     #[test]
     fn plain_text_survives_unchanged() {
         assert_eq!(strip("hello"), "hello");
-        assert_eq!(text_of(&to_line("hello")), "hello");
-        assert_eq!(to_line("hello").spans.len(), 1);
+        assert_eq!(text_of(&spans("hello")), "hello");
+        assert_eq!(spans("hello").len(), 1);
     }
 
     /// The reason `strip` exists: status detection matches phrases, and a phrase
@@ -241,14 +341,11 @@ mod tests {
 
     #[test]
     fn colours_become_spans() {
-        let line = to_line("\x1b[31mred\x1b[0m plain \x1b[38;5;208mindexed\x1b[0m");
+        let line = spans("\x1b[31mred\x1b[0m plain \x1b[38;5;208mindexed\x1b[0m");
         assert_eq!(text_of(&line), "red plain indexed");
 
-        let styled: Vec<(&str, Option<Color>)> = line
-            .spans
-            .iter()
-            .map(|s| (s.content.as_ref(), s.style.fg))
-            .collect();
+        let styled: Vec<(&str, Option<Color>)> =
+            line.iter().map(|s| (s.text.as_str(), s.style.fg)).collect();
         assert_eq!(styled[0], ("red", Some(Color::Red)));
         // `0m` is a reset to *nothing set*, which is what lets the pane's own
         // colours show through rather than painting the terminal default over
@@ -259,19 +356,34 @@ mod tests {
 
     #[test]
     fn truecolor_and_backgrounds_and_modifiers() {
-        let line = to_line("\x1b[1;38;2;255;128;0;48;5;236mwarm\x1b[0m");
-        let span = &line.spans[0];
+        let line = spans("\x1b[1;38;2;255;128;0;48;5;236mwarm\x1b[0m");
+        let span = &line[0];
         assert_eq!(span.style.fg, Some(Color::Rgb(255, 128, 0)));
         assert_eq!(span.style.bg, Some(Color::Indexed(236)));
-        assert!(span.style.add_modifier.contains(Modifier::BOLD));
+        assert!(span.style.modifiers.contains(Modifiers::BOLD));
+    }
+
+    /// `22` turns off two attributes at once, which is the reason the set is a
+    /// bitset rather than a field each.
+    #[test]
+    fn one_code_can_clear_two_attributes() {
+        let line = spans("\x1b[1;2;3mloud\x1b[22mstill-italic");
+        assert!(line[0].style.modifiers.contains(Modifiers::BOLD));
+        assert!(line[0].style.modifiers.contains(Modifiers::DIM));
+        assert!(!line[1].style.modifiers.contains(Modifiers::BOLD));
+        assert!(!line[1].style.modifiers.contains(Modifiers::DIM));
+        assert!(
+            line[1].style.modifiers.contains(Modifiers::ITALIC),
+            "22 clears bold and dim and nothing else"
+        );
     }
 
     /// tmux writes the colon form for direct colour, and Claude Code's own
     /// output goes through tmux, so both forms have to work.
     #[test]
     fn the_colon_form_of_direct_colour_works_too() {
-        let line = to_line("\x1b[38:2::255:128:0mwarm");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Rgb(255, 128, 0)));
+        let line = spans("\x1b[38:2::255:128:0mwarm");
+        assert_eq!(line[0].style.fg, Some(Color::Rgb(255, 128, 0)));
         assert_eq!(text_of(&line), "warm");
     }
 
@@ -301,17 +413,17 @@ mod tests {
     /// mid-line ends it -- the two halves of getting a screen back.
     #[test]
     fn style_carries_forward_until_it_is_changed() {
-        let line = to_line("\x1b[32mgreen still-green\x1b[39mplain");
-        assert_eq!(line.spans[0].style.fg, Some(Color::Green));
-        assert_eq!(line.spans[0].content.as_ref(), "green still-green");
-        assert_eq!(line.spans[1].style.fg, Some(Color::Reset));
+        let line = spans("\x1b[32mgreen still-green\x1b[39mplain");
+        assert_eq!(line[0].style.fg, Some(Color::Green));
+        assert_eq!(line[0].text, "green still-green");
+        assert_eq!(line[1].style.fg, Some(Color::Reset));
     }
 
     #[test]
     fn a_bare_reset_is_a_reset() {
-        let line = to_line("\x1b[1;31mloud\x1b[mquiet");
-        assert!(line.spans[0].style.add_modifier.contains(Modifier::BOLD));
-        assert_eq!(line.spans[1].style, Style::default());
+        let line = spans("\x1b[1;31mloud\x1b[mquiet");
+        assert!(line[0].style.modifiers.contains(Modifiers::BOLD));
+        assert_eq!(line[1].style, Style::default());
     }
 
     /// Every line of a capture is stripped independently, and the line structure
@@ -328,12 +440,10 @@ mod tests {
         let raw = "\u{1b}[38;5;246m  \u{1b}[39m\u{1b}[38;5;246m⏸ manual mode on\u{1b}[39m\
                    \u{1b}[38;5;246m · \u{1b}[39m\u{1b}[38;5;246m? for shortcuts\u{1b}[39m";
         assert_eq!(strip(raw), "  ⏸ manual mode on · ? for shortcuts");
-        let line = to_line(raw);
+        let line = spans(raw);
         assert_eq!(text_of(&line), "  ⏸ manual mode on · ? for shortcuts");
         assert!(
-            line.spans
-                .iter()
-                .any(|s| s.style.fg == Some(Color::Indexed(246))),
+            line.iter().any(|s| s.style.fg == Some(Color::Indexed(246))),
             "the grey it was drawn in survives"
         );
     }

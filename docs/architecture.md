@@ -7,9 +7,15 @@ has the decisions and the increments that got here; this is the map.
 
 ```
                 +-------------------------+
-                |        sbx (TUI)        |   ratatui + crossterm
+                |   sbx (CLI and TUI)     |   clap + ratatui
                 | list | agent  | diff    |
                 |      | policy | events  |
+                +-----------+-------------+
+                            |
+                +-----------+-------------+
+                |        sbx-core         |   nothing here draws
+                |  ops, sessions, policy, |
+                |  events, seed, publish  |
                 +-----------+-------------+
                             |
         +-------------------+--------------------+
@@ -26,21 +32,24 @@ has the decisions and the increments that got here; this is the map.
    clone+agent         clone+agent          clone+agent
 ```
 
-Two crates:
+Three crates:
 
 | | |
 | --- | --- |
 | `crates/openshell-client` | everything the rest of the tool knows about OpenShell, behind one trait. OpenShell is a fast-moving `0.0.x` project, so version churn lands in one file -- and the trait is what lets the gRPC API replace the subprocess later without touching callers |
-| `crates/sbx` | the CLI and the TUI, and all the logic between them |
+| `crates/sbx-core` | everything `sbx` *does*: sessions, policy, events, seeding, publishing. No renderer may appear in it, which is what lets something other than a terminal sit on top |
+| `crates/sbx` | the clap CLI and the ratatui TUI, plus the one piece of attaching that is about the terminal this process was started in |
 
 ## Where things live
 
 The module docs at the top of each file are the real documentation; this is the
 index into them.
 
+Everything is in `sbx-core` unless the second column says otherwise.
+
 | Module | What it owns |
 | --- | --- |
-| `main.rs` | the clap CLI, and dispatch into `ops` |
+| `main.rs` | *(sbx)* the clap CLI, and dispatch into `ops` |
 | `ops.rs` | the operations both the CLI and the TUI need, so neither reimplements the other |
 | `session.rs` | what a session *is*: identity, the derived branch and sandbox names, and the metadata record written inside the sandbox |
 | `store.rs` | the local cache and its reconciliation against the gateway; every write is locked |
@@ -59,15 +68,28 @@ index into them.
 | `config.rs` | `~/.config/sbx/config.toml`, and which default wins |
 | `doctor.rs` | the preflight checks, each carrying its fix |
 | `update.rs` | fetching, verifying and replacing the `sbx` binary itself |
-| `ansi.rs` | one tokenizer for captured screens, shared by the pane that shows them and the matcher that reads them |
+| `ansi.rs` | one tokenizer for captured screens, into style types of its own, shared by everything that shows them and the matcher that reads them |
 | `pane.rs` | the markup the text panes share, so styling stays in one place |
-| `tui/mod.rs` | `App`: state and key handling |
-| `tui/ui.rs` | rendering; almost pure, and tested through the helpers that build the lines |
-| `tui/worker.rs` | the background worker that owns every gateway call |
-| `tui/create.rs` | the repo picker and the create form, as pure state machines |
-| `tui/attach.rs` | handing the terminal to the agent and taking it back |
+| `attach.rs` | *(sbx)* raw mode, and handing this terminal to the agent |
+| `tui/mod.rs` | *(sbx)* `App`: state and key handling |
+| `tui/ui.rs` | *(sbx)* rendering; almost pure, and tested through the helpers that build the lines |
+| `tui/worker.rs` | *(sbx)* the background worker that owns every gateway call |
+| `tui/create.rs` | *(sbx)* the repo picker and the create form, as pure state machines |
+| `tui/ansi.rs` | *(sbx)* the captured screen mapped into ratatui's own styles |
+| `tui/attach.rs` | *(sbx)* suspending the interface around an attach, and putting it back |
 
-## Two rules worth knowing before you change anything
+## Three rules worth knowing before you change anything
+
+**Nothing in `sbx-core` may depend on a renderer.** It is the invariant the crate
+split exists to hold, and it is load-bearing rather than tidy: a core that knows
+about ratatui cannot be linked into a server. It is also easy to breach by
+accident, because reaching for `ratatui::style::Color` in a module that builds a
+pane body is the obvious thing to do. Two places used to and no longer do --
+`ansi.rs` tokenizes into its own `Style` and the TUI maps that onto ratatui's in
+`tui/ansi.rs`, and raw-mode attaching moved out to `attach.rs` in the binary. The
+frozen TUI still building against the core is the cheapest test that the rule has
+held.
+
 
 **The render thread does no I/O.** Every gateway call is a subprocess round trip
 costing hundreds of milliseconds. `tui/worker.rs` owns all of them; the UI sends
@@ -107,7 +129,7 @@ reason git gave. A seeder still running is left alone, however long it takes.
 The suite is hermetic on purpose, so a contributor with no gateway can still
 change almost anything:
 
-* pane classification runs against real captures in `crates/sbx/tests/panes/`,
+* pane classification runs against real captures in `crates/sbx-core/tests/panes/`,
   included at compile time by `status.rs`;
 * the TUI's key handling drives `App` directly with synthetic key events;
 * rendering is checked through the pure helpers that build the lines, rather

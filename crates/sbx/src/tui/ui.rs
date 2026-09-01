@@ -11,14 +11,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, List, ListItem, Padding, Paragraph, Wrap};
 
-use crate::events::Verdict;
-use crate::ops;
-use crate::pane;
-use crate::repos::{Facts, LocalRepo};
-use crate::session::{self, Session, State};
-use crate::status::Source;
 use crate::tui::create::{Create, Field, Form, Input, Picker};
 use crate::tui::{App, Focus, RightView};
+use sbx_core::events::Verdict;
+use sbx_core::ops;
+use sbx_core::pane;
+use sbx_core::repos::{Facts, LocalRepo};
+use sbx_core::session::{self, Session, State};
+use sbx_core::status::Source;
 
 /// Width of the session-name column. Names are capped at 15 characters by the
 /// gateway's sandbox-name limit, so this only ever truncates a near-maximal one.
@@ -453,10 +453,10 @@ fn agent_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
     };
 
     // Drawn in the colour the agent chose: the capture keeps it, and
-    // `crate::ansi` turns each line's escapes back into spans. Guessing at
+    // `sbx_core::ansi` turns each line's escapes back into spans. Guessing at
     // colour by matching on the agent's own words would go wrong the next time
     // it changed them; this is the colour itself.
-    squeeze(screen).map(crate::ansi::to_line).collect()
+    squeeze(screen).map(super::ansi::to_line).collect()
 }
 
 /// The agent's screen with its padding taken out.
@@ -477,7 +477,7 @@ fn squeeze(screen: &str) -> impl Iterator<Item = &str> {
     // several colour changes around nothing at all -- tmux colours the empty
     // right-hand end of a row. Judged on the stripped copy, or thirty rows of
     // invisible escapes count as content and nothing is squeezed.
-    let blank = |line: &&str| crate::ansi::strip(line).trim().is_empty();
+    let blank = |line: &&str| sbx_core::ansi::strip(line).trim().is_empty();
     let mut blanks = 0usize;
     screen.lines().skip_while(blank).filter(move |line| {
         if blank(line) {
@@ -828,7 +828,7 @@ fn is_file_header(line: &str) -> bool {
         || PREFIXES.iter().any(|p| line.starts_with(p))
 }
 
-/// The effective policy, rendered from the marked-up body [`crate::policy`]
+/// The effective policy, rendered from the marked-up body [`sbx_core::policy`]
 /// produces. Same split as the diff pane: fetching builds text, rendering
 /// colours it.
 fn policy_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
@@ -851,7 +851,7 @@ fn policy_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
         Err(e) => return vec![Line::from(e.clone()).style(Style::default().fg(Color::Red))],
     };
 
-    let body = crate::policy::render(rev, session.policy.as_deref(), app.lists());
+    let body = sbx_core::policy::render(rev, session.policy.as_deref(), app.lists());
     body.lines().map(marked_line).collect()
 }
 
@@ -987,7 +987,7 @@ fn event_lines(app: &App, session: &Session) -> Vec<Line<'static>> {
 /// The one place the two have to agree: the scroll that keeps the cursor in
 /// view is computed from this, and a reason line the arithmetic did not know
 /// about is a denial's reason falling off the bottom of the pane.
-fn event_rows(e: &crate::events::Event) -> usize {
+fn event_rows(e: &sbx_core::events::Event) -> usize {
     1 + usize::from(e.reason.is_some())
 }
 
@@ -1692,7 +1692,7 @@ mod tests {
     use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
     use super::*;
-    use crate::config::Config;
+    use sbx_core::config::Config;
 
     #[test]
     fn truncates_on_character_boundaries() {
@@ -2244,12 +2244,12 @@ diff --git a/b b/b
     }
 
     /// A hint line that does not fit is clipped mid-word, which reads as broken.
-    fn denial(at: u64, subject: &str, reason: Option<&str>) -> crate::events::Event {
-        crate::events::Event {
+    fn denial(at: u64, subject: &str, reason: Option<&str>) -> sbx_core::events::Event {
+        sbx_core::events::Event {
             at,
             class: "NET:OPEN".into(),
-            severity: crate::events::Severity::Medium,
-            verdict: crate::events::Verdict::Denied,
+            severity: sbx_core::events::Severity::Medium,
+            verdict: sbx_core::events::Verdict::Denied,
             subject: subject.into(),
             policy: None,
             reason: reason.map(str::to_string),

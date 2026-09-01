@@ -4,8 +4,7 @@ use std::io;
 
 use openshell_client::CliClient;
 
-use crate::ops;
-use crate::session::Session;
+use sbx_core::session::Session;
 
 /// Attach to the agent's tmux session inside the sandbox.
 ///
@@ -20,10 +19,10 @@ pub fn attach(
     ratatui::restore();
     println!("attaching to {} - detach with Ctrl-b d", session.name);
 
-    // Raw mode is [`ops::attach_interactively`]'s to manage, and it has to
+    // Raw mode is [`crate::attach::interactively`]'s to manage, and it has to
     // outlive `ratatui::restore` above: restoring the TUI's terminal turns raw
     // mode *off*, which is right for a shell prompt and wrong for the agent.
-    let status = ops::attach_interactively(client, session);
+    let status = crate::attach::interactively(client, session);
 
     // Restore the TUI before reporting anything, so an error is drawn inside
     // the interface rather than scrolling past on a bare terminal.

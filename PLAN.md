@@ -1516,3 +1516,260 @@ Things a future session should know that are not obvious from the code:
 * `openshell logs` and `policy list` have no `--output json`. The log is parsed
   by line in `events.rs`; policy history is not surfaced at all because the
   table would have to be scraped.
+
+---
+
+# Pivot: the ADE
+
+Increments 0-22 built a terminal UI for one person on one Linux box. The pivot
+keeps every part of that -- the sandbox per session, the per-binary policy, the
+allow/deny feed, the credentials the sandbox never sees -- and puts a desktop
+application in front of it, with the server free to be somewhere else.
+
+The reference for the shape is [Orca](https://github.com/stablyai/orca): a fleet
+of parallel agents, a task inbox wired to the trackers, a real terminal, diffs
+you can annotate. What Orca isolates with a git worktree, this isolates with a
+kernel-enforced sandbox, and the policy and events panes are the part no ADE
+has.
+
+## Why the code is ready for this
+
+`ops.rs` -- the operations both the CLI and the TUI already share -- imports
+nothing from ratatui. `openshell-client` is one trait. Sessions describe
+themselves from inside their own sandbox, so a client dying is a non-event and
+a *second* client is nearly free. The headless core is mostly already written;
+it is just not a crate yet.
+
+The exceptions, and the work they imply: `ansi.rs` returns ratatui `Span`s,
+`pane.rs` is presentation, and `policy.rs` builds a pane body. Anything that
+renders has to move behind the boundary, leaving the core returning structured
+values that a terminal and a web view can each draw their own way.
+
+## Locked decisions
+
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Desktop stack | Tauri v2 | Reuses the Rust core and its serde types; the Windows binary is WebView2, so it is ~10MB and Chromium-backed, which is what a WebGL terminal wants. Linux desktop gets WebKitGTK and a rougher terminal -- accepted, because the Linux user already has the TUI |
+| Transport | A listening `sbxd`, TLS + bearer tokens | Chosen over stdio-over-SSH. Costs a certificate and pairing story, buys multi-client, a mobile client later, and a server that does not need an SSH account per user |
+| Backends | Sandboxed *and* unsandboxed worktrees | The sandbox stays the default and the point. A worktree session runs on the server with the server's rights, and is labelled as such everywhere it appears |
+| The TUI | Frozen | Bug fixes only. It stays building against the core, which is the cheapest possible test that the core has not grown a UI dependency |
+| UI data | Structured, never markup | The core returns `PolicyView` and `Vec<Event>`; the TUI makes lines out of them and the web view makes elements. Shipping pane markup over the wire would make the desktop app a screen-scraper of the terminal one |
+
+## Shape
+
+```
+crates/
+  openshell-client/   unchanged -- the trait
+  sbx-core/           ops, session, store, policy, events, seed, skills, mcp,
+                      publish, repos, image, toolchain, config, doctor, status
+  sbx-proto/          the wire types, one serde definition, TS generated from it
+  sbxd/               the server: axum, TLS, /rpc + one multiplexed websocket
+  sbx/                the clap CLI and the frozen TUI, in-process on the core
+apps/desktop/         Tauri v2 -- the only thing that ships to Windows
+```
+
+`sbx-proto` is the single definition of the protocol and `ts-rs` emits the
+TypeScript from it into `apps/desktop/src/gen/`, checked current in CI. Two
+hand-maintained copies of a message type is the failure mode that makes a
+self-hosted client-server product miserable, and it is avoidable for the cost of
+a build step.
+
+### The server
+
+One TLS listener. `POST /rpc` for request-response, one multiplexed websocket
+for everything that streams -- the events feed, agent status, and the PTY --
+because a single connection is one token check, one reconnect path, and one
+thing to notice has dropped.
+
+`GET /version` is unauthenticated and carries a protocol integer. A desktop app
+and a self-hosted server *will* drift, and a client that can say so beats a
+client that fails strangely.
+
+**Binding to anything but `127.0.0.1` is explicit.** An authenticated `sbxd` can
+create containers on its host, which makes it equivalent to root there; that
+belongs in the docs and in the warning the flag prints, not in a footnote.
+
+### Pairing
+
+`sbxd` generates a self-signed certificate on first run, with the hostname, the
+local addresses and `localhost` in its SANs. `sbxd pair` prints one connection
+string -- `sbx://host:port/<token>#<cert-fingerprint>` -- and the QR code that
+the same string becomes useful as when there is a mobile client. The desktop app
+takes one paste. The client pins the fingerprint on first connect and refuses a
+changed one afterwards; tokens are stored hashed, named, and revocable with
+`sbxd token rm`.
+
+### The WSL case, which is the sharp one
+
+The whole point of the Windows story is a server inside WSL and a UI outside it,
+and whether `localhost` reaches across depends on whether WSL2 is in mirrored or
+NAT networking mode. `sbx doctor` on the WSL side should detect which, and print
+the address Windows should actually use -- including the `netsh portproxy` line
+when it is NAT. Getting this wrong looks exactly like a firewall problem and is
+not one.
+
+## Two backends
+
+A `Backend` trait behind `ops`, with the openshell path as one implementation
+and a `git worktree` path as the other:
+
+```rust
+trait Backend {
+    fn create(&self, spec: &SessionSpec) -> Result<Placement>;
+    fn exec(&self, s: &Session, cmd: &[String]) -> Result<Output>;
+    fn attach_pty(&self, s: &Session) -> Result<PtyHandle>;
+    fn destroy(&self, s: &Session) -> Result<()>;
+    fn isolation(&self) -> Isolation;   // Sandboxed { policy, events } | None
+}
+```
+
+Three things a worktree session cannot have, each of which has to be *said*
+rather than left blank:
+
+* **No policy pane.** It reads "no isolation -- this session runs on the server
+  with your rights", not an empty box that looks like a loading failure.
+* **No events feed.** There is no gateway deciding anything, so there is nothing
+  to allow or block.
+* **A different publish.** `publish.rs` pushes from *inside* the sandbox
+  precisely so the token never reaches the host; a worktree push uses the
+  server's own git credentials. Same button, materially different guarantee.
+
+The list badge says which kind a session is. A product whose pitch is isolation
+cannot have a mode where the isolation is quietly absent.
+
+The source-of-truth invariant also bends here: there is no sandbox to hold
+`meta.json`, so a worktree session's record lives in the server's state
+directory -- not in the worktree, where it would show up in every `git status`
+the agent runs. Adoption after cache loss becomes `git worktree list` reconciled
+against that directory.
+
+## Skills and MCP, now that there are two hosts
+
+"The host" used to mean one machine. It now means the server, while the skills
+and the muscle memory live on the machine with the UI.
+
+**Skills** get a server-side library at `$XDG_DATA_HOME/sbx/skills/`, filled
+from two sources: server-local paths, exactly as the config file does today, and
+uploads pushed by the desktop client from its own `~/.claude/skills`. The
+pointer-not-copy property survives -- the client re-uploads on create, so editing
+the original still means the next session gets the edit -- and a session still
+records precisely what it was given.
+
+**MCP servers** stop being a documented `docker run` incantation and become
+something `sbxd` owns: a catalog of name, image, args, environment and transport;
+containers started on `openshell-docker` and health-checked; secrets in a
+server-side store that never travels to a client. `sbx doctor`'s MCP check turns
+into live status in an Integrations screen, and the per-binary grant is unchanged.
+
+The warning in `docs/mcp.md` moves into the UI, at the moment a server is ticked
+for a session rather than in a document nobody re-reads: the agent gains
+everything that server can do, the gateway sees only `POST /mcp`, and a
+filesystem or Docker MCP server is a straight sandbox escape.
+
+## The task inbox
+
+GitHub, Azure DevOps and Jira, read server-side over REST with the credentials in
+the server's store -- REST for what the *UI* shows, MCP for what the *agent*
+gets. They are different consumers and conflating them makes both worse.
+
+`forge.rs` already knows which host a repo belongs to and `publish.rs` already
+opens pull requests on two of them, so the new part is the reading and the round
+trip: open a session from a ticket with the task, base branch and a branch name
+following `name/PROJ-123-description` already filled in, and on publish, comment
+the PR link back and move the ticket. That loop currently exists as a personal
+skill; it is the thing an ADE should do with a button.
+
+## UI
+
+* **Left** -- repositories, then their sessions, each with a state badge, the
+  waiting count, and the isolation kind.
+* **Centre** -- per session: Agent (xterm.js on the websocket), Diff, Files.
+* **Right** -- Facts, Policy, Events. The events feed keeps the TUI's best
+  interaction: pick a decision, allow or block that endpoint, one keystroke.
+* **Top** -- the task inbox.
+
+Two things the desktop gets that the terminal could not. **An OS notification
+when a session starts waiting on a permission prompt** is the single largest
+quality-of-life gain here; watching several agents is exactly the case where a
+terminal loses. And **inline comments on a diff, batched and sent back to the
+agent**, which is review as a conversation rather than a re-prompt.
+
+The terminal is a place this is better positioned than the reference. tmux
+already runs *inside* the sandbox, so xterm.js over the websocket to
+`openshell exec --tty` gets scrollback and reconnect across a dropped network
+for free, with nothing persisted client-side.
+
+## Increments
+
+- **23. Headless core** — DONE. `sbx-core` holds the twenty modules that do not
+  draw; `crates/sbx` keeps the clap CLI and the frozen TUI. No behaviour changed:
+  the same 408 tests pass, now 259 in the core and 149 in the binary, and
+  `sbx doctor`, `policies`, `toolchains` and `config` were run against the live
+  gateway afterwards to check that the embedded policy YAML, Dockerfiles and
+  `config.example.toml` all survived moving a directory.
+
+  Two things crossed the line and had to move. `ansi.rs` returned ratatui
+  `Span`s, so it now tokenizes into a `Style`/`Color`/`Modifiers` of its own --
+  serde-derived, because a captured screen is something a client will be sent --
+  and `tui/ansi.rs` maps that onto ratatui. And `ops::attach_interactively` put
+  the local terminal into raw mode through `ratatui::crossterm`, which is not the
+  core's business: it moved to `attach.rs` in the binary, where both callers
+  already live, so it is still one definition rather than two. `ops` keeps
+  `attach_script`, which is the same shell wherever it is run from -- and the
+  long comment explaining that script, which had drifted onto the caller, is now
+  on it.
+
+  **The plan said `pane.rs` moves to the TUI, and the code says otherwise.**
+  `pane.rs` is markup in a `String` with no UI dependency at all, and it has
+  three consumers, not one: `policy.rs` builds a body with it, `ops.rs` shares
+  its sigils for the diff, and `sbx policy` prints `to_plain` to a pipe. Moving
+  it into the TUI would have dragged two core modules and a CLI command along
+  behind it. It stays in the core.
+
+  What that markup *is* -- a serialised pane, parsed back by whoever draws it --
+  is still wrong for a wire protocol, and the `PolicyView` this deferred is real
+  work. It belongs in increment 24, where `sbx-proto` will say what shape the
+  structured version actually needs to be. Designing it now, against no consumer,
+  would have been guessing.
+- **24. `sbx-proto` and `sbxd`** — the wire types with generated TypeScript, the
+  server, TLS, tokens, pairing, `/rpc` and the multiplexed websocket. No GUI:
+  verified with `sbx --server <url> ls`, which is also the thing that proves the
+  protocol is not secretly shaped like one particular client. `sbx doctor` learns
+  reachability, including the WSL modes. Also where the structured `PolicyView`
+  and diff that increment 23 deferred get their shape, since this is the first
+  point at which there is a consumer to shape them for.
+- **25. The shell** — Tauri v2, the session list, and Facts/Policy/Events
+  read-only. The first screenshot.
+- **26. Terminal** — xterm.js over the websocket, resize, reconnect.
+- **27. Create** — the repo picker and the create form as a GUI: policy,
+  toolchain, skills, MCP servers.
+- **28. Diff** — the three sections, and inline comments batched back to the agent.
+- **29. Worktree backend** — the `Backend` trait, the second implementation, and
+  the labelling that keeps it honest.
+- **30. Managed MCP and skill sync** — the catalog, container lifecycle, the
+  secret store, and the client-to-server skill upload.
+- **31. Task inbox** — GitHub, Azure DevOps and Jira; open-from-ticket and the
+  publish round trip.
+- **32. Ship it** — notifications, usage and rate-limit display, Windows
+  packaging and signing, and the install story for a server that is not local.
+
+## Risks
+
+- **A listening daemon is a new attack surface**, and an authenticated one is
+  root on its host. Mitigation: `127.0.0.1` by default, an explicit and noisy
+  flag to widen, pinned certificates, hashed and revocable tokens -- and saying
+  so plainly rather than implying more safety than there is.
+- **Two backends dilute the pitch.** "Kernel-enforced isolation" and "also, a
+  mode without any" is a harder sentence. Mitigation is the labelling in
+  increment 29, and keeping sandboxed the default everywhere it is offered.
+- **Tauri on Linux is WebKitGTK.** A heavy terminal there will be worse than on
+  Windows. Accepted: the Linux user has the TUI, and the fallback if it does
+  bite is serving the same web UI to a browser, which the transport already
+  allows.
+- **Version skew** between a shipped desktop app and a self-hosted `sbxd`.
+  Mitigation: the unauthenticated `/version` and a client that refuses politely.
+- **Scope.** This is several times the size of the TUI, and the TUI is the
+  hedge: it keeps working the whole way through, so a stalled desktop app costs
+  the new thing rather than the working one.
+- **OpenShell 0.0.x churn now reaches a GUI too**, which is a slower thing to
+  repair than a pane. Unchanged mitigation: all of it stays behind one trait.

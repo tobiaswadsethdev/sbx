@@ -6,7 +6,7 @@ name: Release
 #     git tag v0.2.0 && git push origin v0.2.0
 #
 # The asset names are part of the contract with both of them, and a test in
-# `crates/sbx/src/update.rs` fails if the three ever disagree.
+# `crates/sbx-core/src/update.rs` fails if the three ever disagree.
 on:
   push:
     tags: ["v*"]

@@ -1243,6 +1243,15 @@ dependencies = [
  "clap",
  "openshell-client",
  "ratatui",
+ "sbx-core",
+ "serde_json",
+]
+
+[[package]]
+name = "sbx-core"
+version = "0.2.0"
+dependencies = [
+ "openshell-client",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

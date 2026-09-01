@@ -65,7 +65,7 @@ pub struct Config {
     /// Where the TUI's picker looks for repositories. Replaces the built-in
     /// roots rather than adding to them, like `SBX_REPO_ROOTS`, which still wins.
     pub repo_roots: Option<Vec<PathBuf>>,
-    /// How often the TUI reads the sandboxes. See [`crate::tui::Intervals`]:
+    /// How often the TUI reads the sandboxes. See its `Intervals`:
     /// this is one number scaling a set of measured ones, because they are
     /// related to each other and a single absolute interval would break the
     /// relationships.

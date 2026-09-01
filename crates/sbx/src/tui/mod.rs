@@ -1,5 +1,6 @@
 //! The terminal UI.
 
+mod ansi;
 mod attach;
 mod create;
 mod ui;
@@ -13,16 +14,16 @@ use openshell_client::{CliClient, PolicyRevision, PolicyUpdate, Provider};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
-use crate::config::Config;
-use crate::endpoints::{self, Listed, Lists};
-use crate::events::Target;
-use crate::ops;
-use crate::policy;
-use crate::repos::{self, LocalRepo};
-use crate::session::{Session, State};
-use crate::status;
 use crate::tui::attach::attach;
 use create::{Create, Form, Picker};
+use sbx_core::config::Config;
+use sbx_core::endpoints::{self, Listed, Lists};
+use sbx_core::events::Target;
+use sbx_core::ops;
+use sbx_core::policy;
+use sbx_core::repos::{self, LocalRepo};
+use sbx_core::session::{Session, State};
+use sbx_core::status;
 use worker::{Request, Update, Worker};
 
 // What everything here costs, measured against a live gateway rather than
@@ -203,7 +204,7 @@ impl RightView {
             RightView::Diff => iv.pane_ttl,
             RightView::Policy => iv.policy_ttl,
             // A gateway call rather than an exec, so it contends with nothing;
-            // see `crate::events`.
+            // see `sbx_core::events`.
             RightView::Events => iv.pane_ttl,
             // Drawn from the poll, which has its own schedule; see
             // [`next_poll_target`]. The value is never read.
@@ -264,7 +265,7 @@ pub struct App {
     /// worth caching: an unreachable gateway should not blank the pane on every
     /// tick, it should keep saying why.
     policies: HashMap<String, Cached<Result<PolicyRevision, String>>>,
-    events: HashMap<String, Cached<Result<Vec<crate::events::Event>, String>>>,
+    events: HashMap<String, Cached<Result<Vec<sbx_core::events::Event>, String>>>,
     /// Which event the feed's cursor is on, per session. An index rather than a
     /// key because that is what the renderer needs; kept pointing at the same
     /// *event* across a refetch by [`App::on_update`], since the feed grows at
@@ -625,7 +626,7 @@ impl App {
     }
 
     /// The last events read for a session, if any have come back.
-    pub fn events(&self, name: &str) -> Option<&Result<Vec<crate::events::Event>, String>> {
+    pub fn events(&self, name: &str) -> Option<&Result<Vec<sbx_core::events::Event>, String>> {
         self.events.get(name).map(|c| &c.value)
     }
 
@@ -668,7 +669,7 @@ impl App {
     }
 
     /// A session's feed, if it has come back and was readable.
-    fn feed(&self, name: &str) -> Option<&[crate::events::Event]> {
+    fn feed(&self, name: &str) -> Option<&[sbx_core::events::Event]> {
         match self.events(name)? {
             Ok(events) => Some(events),
             Err(_) => None,
@@ -676,7 +677,7 @@ impl App {
     }
 
     /// The event the cursor is on.
-    fn selected_event(&self, name: &str) -> Option<&crate::events::Event> {
+    fn selected_event(&self, name: &str) -> Option<&sbx_core::events::Event> {
         self.feed(name)?.get(self.event_cursor(name))
     }
 
@@ -1027,7 +1028,7 @@ impl App {
         }
         // Parsed here rather than at confirm time so an unpublishable remote is
         // refused before the user is asked a pointless question.
-        let target = match crate::forge::Remote::parse(&session.repo) {
+        let target = match sbx_core::forge::Remote::parse(&session.repo) {
             Ok(r) => r.slug(),
             Err(e) => {
                 self.fail(format!("cannot publish: {e}"));
@@ -1183,7 +1184,7 @@ impl App {
         let taken = self.sessions.iter().map(|s| s.name.clone()).collect();
 
         let key = |url: &str| {
-            crate::forge::Remote::parse(url)
+            sbx_core::forge::Remote::parse(url)
                 .ok()
                 .map(|r| (r.host, r.org))
         };
@@ -1462,7 +1463,9 @@ impl App {
                 // whose keys act on whatever it is pointing at. Re-anchored by
                 // identity -- the same notion of sameness the kept file dedupes
                 // on, so the cursor cannot follow an event the merge discarded.
-                if let Some(was) = self.selected_event(&session).map(crate::events::Event::key)
+                if let Some(was) = self
+                    .selected_event(&session)
+                    .map(sbx_core::events::Event::key)
                     && let Ok(now) = &*result
                 {
                     let at = now.iter().position(|e| e.key() == was).unwrap_or(0);
@@ -2159,12 +2162,12 @@ mod tests {
 
     // ---- the events feed's cursor, and the four decisions it offers ----
 
-    fn event(at: u64, subject: &str, reason: Option<&str>) -> crate::events::Event {
-        crate::events::Event {
+    fn event(at: u64, subject: &str, reason: Option<&str>) -> sbx_core::events::Event {
+        sbx_core::events::Event {
             at,
             class: "NET:OPEN".into(),
-            severity: crate::events::Severity::Medium,
-            verdict: crate::events::Verdict::Denied,
+            severity: sbx_core::events::Severity::Medium,
+            verdict: sbx_core::events::Verdict::Denied,
             subject: subject.into(),
             policy: None,
             reason: reason.map(str::to_string),
@@ -2176,7 +2179,7 @@ mod tests {
     /// The global lists are pointed at a temporary file, so a test that presses
     /// `A` or `B` cannot write to the developer's own configuration. Named by
     /// thread as well as process, because the suite runs these in parallel.
-    fn app_on_feed(feed: Vec<crate::events::Event>, rev: Option<PolicyRevision>) -> App {
+    fn app_on_feed(feed: Vec<sbx_core::events::Event>, rev: Option<PolicyRevision>) -> App {
         let mut app = app_with(&["a"]);
         app.lists_path = std::env::temp_dir().join(format!(
             "sbx-test-endpoints-{}-{:?}.json",
@@ -2323,7 +2326,7 @@ mod tests {
         // than a decision about an endpoint.
         let mut warning = event(1, "'tls: terminate' is deprecated; use 'tls: skip'", None);
         warning.class = "CONFIG:VALIDATED".into();
-        warning.verdict = crate::events::Verdict::Neutral;
+        warning.verdict = sbx_core::events::Verdict::Neutral;
         let mut app = app_on_feed(vec![warning], None);
         app.on_key(key(KeyCode::Char('e')));
         assert!(app.pending_choice().is_none());
@@ -2706,7 +2709,7 @@ mod tests {
         app.publishing = Some("a".into());
         app.on_update(Update::Published {
             session: "a".into(),
-            result: Box::new(Ok(crate::publish::Outcome {
+            result: Box::new(Ok(sbx_core::publish::Outcome {
                 pushed: true,
                 pull_request: Some("https://dev.azure.com/o/p/_git/r/pullrequest/7".into()),
                 warnings: vec![],
@@ -3376,7 +3379,7 @@ mod tests {
         let app = app_after_submit(&["fix-readme"], "fix the readme");
         let draft = app.create_request.as_ref().expect("a queued create");
         assert_eq!(draft.name, "fix-readme-2");
-        assert!(crate::session::validate_name(&draft.name).is_ok());
+        assert!(sbx_core::session::validate_name(&draft.name).is_ok());
     }
 
     /// The guard is still needed for a name typed by hand: editing the name pins
@@ -3575,7 +3578,7 @@ mod tests {
 
         app.on_update(Update::Inspected {
             path: "/home/u/dev/somewhere-else".into(),
-            facts: Box::new(crate::repos::Facts {
+            facts: Box::new(sbx_core::repos::Facts {
                 uncommitted: 9,
                 unpushed: None,
                 base_on_remote: false,

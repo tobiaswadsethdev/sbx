@@ -16,11 +16,11 @@
 use openshell_client::Provider;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::ops;
-use crate::policy;
-use crate::repos::{Facts, LocalRepo};
-use crate::session;
-use crate::toolchain;
+use sbx_core::ops;
+use sbx_core::policy;
+use sbx_core::repos::{Facts, LocalRepo};
+use sbx_core::session;
+use sbx_core::toolchain;
 
 /// A single-line text field with a cursor.
 ///
@@ -284,7 +284,7 @@ impl Picker {
         let Some(repos) = &self.repos else {
             return;
         };
-        self.matches = crate::repos::filter(repos, self.query.text());
+        self.matches = sbx_core::repos::filter(repos, self.query.text());
         // Back to the best match: keeping the old index as the query changes
         // would leave the cursor on whatever happened to land at that row.
         self.cursor = 0;
@@ -421,9 +421,9 @@ pub struct Defaults {
     /// about what your agents can reach, made in the config file. The form's job
     /// here is only to put it on the draft, so the TUI and `sbx new` cannot
     /// create sessions with different tools.
-    pub mcp: Vec<crate::mcp::Server>,
+    pub mcp: Vec<sbx_core::mcp::Server>,
     /// Skills copied into the sandbox. Carried, not chosen, like `mcp`.
-    pub skills: Vec<crate::skills::Skill>,
+    pub skills: Vec<sbx_core::skills::Skill>,
 }
 
 /// One entry of the form's policy chooser.
@@ -498,8 +498,8 @@ pub struct Form {
     /// The config file's provider list, kept because the gateway's own list may
     /// arrive after the form is open and has to be ticked the same way then.
     configured_providers: Option<Vec<String>>,
-    mcp: Vec<crate::mcp::Server>,
-    skills: Vec<crate::skills::Skill>,
+    mcp: Vec<sbx_core::mcp::Server>,
+    skills: Vec<sbx_core::skills::Skill>,
     /// Why the provider list is empty, when the gateway could not be asked.
     providers_error: Option<String>,
     field: Field,
@@ -872,7 +872,7 @@ fn preselect(providers: &[Provider], repo: &LocalRepo, used_before: &[String]) -
     let forge = repo
         .origin
         .as_deref()
-        .and_then(|url| crate::forge::Remote::parse(url).ok())
+        .and_then(|url| sbx_core::forge::Remote::parse(url).ok())
         .map(|r| r.forge.provider_profile());
 
     let unique = |kind: &str| providers.iter().filter(|p| p.kind == kind).count() == 1;

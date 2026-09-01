@@ -9,7 +9,8 @@
 //! Unified diff output can never produce a line starting with `#` or `!` in
 //! column zero: body lines always begin with `+`, `-`, ` `, `@` or `\`, and file
 //! headers with `diff`/`index`. They are a contract with
-//! [`crate::tui::ui`], which strips them.
+//! the renderer, which strips them -- the TUI does it in `tui::ui`, and any
+//! other client that draws a body has to do the same.
 
 /// A heading.
 pub const SECTION: &str = "### ";

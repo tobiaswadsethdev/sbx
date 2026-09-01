@@ -1,31 +1,22 @@
 //! `sbx` - run several coding agents in parallel, each in its own sandbox.
+//!
+//! The CLI and the TUI, and nothing else: everything they do is
+//! [`sbx_core`]'s, so neither this nor the terminal interface is where a
+//! behaviour lives. What is left here is argument parsing, printing, and
+//! [`attach`] -- the one piece that is genuinely about the terminal this
+//! process was started in.
 
-mod ansi;
-mod config;
-mod doctor;
-mod endpoints;
-mod events;
-mod forge;
-mod image;
-mod mcp;
-mod ops;
-mod pane;
-mod policy;
-mod publish;
-mod repos;
-mod seed;
-mod session;
-mod skills;
-mod status;
-mod store;
-mod toolchain;
+mod attach;
 mod tui;
-mod update;
 
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use openshell_client::{CliClient, OpenShell};
+use sbx_core::{
+    config, doctor, endpoints, events, forge, image, ops, pane, policy, publish, repos, session,
+    store, toolchain, update,
+};
 
 use config::Config;
 use session::{Session, State};
@@ -669,7 +660,7 @@ fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
 
     println!("attaching to {name} - detach with Ctrl-b d");
 
-    let status = ops::attach_interactively(client, &session)?;
+    let status = attach::interactively(client, &session)?;
     if !status.success() {
         return Err(format!("attach exited with {status}").into());
     }
