@@ -164,3 +164,8 @@ main { display: flex; flex: 1; min-height: 0; }
 
 .loading { color: var(--dim); }
 .error { color: var(--bad); }
+
+/* the terminal */
+.pane.bare { padding: 0; overflow: hidden; }
+.terminal { height: 100%; width: 100%; background: var(--bg-sunken); }
+.terminal .xterm { height: 100%; padding: 6px 8px; }

@@ -8,6 +8,7 @@
 mod auth;
 mod rpc;
 mod serve;
+mod stream;
 mod tls;
 
 use std::net::SocketAddr;

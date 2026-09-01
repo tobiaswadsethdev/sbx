@@ -19,6 +19,7 @@
 
 use std::sync::Arc;
 
+use rustls::ClientConfig;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{CryptoProvider, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
@@ -38,6 +39,21 @@ impl Pinned {
             provider,
         }
     }
+}
+
+/// A TLS configuration that trusts exactly one certificate.
+///
+/// Built here rather than at each call site, so the request path and the
+/// websocket path cannot end up trusting differently -- which would be a
+/// connection that verifies for a policy fetch and not for a terminal, or
+/// worse, the other way round.
+pub fn client_config(fingerprint: &str) -> Result<ClientConfig, Error> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    Ok(ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Pinned::new(fingerprint, provider)))
+        .with_no_client_auth())
 }
 
 /// Lowercase hex SHA-256, the one form a fingerprint takes anywhere in this

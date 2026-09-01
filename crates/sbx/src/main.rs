@@ -93,6 +93,15 @@ enum Command {
         name: String,
     },
 
+    /// Follow a session's events and agent state as they happen.
+    ///
+    /// Needs `--server`: the stream is the server's to push, and a session on
+    /// this machine is already being watched by the TUI.
+    Watch {
+        /// Session name.
+        name: String,
+    },
+
     /// Pair with an `sbxd`, using the string `sbxd pair` printed.
     Connect {
         /// `sbx://host:port/<token>#<fingerprint>`.
@@ -309,6 +318,11 @@ fn main() -> ExitCode {
             Ok(None) => cmd_events(&client, &name),
             Err(e) => Err(e),
         },
+        Some(Command::Watch { name }) => match server(chosen.as_deref()) {
+            Ok(Some(r)) => remote_watch(&r, &name),
+            Ok(None) => Err("watch needs a server: try `sbx --server watch <name>`".into()),
+            Err(e) => Err(e),
+        },
         Some(Command::Connect { pairing, name }) => cmd_connect(&pairing, name.as_deref()),
         Some(Command::Remotes { forget }) => cmd_remotes(forget.as_deref()),
         Some(Command::Policies) => {
@@ -522,6 +536,64 @@ fn remote_policy(remote: &remote::Remote, name: &str) -> Fallible {
     // The server's view, not one assembled here: the template and the global
     // lists in it are the ones that machine is enforcing with.
     print_policy(&view);
+    Ok(())
+}
+
+/// Follow a session until interrupted.
+///
+/// The third thing to speak the protocol, after the server and the desktop
+/// application, and the cheapest place to notice that a frame does not say what
+/// it needs to: a terminal shows you the feed with nothing between you and it.
+fn remote_watch(remote: &remote::Remote, name: &str) -> Fallible {
+    use sbx_proto::stream::{Channel, ClientFrame, ServerFrame};
+
+    let stream = remote.stream()?;
+    const EVENTS: u32 = 1;
+    const STATUS: u32 = 2;
+
+    stream.send(ClientFrame::Open {
+        id: EVENTS,
+        channel: Channel::Events {
+            session: name.to_string(),
+        },
+    });
+    stream.send(ClientFrame::Open {
+        id: STATUS,
+        channel: Channel::Status {
+            session: name.to_string(),
+        },
+    });
+
+    println!("watching {name}; Ctrl-C to stop");
+
+    for message in stream.frames() {
+        match message {
+            remote::Incoming::Frame(frame) => match *frame {
+                ServerFrame::Events { events, .. } => print_events(&events),
+                ServerFrame::Status { poll, .. } => {
+                    if let Some(report) = poll.status {
+                        let detail = report
+                            .detail
+                            .as_deref()
+                            .map(|d| format!("  {d}"))
+                            .unwrap_or_default();
+                        println!("-- {}{detail}", report.state);
+                    }
+                }
+                ServerFrame::Closed {
+                    reason: Some(reason),
+                    ..
+                } => return Err(reason.into()),
+                _ => {}
+            },
+            remote::Incoming::Ended(reason) => {
+                return match reason {
+                    Some(reason) => Err(reason.into()),
+                    None => Ok(()),
+                };
+            }
+        }
+    }
     Ok(())
 }
 

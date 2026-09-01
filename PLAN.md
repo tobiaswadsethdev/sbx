@@ -1812,8 +1812,47 @@ for free, with nothing persisted client-side.
   window. And a screenshot has to name the window id: `x11grab` on a region of
   the screen returns solid black for a redirected window, which is what made the
   first captures lie about what was on screen.
-- **26. Terminal** — the multiplexed websocket, then xterm.js over it: resize,
-  reconnect, and the events and status channels alongside the PTY.
+- **26. Terminal** — DONE except the drawing, which is the one part that does
+  not work; see below. The multiplexed websocket, the events, status and
+  terminal channels, `sbx-client`'s streaming half, `sbx watch`, and the pane.
+  501 tests plus three `#[ignore]`d live ones.
+
+  One socket, several channels, JSON frames so a connection stays readable in a
+  log -- terminal bytes base64 inside them, because a pty read lands wherever it
+  lands and a split multi-byte character cannot go in a JSON string. The server
+  polls and sends only what is new, which is the point of it: a client asking
+  `/rpc` every second would spend a handshake per session per second to hear
+  that nothing had changed, and two clients would double the load on a sandbox.
+
+  **The terminal needs a pty on the server's side as well**, which took
+  measuring to find. `openshell exec --tty` gives the sandbox process a real
+  terminal -- `tty` reports one, `test -t 0` succeeds -- but the CLI will not
+  proxy interactively through pipes: with stdin closed it writes tmux's redraw,
+  with stdin an open pipe it writes nothing, ever, sent to or not. `TERM` made
+  no difference; stdin was the whole variable. So the child is spawned into a
+  local pty as a terminal emulator would, which is what
+  `interactive_exec_argv` has always been shaped for. Resizing then becomes the
+  pty's own, which also deleted a deadlock: the `tmux resize-window` exec it
+  replaced was awaited inside the read loop, and execs are serialised per
+  sandbox, so it could wait on the attach that was holding the path.
+
+  Closing a channel detaches with `Ctrl-b d` rather than killing the exec, since
+  killing one wedges the exec path for the whole sandbox. There is a live test
+  that opens a terminal, closes it, and opens it again, because a test that
+  opened one would pass either way.
+
+  **xterm.js does not paint under WSLg**, and the cause is not in the stream.
+  The bytes reach the buffer -- `getLine(1)` reads Claude Code's banner -- and
+  the renderer never draws them, because the character cell measures zero.
+  Writing a literal string with no channel open does not appear either.
+  docs/desktop.md records what has been ruled out. Whether WebView2 on Windows
+  is affected is unknown and untried, and worth finding out before spending more
+  on it.
+
+  Seven rounds went into that last hop, and the test that finally separated
+  "the emulator cannot draw" from "the stream is wrong" was writing one literal
+  string into xterm -- which was identified as the right first move several
+  rounds before it was run.
 - **27. Create** — the repo picker and the create form as a GUI: policy,
   toolchain, skills, MCP servers.
 - **28. Diff** — the three sections, and inline comments batched back to the agent.

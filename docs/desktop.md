@@ -78,6 +78,38 @@ session are increments of their own.
 Policy and events are the two with no equivalent in an ADE built on git
 worktrees, and they are why this is worth building rather than adopting one.
 
+## The terminal does not draw under WSLg
+
+Known, and unresolved. The terminal pane is written and its data path is
+verified end to end -- the live tests in `crates/sbx-client/tests/live.rs` open
+a channel against a real session and assert bytes come back -- but xterm.js
+never paints them in WebKitGTK under WSLg.
+
+What is established, so nobody re-derives it:
+
+* The bytes arrive. Frames of two to five kilobytes reach the webview, `write`
+  acknowledges them, and the agent's own screen is in xterm's buffer:
+  `buffer.active.getLine(1)` reads `▐███▌  Claude Code v2.1.251`.
+* The renderer never runs. `.xterm-rows` stays empty -- the DOM is not
+  populated, which is not what a compositing failure looks like -- and
+  `FitAddon.proposeDimensions()` returns `undefined`, meaning the character cell
+  measures zero. A zero cell is what makes the renderer skip.
+* It is not the stream. `terminal.write("hello")`, with no channel open and no
+  base64 involved, does not appear either.
+* Ruled out: WebKit's sandbox, `requestAnimationFrame` (it fires; the page is
+  visible), font availability (`document.fonts.ready` awaited, family reduced to
+  plain `monospace`), and a missing stylesheet (`xterm.css` is bundled and
+  applied, and `.xterm-rows` computes to 13px).
+
+Whether this is WSLg-only is **not known**. It has not been tried on Windows
+against WebView2, which is a different engine entirely and the platform the
+desktop application is actually for; nor on a Linux desktop with a GPU. Saying
+"it works on Windows" would be a guess, and this file is not the place for one.
+
+The other three panes draw, and the terminal channel is exercised by the live
+tests, so the increment is not blocked on it -- but the pane has never been seen
+to render, and that is the state it is in.
+
 ## Wayland, X11, and WSLg
 
 The window is a Wayland client wherever there is a Wayland compositor, WSLg

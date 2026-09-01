@@ -21,6 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod pairing;
+pub mod stream;
 pub use pairing::Pairing;
 
 use sbx_core::events::Event;

@@ -18,9 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
-use rustls::{ClientConfig, ClientConnection, StreamOwned};
-
-use super::pin::Pinned;
+use rustls::{ClientConnection, StreamOwned};
 
 /// How long to wait for a server that has accepted the connection but is not
 /// answering.
@@ -80,13 +78,7 @@ pub fn request(
     token: Option<&str>,
     body: Option<&str>,
 ) -> Result<Response, Error> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .map_err(|e| Error::Tls(e.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(Pinned::new(fingerprint, provider)))
-        .with_no_client_auth();
+    let config = super::pin::client_config(fingerprint).map_err(|e| Error::Tls(e.to_string()))?;
 
     // The name is only what goes in SNI; the certificate is judged by its
     // fingerprint. A dialled IP address has no valid `ServerName`, so it falls

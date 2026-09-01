@@ -14,13 +14,17 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use sbx_client::{Remote, Remotes};
+use std::sync::Mutex;
+
+use sbx_client::{Incoming, Remote, Remotes, Sink};
 use sbx_core::events::Event;
 use sbx_core::ops::Poll;
 use sbx_core::policy::View as PolicyView;
 use sbx_core::session::Session;
+use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
 use sbx_proto::{Reply, Request};
 use serde::Serialize;
+use tauri::{Emitter as _, Manager as _};
 
 /// What a failed command looks like in the webview.
 ///
@@ -112,11 +116,127 @@ fn diff(server: String, name: String) -> Result<String, Failed> {
     expect_reply!(reply, Reply::Diff { body } => body, "a diff")
 }
 
+/// The one streaming connection, and which server it is to.
+///
+/// One per window rather than one per pane: the protocol multiplexes, so four
+/// terminals and four feeds share a socket, a token check and a reconnect. See
+/// [`sbx_proto::stream`].
+#[derive(Default)]
+struct Streaming {
+    open: Mutex<Option<Open>>,
+}
+
+struct Open {
+    server: String,
+    sink: Sink,
+}
+
+/// Every frame the server sends, as a window event.
+///
+/// One event name for all of them rather than one per channel: the frame
+/// already carries its channel id, and a listener per channel would mean the
+/// frontend unsubscribing correctly every time a pane closes -- which it would
+/// eventually not.
+const FRAME: &str = "sbx://frame";
+
+/// Connect if the window is not already connected to this server.
+///
+/// Switching servers replaces the connection, which also ends every channel on
+/// it -- correct, since the channels named sessions on the old one.
+fn connected(app: &tauri::AppHandle, server: &str) -> Result<(), Failed> {
+    let state = app.state::<Streaming>();
+    let mut open = state.open.lock().map_err(|e| e.to_string())?;
+
+    if open.as_ref().is_some_and(|o| o.server == server) {
+        return Ok(());
+    }
+
+    let (sink, frames) = remote(server)?.stream().map_err(to_message)?.split();
+
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        for message in frames {
+            match message {
+                Incoming::Frame(frame) => {
+                    let _ = handle.emit(FRAME, *frame);
+                }
+                // The connection has gone. Every open channel is closed by it,
+                // so each is told rather than left waiting for output that will
+                // not come.
+                Incoming::Ended(reason) => {
+                    let _ = handle.emit(
+                        FRAME,
+                        ServerFrame::Closed {
+                            id: ALL_CHANNELS,
+                            reason: reason.or_else(|| Some("the connection ended".into())),
+                        },
+                    );
+                    break;
+                }
+            }
+        }
+    });
+
+    *open = Some(Open {
+        server: server.to_string(),
+        sink,
+    });
+    Ok(())
+}
+
+/// The id a `Closed` carries when it is about the whole connection rather than
+/// one channel. Not a real channel id: no client allocates it.
+const ALL_CHANNELS: ChannelId = ChannelId::MAX;
+
+fn send(app: &tauri::AppHandle, frame: ClientFrame) -> Result<(), Failed> {
+    let state = app.state::<Streaming>();
+    let open = state.open.lock().map_err(|e| e.to_string())?;
+    let Some(open) = open.as_ref() else {
+        return Err("not connected".into());
+    };
+    open.sink
+        .send(frame)
+        .then_some(())
+        .ok_or_else(|| "the connection has ended".to_string())
+}
+
+#[tauri::command]
+fn watch(
+    app: tauri::AppHandle,
+    server: String,
+    id: ChannelId,
+    channel: Channel,
+) -> Result<(), Failed> {
+    connected(&app, &server)?;
+    send(&app, ClientFrame::Open { id, channel })
+}
+
+#[tauri::command]
+fn unwatch(app: tauri::AppHandle, id: ChannelId) -> Result<(), Failed> {
+    send(&app, ClientFrame::Close { id })
+}
+
+#[tauri::command]
+fn terminal_input(app: tauri::AppHandle, id: ChannelId, data: String) -> Result<(), Failed> {
+    send(&app, ClientFrame::Input { id, data })
+}
+
+#[tauri::command]
+fn terminal_resize(
+    app: tauri::AppHandle,
+    id: ChannelId,
+    cols: u16,
+    rows: u16,
+) -> Result<(), Failed> {
+    send(&app, ClientFrame::Resize { id, cols, rows })
+}
+
 fn main() {
     // Wayland is left alone: WSLg is a Wayland compositor and the window is a
     // Wayland client there. `GDK_BACKEND=x11` is a way to make X11 screenshot
     // tooling see the surface, not a way to run.
     tauri::Builder::default()
+        .manage(Streaming::default())
         .setup(|app| {
             // Debug builds open the inspector. There is no other way to see a
             // console message from inside this window.
@@ -130,7 +250,16 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            servers, sessions, poll, policy, events, diff
+            servers,
+            sessions,
+            poll,
+            policy,
+            events,
+            diff,
+            watch,
+            unwatch,
+            terminal_input,
+            terminal_resize
         ])
         .run(tauri::generate_context!())
         .expect("the window could not be created");

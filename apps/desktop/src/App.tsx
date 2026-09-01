@@ -12,9 +12,10 @@ import type { Session } from "./gen/Session";
 import { Facts } from "./panes/Facts";
 import { PolicyPane } from "./panes/Policy";
 import { EventsPane } from "./panes/Events";
+import { TerminalPane } from "./panes/Terminal";
 import { SessionList } from "./SessionList";
 
-const PANES = ["facts", "policy", "events"] as const;
+const PANES = ["terminal", "facts", "policy", "events"] as const;
 export type Pane = (typeof PANES)[number];
 
 /// How often the session list is re-read.
@@ -30,7 +31,7 @@ export default function App() {
   const [server, setServer] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [pane, setPane] = useState<Pane>("facts");
+  const [pane, setPane] = useState<Pane>("terminal");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -130,7 +131,13 @@ export default function App() {
                   </button>
                 ))}
               </nav>
-              <div className="pane">
+              <div className={`pane ${pane === "terminal" ? "bare" : ""}`}>
+                {pane === "terminal" && (
+                  // Keyed on the session so switching sessions tears the
+                  // terminal down rather than repointing a live one, which
+                  // would leave the previous session's scrollback in place.
+                  <TerminalPane key={session.name} server={server!} name={session.name} />
+                )}
                 {pane === "facts" && <Facts session={session} />}
                 {pane === "policy" && (
                   <PolicyPane server={server!} name={session.name} />

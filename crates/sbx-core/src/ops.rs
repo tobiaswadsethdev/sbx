@@ -861,7 +861,9 @@ pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> 
 /// two separate polls would not just double the traffic -- they would queue
 /// behind each other. One script, one round trip, both answers.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+// `PartialEq` so a stream can tell a poll that changed from one that did not,
+// which is the difference between a frame and silence.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Poll {
     pub stat: Option<DiffStat>,
     pub status: Option<status::Report>,

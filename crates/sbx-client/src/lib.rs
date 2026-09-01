@@ -18,6 +18,9 @@
 
 mod http;
 mod pin;
+mod ws;
+
+pub use ws::{Incoming, Sink, Stream};
 
 use std::io;
 use std::path::PathBuf;

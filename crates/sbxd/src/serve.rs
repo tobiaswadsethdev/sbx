@@ -37,7 +37,26 @@ pub fn app(server: Shared) -> Router {
     Router::new()
         .route("/version", get(version))
         .route("/rpc", post(rpc_route))
+        .route("/ws", get(ws_route))
         .with_state(server)
+}
+
+/// The streaming half: status, the events feed, and the terminal.
+///
+/// Authenticated by the same bearer header as `/rpc`, and deliberately not by a
+/// token in the query string -- which is the usual shortcut for websockets,
+/// because a browser cannot set a header on one. There is no browser here: the
+/// client is `sbx-client`, on the Rust side of the desktop application, and it
+/// can. A token in a URL ends up in logs.
+async fn ws_route(
+    State(server): State<Shared>,
+    headers: HeaderMap,
+    upgrade: axum::extract::WebSocketUpgrade,
+) -> Result<axum::response::Response, StatusCode> {
+    if !authorised(&server, &headers) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(upgrade.on_upgrade(crate::stream::run))
 }
 
 async fn version() -> Json<Hello> {
