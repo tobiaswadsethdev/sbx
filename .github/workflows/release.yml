@@ -42,7 +42,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A dispatch takes the tag as free text, and a junk one would be baked
       # into an asset name and a git tag that outlives the mistake.
@@ -81,7 +81,7 @@ jobs:
           tar -czf "sbx-${TAG}-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" sbx
           sha256sum "sbx-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbx-${{ matrix.target }}
           path: |
@@ -94,7 +94,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -111,7 +111,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
