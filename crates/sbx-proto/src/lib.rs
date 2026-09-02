@@ -26,6 +26,8 @@ pub use pairing::Pairing;
 
 use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
+use sbx_core::files::{Dir, FileText};
+use sbx_core::git::{Against, FileDiff, Status as GitStatus};
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll, Refreshed};
 use sbx_core::policy::View as PolicyView;
 use sbx_core::projects::{NewProject, Project};
@@ -135,6 +137,29 @@ pub enum Request {
     },
     /// Everything a create form needs that is not about a repository.
     NewOptions,
+    /// The working copy as git describes it: the branch, how far it has
+    /// diverged, and what is staged and what is not.
+    GitStatus { name: String },
+    /// Both sides of one file's diff, for a side-by-side editor.
+    GitDiff {
+        name: String,
+        path: String,
+        against: Against,
+    },
+    /// Move one path into or out of the index, throw its changes away, or one
+    /// of the three things that talk to the remote.
+    ///
+    /// One request with an operation on it rather than six: they answer the
+    /// same way -- with git's own words and the status afterwards -- and a
+    /// client that has to re-read the status after each is a client that will
+    /// forget to after one of them.
+    Git { name: String, action: GitOp },
+    /// One directory of a worktree's working copy, relative to the repository
+    /// root. One at a time, as a tree is expanded: a repository is tens of
+    /// thousands of files and every listing is an exec.
+    Files { name: String, path: String },
+    /// One file of it, capped and read-only. The agent owns the working copy.
+    File { name: String, path: String },
     /// The shells open beside a worktree's agent, by tmux session name.
     ///
     /// Asked of the sandbox rather than remembered by a client: what shells
@@ -187,6 +212,11 @@ impl Request {
             | Request::Diff { name }
             | Request::Policy { name }
             | Request::Events { name }
+            | Request::GitStatus { name }
+            | Request::GitDiff { name, .. }
+            | Request::Git { name, .. }
+            | Request::Files { name, .. }
+            | Request::File { name, .. }
             | Request::Shells { name }
             | Request::NewShell { name }
             | Request::KillShell { name, .. }
@@ -197,6 +227,30 @@ impl Request {
             Request::Create(new) => new.name.as_deref(),
         }
     }
+}
+
+/// One thing to do to the working copy or the remote.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "do", rename_all = "kebab-case")]
+pub enum GitOp {
+    Stage {
+        path: String,
+    },
+    Unstage {
+        path: String,
+    },
+    /// Destructive, and it races the agent by definition -- it may be part-way
+    /// through writing the file this restores. The client asks first.
+    Discard {
+        path: String,
+    },
+    Commit {
+        message: String,
+    },
+    Push,
+    Pull,
+    Fetch,
 }
 
 /// What the server sends back when it worked.
@@ -240,6 +294,16 @@ pub enum Reply {
     Shells {
         shells: Vec<String>,
     },
+    Files(Dir),
+    File(FileText),
+    /// The status after whatever was asked for, and what git said while doing
+    /// it. Both, because a push that succeeded still has output worth reading
+    /// and a status alone would not say the push had happened at all.
+    Git {
+        said: String,
+        status: GitStatus,
+    },
+    GitDiff(FileDiff),
     /// What was actually said to the agent, so a client can show the message it
     /// sent rather than a claim that it sent one.
     Told {

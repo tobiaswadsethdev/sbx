@@ -9,7 +9,10 @@
 // extra shells beside the agent are the one after. Both are held here rather
 // than added later so the tab bar is not rebuilt around them twice.
 
-import { DiffPane } from "./panes/Diff";
+import { FilePane } from "./panes/File";
+import { FileDiffPane } from "./panes/FileDiff";
+import type { Against } from "./gen/Against";
+import { Close, Plus } from "./icons";
 import { TerminalPane } from "./panes/Terminal";
 
 export type Tab =
@@ -17,17 +20,20 @@ export type Tab =
   /// agent's own -- so a shell is a second tab rather than a second pane, and
   /// nothing has to remember which one is special.
   | { kind: "terminal"; tmux: string | null; label: string }
-  | { kind: "diff" }
-  | { kind: "file"; path: string };
+  | { kind: "file"; path: string }
+  /// One file's diff, side by side. `against` is part of the key: the staged
+  /// and unstaged diffs of one file are two different questions, and opening
+  /// one should not replace the other.
+  | { kind: "filediff"; path: string; against: Against };
 
 export function keyOf(tab: Tab): string {
   switch (tab.kind) {
     case "terminal":
       return `terminal:${tab.tmux ?? "agent"}`;
-    case "diff":
-      return "diff";
     case "file":
       return `file:${tab.path}`;
+    case "filediff":
+      return `filediff:${tab.against}:${tab.path}`;
   }
 }
 
@@ -35,10 +41,10 @@ export function labelOf(tab: Tab): string {
   switch (tab.kind) {
     case "terminal":
       return tab.label;
-    case "diff":
-      return "diff";
     case "file":
       return tab.path.split("/").pop() ?? tab.path;
+    case "filediff":
+      return `${tab.path.split("/").pop() ?? tab.path} ~`;
   }
 }
 
@@ -50,6 +56,7 @@ export function Tabs({
   onActivate,
   onNewShell,
   onCloseShell,
+  onCloseFile,
 }: {
   server: string;
   name: string;
@@ -61,6 +68,7 @@ export function Tabs({
   /// the button: the agent's terminal is not yours to close, and the diff is
   /// not a thing that can be.
   onCloseShell: (tmux: string) => void;
+  onCloseFile: (path: string) => void;
 }) {
   return (
     <section className="editor">
@@ -68,23 +76,31 @@ export function Tabs({
         {tabs.map((tab) => {
           const key = keyOf(tab);
           const shell = tab.kind === "terminal" && tab.tmux !== null ? tab.tmux : null;
+          const file = tab.kind === "file" || tab.kind === "filediff" ? keyOf(tab) : null;
           return (
             <span key={key} className={`tab${key === active ? " on" : ""}`}>
-              <button onClick={() => onActivate(key)}>{labelOf(tab)}</button>
+              <button onClick={() => onActivate(key)} title={file ?? undefined}>
+                {labelOf(tab)}
+              </button>
               {shell && (
                 <button
                   className="close"
                   title="close this shell, and whatever is running in it"
                   onClick={() => onCloseShell(shell)}
                 >
-                  ×
+                  <Close title="close" />
+                </button>
+              )}
+              {file && (
+                <button className="close" title="close" onClick={() => onCloseFile(file)}>
+                  <Close title="close" />
                 </button>
               )}
             </span>
           );
         })}
         <button className="add" title="another shell in this sandbox" onClick={onNewShell}>
-          +
+          <Plus title="new shell" />
         </button>
       </nav>
 
@@ -105,8 +121,18 @@ export function Tabs({
                 tmux={tab.tmux}
               />
             )}
-            {tab.kind === "diff" && <DiffPane server={server} name={name} />}
-            {tab.kind === "file" && <p className="loading">files come with the file tree</p>}
+            {tab.kind === "filediff" && (
+              <FileDiffPane
+                key={keyOf(tab)}
+                server={server}
+                name={name}
+                path={tab.path}
+                against={tab.against}
+              />
+            )}
+            {tab.kind === "file" && (
+              <FilePane key={`${name}:${tab.path}`} server={server} name={name} path={tab.path} />
+            )}
           </div>
         );
       })}

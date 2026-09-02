@@ -1956,10 +1956,80 @@ for free, with nothing persisted client-side.
   default without saying so. Resolved on the server now, which is what `None` on
   that request always claimed to mean.
 
-- **30. Files, and the editor** — the file tree over a new pair of requests, and
-  Monaco for viewing a file and its diff. Read-only: the agent owns the working
-  copy. The unknown worth measuring first is Monaco under WebKitGTK, given what
-  the terminal cost.
+- **30. Files, and the editor** — DONE. `Files` and `File`, the tree under the
+  project tree, and Monaco. 531 tests.
+
+  Read-only, because the agent owns the working copy: two writers with no shared
+  lock is how a file ends up with half of each. One directory per request as the
+  tree is expanded -- a repository is tens of thousands of files and each
+  listing is an exec -- and collapsing forgets a level, so reopening re-reads
+  what the agent has done since. Paths are checked by component on the server;
+  contents come back base64, since an exec's stdout is already lossy UTF-8 and a
+  source file with a stray byte would come back altered.
+
+  Monaco was measured in WebKitGTK before anything was built on it, which is the
+  lesson from the terminal applied rather than restated. It renders: character
+  width 8.4 where xterm's canvas path returned zero. **But it computes its diff
+  in a web worker and fails quietly without one** -- the editor still draws and
+  the diff editor shows two panes with no red or green, which reads as an empty
+  diff. Caught only because the probe counted decorations rather than trusting
+  the screenshot: three with a worker, zero without.
+
+  Importing `monaco-editor` whole also brings the language services, four more
+  workers and a 15MB bundle, to power completions in a viewer that cannot be
+  typed into. The editor API plus `basic-languages` is 4MB and keeps the one
+  worker that matters.
+- **31b. Icons, and the same two pixels again** — DONE. Inline SVG icons, file
+  icons by kind, and the font-metrics correction applied to the window rather
+  than only to the terminal.
+
+  The clipping fixed in increment 26 was never terminal-specific and was fixed
+  as though it were. WebKit puts the baseline about two pixels too high for
+  *any* explicit `line-height`; the body sets `1.5`, so every element that clips
+  lost the top of its text and `NOTES.md` read as `NOIES.md` -- legible enough
+  to look like a font rather than a bug, which is how it survived a whole
+  increment of looking straight at it. One rule on `body`, keyed on the class
+  the probe already sets, fixes all of them.
+
+  Icons are drawn here rather than pulled in: an icon set is a package of a
+  thousand glyphs to use fifteen, each with its own stroke weight. Monaco does
+  bundle codicons and reusing them was the obvious alternative -- it would tie
+  the window's chrome to a version of an editor it happens to embed. The file
+  icons cover the kinds you actually scan a directory for and nothing else; two
+  hundred extensions is two hundred chances to be subtly wrong, and an unknown
+  one gets the same page outline rather than nothing.
+
+- **31a. Git, and the diff in the editor** — DONE. `sbx_core::git`, the dock's
+  git view, and Monaco's side-by-side diff replacing the unified text pane. 539
+  tests.
+
+  Full staging, so `Status` is the index and the working copy as two lists and a
+  file edited, staged and edited again appears in both -- which is the case
+  staging exists for and the one a single list cannot show. The status parser is
+  pure and tested against git's own output: the two columns, a conflict as one
+  entry rather than two, a rename under its new name, and a quoted path
+  unquoted.
+
+  **The agent is editing while the view is on screen**, and that shapes all of
+  it. A status is a snapshot already out of date; staging records the version
+  that exists at that moment; discarding races whatever the agent is writing.
+  Git's index is the only lock there is and the agent does not take it, so the
+  view never pretends otherwise: every action re-reads the status from the
+  server rather than adjusting the list it had, and reports git's own words.
+  `pull` is `--ff-only` and `push` is always `-u`, so a branch that has never
+  been pushed has an upstream to measure against afterwards -- which is why the
+  button says `publish` until it does.
+
+  The review moved into the diff editor and nothing about it had to change:
+  comments have always stored `{file, line, excerpt}`, which is already per
+  file. That is the reward for storing the excerpt rather than a line identity
+  -- the anchor never depended on which rendering it was written against.
+
+  One collision worth remembering: `files::Entry` and `git::Entry` both generate
+  `Entry.ts`, and every exported type lands in one flat directory, so the second
+  silently replaced the first. It surfaced as a type error here; with compatible
+  shapes it would not have.
+
 - **31. Shells beside the agent** — DONE. `Channel::Terminal` names a tmux
   target, `Shells`/`NewShell`/`KillShell` manage them, and the tab bar grew a
   `+`. 528 tests.

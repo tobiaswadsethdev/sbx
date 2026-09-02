@@ -17,6 +17,7 @@ import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
 import { NewProjectDialog } from "./NewProject";
 import { NewWorktreeDialog } from "./NewWorktree";
+import type { Against } from "./gen/Against";
 import { keyOf, Tabs, type Tab } from "./Tabs";
 import { group, Tree } from "./Tree";
 
@@ -31,13 +32,17 @@ const REFRESH_MS = 3000;
 /// fact about the sandbox, and one that outlives this window. A tab list kept
 /// in the client would show a shell that had been closed from elsewhere and
 /// hide one opened from elsewhere.
-function tabsFor(shells: string[]): Tab[] {
+function tabsFor(shells: string[], open: Tab[]): Tab[] {
   return [
     { kind: "terminal", tmux: null, label: "agent" },
     ...shells.map((tmux): Tab => ({ kind: "terminal", tmux, label: tmux })),
-    { kind: "diff" },
+    // Files and diffs last, in the order they were opened -- the one thing here
+    // that is genuinely this window's state. A file is open because someone in
+    // *this* window clicked it, and nothing in the sandbox knows that.
+    ...open,
   ];
 }
+
 
 export default function App() {
   const [servers, setServers] = useState<ServerSummary[] | null>(null);
@@ -54,6 +59,7 @@ export default function App() {
   /// per worktree: switching away and back finds it as you left it, because a
   /// shell you opened in one is not a shell in another.
   const [shells, setShells] = useState<Record<string, string[]>>({});
+  const [files, setFiles] = useState<Record<string, Tab[]>>({});
   const [active, setActive] = useState<Record<string, string>>({});
 
   useEffect(() => {
@@ -107,7 +113,17 @@ export default function App() {
     };
   }, [server, session, shells]);
 
-  const openTabs = session ? tabsFor(shells[session.name] ?? []) : [];
+  const openTabs = session ? tabsFor(shells[session.name] ?? [], files[session.name] ?? []) : [];
+
+  /// Open a tab if it is not already open, and bring it to the front either way.
+  const openTab = (worktree: string, tab: Tab) => {
+    const key = keyOf(tab);
+    setFiles((all) => {
+      const open = all[worktree] ?? [];
+      return open.some((t) => keyOf(t) === key) ? all : { ...all, [worktree]: [...open, tab] };
+    });
+    setActive((a) => ({ ...a, [worktree]: key }));
+  };
   const activeTab = session ? (active[session.name] ?? keyOf(openTabs[0])) : "";
 
   if (servers !== null && servers.length === 0) {
@@ -192,6 +208,15 @@ export default function App() {
                   })
                   .catch((e) => setError(messageOf(e)));
               }}
+              onCloseFile={(key) => {
+                setFiles((all) => ({
+                  ...all,
+                  [session.name]: (all[session.name] ?? []).filter((t) => keyOf(t) !== key),
+                }));
+                setActive((a) =>
+                  a[session.name] === key ? { ...a, [session.name]: "terminal:agent" } : a,
+                );
+              }}
               onCloseShell={(tmux) => {
                 api
                   .killShell(server, session.name, tmux)
@@ -208,7 +233,14 @@ export default function App() {
                   .catch((e) => setError(messageOf(e)));
               }}
             />
-            <Dock server={server} session={session} />
+            <Dock
+              server={server}
+              session={session}
+              onOpenFile={(path) => openTab(session.name, { kind: "file", path })}
+              onOpenDiff={(path, against: Against) =>
+                openTab(session.name, { kind: "filediff", path, against })
+              }
+            />
           </>
         ) : (
           <Empty

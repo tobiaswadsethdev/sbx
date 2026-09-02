@@ -19,13 +19,15 @@ use std::sync::Mutex;
 use sbx_client::{Incoming, Remote, Remotes, Sink};
 use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
+use sbx_core::files::{Dir, FileText};
+use sbx_core::git::{Against, FileDiff, Status as GitStatus};
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll};
 use sbx_core::policy::View as PolicyView;
 use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
-use sbx_proto::{Reply, Request};
+use sbx_proto::{GitOp, Reply, Request};
 use serde::Serialize;
 use tauri::{Emitter as _, Manager as _};
 
@@ -117,6 +119,64 @@ fn diff(server: String, name: String) -> Result<String, Failed> {
         .call(Request::Diff { name })
         .map_err(to_message)?;
     expect_reply!(reply, Reply::Diff { body } => body, "a diff")
+}
+
+/// The working copy as git describes it, and the result of doing something to
+/// it. Both answer the same way, so the window has one shape to handle.
+#[derive(Serialize)]
+struct GitAnswer {
+    said: String,
+    status: GitStatus,
+}
+
+#[tauri::command]
+fn git_status(server: String, name: String) -> Result<GitAnswer, Failed> {
+    let reply = remote(&server)?
+        .call(Request::GitStatus { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Git { said, status } => GitAnswer { said, status }, "a git status")
+}
+
+#[tauri::command]
+fn git(server: String, name: String, action: GitOp) -> Result<GitAnswer, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Git { name, action })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Git { said, status } => GitAnswer { said, status }, "a git status")
+}
+
+#[tauri::command]
+fn git_diff(
+    server: String,
+    name: String,
+    path: String,
+    against: Against,
+) -> Result<FileDiff, Failed> {
+    let reply = remote(&server)?
+        .call(Request::GitDiff {
+            name,
+            path,
+            against,
+        })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::GitDiff(diff) => diff, "a file diff")
+}
+
+/// One directory of a worktree's working copy.
+#[tauri::command]
+fn files(server: String, name: String, path: String) -> Result<Dir, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Files { name, path })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Files(dir) => dir, "a directory")
+}
+
+#[tauri::command]
+fn file(server: String, name: String, path: String) -> Result<FileText, Failed> {
+    let reply = remote(&server)?
+        .call(Request::File { name, path })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::File(text) => text, "a file")
 }
 
 /// The shells open beside a worktree's agent.
@@ -378,6 +438,11 @@ fn main() {
             policy,
             events,
             diff,
+            git_status,
+            git,
+            git_diff,
+            files,
+            file,
             shells,
             new_shell,
             kill_shell,

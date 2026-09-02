@@ -128,11 +128,15 @@ agent's terminal is not one, and `kill_shell` refuses a target that is not
 prefixed `shell-` rather than trusting the request -- closing the agent's tab
 must not stop the agent.
 
-**The dock is not a tab, and that is deliberate.** Facts, policy and events sit
-beside the editor and stay on screen. The isolation being *visible* is the
-reason this is worth building rather than adopting an ADE built on git
-worktrees, and a denial you have to open a tab to find is one you will not find.
-It costs width the editor would otherwise have; that is the trade.
+**The dock is not a tab bar, and that is deliberate.** Files, git, facts, policy
+and events sit in a sidebar beside the editor. Files and git are places you work
+*from* -- look at what changed, open it, come back -- and a diff you are reading
+should not have to give up its place so you can see what else changed. Facts,
+policy and events are what is true about the worktree, and keeping them one
+click away rather than behind a tab is the point: the isolation being *visible*
+is the reason this is worth building rather than adopting an ADE built on git
+worktrees, and a denial you have to go looking for is one you will not find. It
+costs width the editor would otherwise have; that is the trade.
 
 ## Starting work
 
@@ -191,19 +195,89 @@ a request per keystroke, and of the three a plainer match on the same list is
 the one that cannot go quietly wrong. If they ever need to agree exactly, the
 scorer moves to the server.
 
-## Reviewing, and telling the agent
+## The working copy
 
-Three sections, from `ops::repo_diff`: committed work against the base branch,
-uncommitted work, and untracked files. The body arrives marked up rather than
-structured -- `### ` for a heading, `!!! ` for a notice, a unified diff
-otherwise -- and `sbx_core::pane` calls those markers a contract with whatever
-draws it. The pane is the second thing to draw one; the TUI's `diff_line` is the
-first, and they strip the same two prefixes.
+The file tree is one of the dock's views, and opening a file opens a tab. One
+directory per request, expanded as it is opened: a repository is tens of
+thousands of files, every listing is an exec into the sandbox, and a tree only
+ever shows the branches someone has opened. Collapsing a directory forgets it,
+so reopening re-reads -- the agent is still editing, and a tree cached from an
+hour ago would be a tree of what used to be there.
+
+**Read-only, because the agent owns the working copy.** Two writers with no
+shared lock is how a file ends up with half of each. What you want here is to
+see what it did and say something about it, which is what the review is for.
+
+Paths are checked on the server rather than trusted, by component rather than by
+looking for `..` in the string -- `a/../b` is fine and `..config` is a real
+filename, and a component that *is* `..` is the one case that escapes. Contents
+come back base64: an exec's stdout is already lossy UTF-8, so a source file with
+a stray byte in it would otherwise come back altered. A NUL in the first block
+means binary, which is what git decides on too and is right more often than any
+extension list.
+
+### Monaco, and the worker that is not optional
+
+The viewer is Monaco, and it renders correctly in WebKitGTK -- measured before
+anything was built on it, in the same harness that found the terminal's font
+metrics, because that engine had already cost two bugs. Character width comes
+back as 8.4 rather than the zero xterm's canvas path returns, and the editor
+paints with highlighting, line numbers and no clipping.
+
+**But Monaco computes its diff in a web worker, and without one it fails
+quietly.** The editor still renders; the diff editor shows two panes with no red
+or green in them, which reads as an empty diff rather than a missing worker. The
+probe caught it because it counted decorations instead of trusting the
+screenshot: three with the worker configured, zero without. Vite needs the
+worker named explicitly, and the specifier is `monaco-editor/editor/...` --
+Monaco 0.56's export map is `"./*": "./esm/vs/*.js"`, so the path everyone
+writes from memory does not resolve.
+
+What is imported matters as much. `import * as monaco from "monaco-editor"`
+brings the language *services* -- IntelliSense for TypeScript, CSS, HTML and
+JSON -- which is four more workers and takes the bundle to 15MB, to power
+completions in a viewer that cannot be typed into. The editor API plus
+`basic-languages`, which is the tokenising on its own, is 4MB and keeps the one
+worker that computes diffs.
+
+## Git
+
+The dock's **git** view is the working copy as git describes it: the branch, how
+far it has diverged, what is staged and what is not. Clicking a changed file
+opens its diff as a tab -- Monaco's side-by-side editor, `HEAD` against the
+index for something staged and the index against the working copy for something
+not, which is the distinction staging exists for.
+
+Staging, unstaging, discarding, commit, push, pull and fetch. `push` uses `-u`
+every time, not only the first: it is a no-op once set, and without it a branch
+that has never been pushed has no upstream to report ahead and behind against
+afterwards -- which is why the button says **publish** until there is one.
+`pull` is `--ff-only`, because a merge commit made behind the agent's back, in a
+working copy it is still editing, is not a thing to do on a button press.
+
+**The agent is editing while this is on screen**, and that is the fact the whole
+view is shaped around. A status is a snapshot already slightly out of date.
+Staging a file records the version of it that exists at that moment, which may
+not be the version that gets committed. Discarding races whatever the agent is
+doing to that file, so it asks first and says so. None of this is fixable from
+here -- git's index is the only lock there is and the agent does not take it --
+so what the view does instead is never pretend otherwise: every action re-reads
+the status from the server rather than adjusting the list it already had, and
+every one reports git's own words rather than a sentence written here about
+them.
+
+## Reviewing, and telling the agent
 
 The comments are the half with no equivalent in a code host. They are not going
 to a pull request; they are going to an agent that is **still running**. Click
-any line of the diff to write one, and the review sits at the bottom until it is
-sent.
+any line of a file's diff to write one; it is marked in the margin, and the
+review waits until it is sent.
+
+They live in the diff editor now rather than in a unified text pane, and nothing
+about the review had to change to move them: `sbx_core::comments` has always
+stored `{file, line, excerpt}`, which is already per file. That is the reward
+for having stored the excerpt rather than a line identity -- the anchor did not
+depend on which rendering of the diff it was written against.
 
 **A review is one message, sent once.** Telling the agent about each remark as
 it is written would interrupt it six times to say six things that belong
@@ -272,7 +346,16 @@ line-height: 17px     ->  baseline  8px from the top of the row
 
 Capitals ink 10px above the baseline and brackets 12px, and rows are
 `overflow: hidden`, so at a baseline of 8 the top of every line is shaved:
-`README` reads as `KEADME`, `HEAD` as `HEAU`. Raising xterm's `lineHeight`
+`README` reads as `KEADME`, `HEAD` as `HEAU`.
+
+**It is not a terminal problem**, which took a second sighting to notice. The
+same two pixels come off any element in the window that clips -- a filename with
+`overflow: hidden` and `text-overflow: ellipsis`, which is most of a sidebar --
+because the body sets `line-height: 1.5` and that is an explicit one too. At
+19.5px the baseline lands at 9 and capitals ink 10, so `NOTES.md` renders as
+`NOIES.md`: legible enough to read as a font choice rather than a bug, which is
+why it survived a whole increment. `charSize.ts` marks the document as well as
+the terminal, and one rule on `body` fixes every clipped element at once. Raising xterm's `lineHeight`
 option is not a fix -- it moves the baseline by only half of what it adds, and
 could not lift brackets clear at any row height anyone would want. Restoring
 `line-height: normal` on the rows' spans puts the baseline back at 13 and costs

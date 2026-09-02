@@ -8,7 +8,13 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { Comment } from "./gen/Comment";
+import type { Dir } from "./gen/Dir";
 import type { Event } from "./gen/Event";
+import type { Against } from "./gen/Against";
+import type { FileDiff } from "./gen/FileDiff";
+import type { FileText } from "./gen/FileText";
+import type { GitOp } from "./gen/GitOp";
+import type { Status as GitStatus } from "./gen/Status";
 import type { NewComment } from "./gen/NewComment";
 import type { Picked } from "./gen/Picked";
 import type { Listing } from "./gen/Listing";
@@ -22,6 +28,10 @@ import type { View as PolicyView } from "./gen/View";
 
 export type ServerSummary = { name: string; address: string };
 
+/// Hand-written because it is the bridge's own shape rather than a message: see
+/// `GitAnswer` in main.rs. Both halves are generated types.
+export type GitAnswer = { said: string; status: GitStatus };
+
 export const api = {
   servers: () => invoke<ServerSummary[]>("servers"),
   sessions: (server: string) => invoke<Session[]>("sessions", { server }),
@@ -29,6 +39,23 @@ export const api = {
   policy: (server: string, name: string) => invoke<PolicyView>("policy", { server, name }),
   events: (server: string, name: string) => invoke<Event[]>("events", { server, name }),
   diff: (server: string, name: string) => invoke<string>("diff", { server, name }),
+
+  // The working copy, read-only: the agent owns it. One directory at a time,
+  // as the tree is expanded -- every listing is an exec into the sandbox.
+  files: (server: string, name: string, path: string) =>
+    invoke<Dir>("files", { server, name, path }),
+  file: (server: string, name: string, path: string) =>
+    invoke<FileText>("file", { server, name, path }),
+
+  // Git. Every mutation answers with what git said *and* the status
+  // afterwards, re-read rather than assumed: the agent is editing while this
+  // runs, so the status after a stage is not the status before it plus one.
+  gitStatus: (server: string, name: string) =>
+    invoke<GitAnswer>("git_status", { server, name }),
+  git: (server: string, name: string, action: GitOp) =>
+    invoke<GitAnswer>("git", { server, name, action }),
+  gitDiff: (server: string, name: string, path: string, against: Against) =>
+    invoke<FileDiff>("git_diff", { server, name, path, against }),
 
   // Shells beside the agent, in the same sandbox under the same policy. What
   // exists is asked of the sandbox rather than remembered here, so a shell

@@ -19,6 +19,15 @@
 
 * { box-sizing: border-box; }
 
+/* Where the engine could not measure the font, it also puts the baseline about
+   two pixels too high for any explicit `line-height` -- so every element that
+   clips loses the top of its text, and `NOTES.md` reads as `NOIES.md`. See
+   charSize.ts, which adds this class. `normal` is the font's own line box,
+   which is the one WebKit positions correctly; it is slightly tighter than the
+   1.5 below, and that is the whole cost. */
+html.broken-font-metrics body,
+html.broken-font-metrics #root { line-height: normal; }
+
 body, html, #root {
   margin: 0;
   height: 100%;
@@ -55,7 +64,7 @@ main { display: flex; flex: 1; min-height: 0; }
 
 /* the tree: projects, and the worktrees in them */
 .tree {
-  width: 300px;
+  width: 280px;
   flex: none;
   overflow-y: auto;
   border-right: 1px solid var(--line);
@@ -82,12 +91,14 @@ main { display: flex; flex: 1; min-height: 0; }
 /* A group that is not a project reads as a heading, not as a place you can act. */
 .tree .label.loose { color: var(--dim); font-weight: 400; }
 .tree .add {
+  display: inline-flex;
+  align-items: center;
   background: none;
   border: none;
   color: var(--dim);
   font: inherit;
   cursor: pointer;
-  padding: 0 3px;
+  padding: 0 2px;
 }
 .tree .add:hover { color: var(--accent); }
 .tree .add.none { cursor: default; }
@@ -122,6 +133,38 @@ main { display: flex; flex: 1; min-height: 0; }
 .state.failed, .state.dead { color: var(--bad); }
 .state.creating, .state.seeding { color: var(--accent); }
 
+.files { min-height: 0; padding-bottom: 16px; }
+.files > header {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  color: var(--dim);
+  padding: 0 0 4px;
+}
+.files .entry {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  font: inherit;
+  padding: 1px 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.files .entry:hover { background: var(--bg-raised); }
+.files .entry.dir .label { color: var(--waiting); }
+.files .entry { align-items: center; gap: 5px; }
+.files .twist { width: 14px; color: var(--dim); flex: none; display: inline-flex; }
+.files .label { overflow: hidden; text-overflow: ellipsis; }
+.files .loading, .files .error { padding: 1px 8px; margin: 0; }
+
+/* the file pane */
+.file { display: flex; flex-direction: column; height: 100%; }
+.file .monaco { flex: 1; min-height: 0; }
+
 /* the editor area: tabs, and whatever is open */
 .editor { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); flex: none; }
@@ -139,9 +182,9 @@ main { display: flex; flex: 1; min-height: 0; }
 .tabs .tab button { padding-right: 4px; }
 /* Only shown on a shell; see Tabs.tsx. Dim until hovered, because closing one
    kills what is running in it. */
-.tabs .close { padding: 4px 8px 6px 2px; }
+.tabs .close { display: inline-flex; align-items: center; padding: 4px 7px 6px 2px; }
 .tabs .close:hover { color: var(--bad); }
-.tabs > .add { color: var(--dim); padding: 4px 8px 6px; }
+.tabs > .add { display: inline-flex; align-items: center; color: var(--dim); padding: 4px 8px 6px; }
 .tabs > .add:hover { color: var(--accent); }
 /* Every tab stays mounted -- see Tabs.tsx -- so the inactive ones are hidden
    rather than removed, and `hidden` alone loses to `display: flex`. */
@@ -151,61 +194,101 @@ main { display: flex; flex: 1; min-height: 0; }
 
 /* the dock: what is true about this worktree, always on screen */
 .dock {
-  width: 380px;
+  width: 400px;
   flex: none;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--line);
   min-height: 0;
 }
-.dock-tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); flex: none; }
+.dock-tabs { display: flex; gap: 1px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); flex: none; }
 .dock-tabs button {
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
   color: var(--dim);
   font: inherit;
-  padding: 4px 10px 6px;
+  padding: 4px 7px 6px;
   cursor: pointer;
 }
 .dock-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
-.dock-body { flex: 1; overflow-y: auto; padding: 12px 14px; min-height: 0; }
+.dock-body { flex: 1; overflow-y: auto; padding: 10px 12px; min-height: 0; }
 
-/* the diff, and the review on top of it */
-.diff { display: flex; flex-direction: column; min-height: 100%; }
-.diff .hunks { flex: 1; }
-.diff .section {
-  font-size: 13px;
-  color: var(--accent);
-  font-weight: 600;
-  margin: 16px 0 6px;
+/* the git view */
+.git { min-height: 0; padding-bottom: 16px; }
+.git > header { display: flex; gap: 8px; padding: 0 0 6px; }
+.git .branch { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git .ab { color: var(--dim); margin-left: auto; white-space: nowrap; }
+.git .ab.none { color: var(--waiting); }
+.git-ops { display: flex; gap: 4px; padding: 0 0 8px; }
+.git-ops button {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
 }
-.diff .section:first-child { margin-top: 0; }
+.git-ops button:hover:not(:disabled) { border-color: var(--accent); }
+.git-ops button:disabled { color: var(--dim); cursor: default; }
+.git-ops .quiet {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border-color: transparent;
+  color: var(--dim);
+  margin-left: auto;
+  padding: 2px 6px;
+}
+.git .said {
+  margin: 0 0 8px;
+  padding: 5px 7px;
+  background: var(--bg-sunken);
+  border-left: 2px solid var(--line);
+  white-space: pre-wrap;
+  color: var(--dim);
+  max-height: 120px;
+  overflow-y: auto;
+}
 
-.line { display: grid; grid-template-columns: 44px 1fr; gap: 10px; white-space: pre-wrap; }
-.line .num { color: var(--dim); text-align: right; user-select: none; }
-.line.open { cursor: pointer; }
-.line.open:hover { background: var(--bg-raised); }
-.line.add .text { color: var(--ok); }
-.line.del .text { color: var(--bad); }
-.line.file .text, .line.hunk .text { color: var(--waiting); }
-.line.meta .text { color: var(--dim); }
-.line .text { overflow-wrap: anywhere; }
-
-/* A comment sits under the line it is about, indented past the numbers so the
-   diff still reads as a column. */
-.diff .comment, .diff .composer {
+.changes h3 { font-size: 11px; color: var(--dim); font-weight: 400; margin: 8px 0 2px; padding: 0; text-transform: uppercase; }
+.changes .count { color: var(--dim); }
+.change { display: flex; align-items: center; }
+.change:hover { background: var(--bg-raised); }
+.change .open {
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  margin: 3px 0 5px 54px;
-  border-left: 2px solid var(--accent);
-  padding: 4px 8px;
-  background: rgba(233, 196, 106, 0.06);
-}
-.diff .comment p { margin: 0; flex: 1; white-space: pre-wrap; }
-.diff .composer textarea {
+  align-items: center;
+  gap: 5px;
   flex: 1;
+  min-width: 0;
+  text-align: left;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+.change .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
+.change .mark { width: 10px; flex: none; }
+.change .mark.added, .change .mark.untracked { color: var(--ok); }
+.change .mark.modified, .change .mark.renamed { color: var(--accent); }
+.change .mark.deleted, .change .mark.conflicted { color: var(--bad); }
+.change .act {
+  display: inline-flex;
+  align-items: center;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font: inherit;
+  padding: 2px 5px;
+  cursor: pointer;
+}
+.change .act:hover { color: var(--accent); }
+
+.commit { display: flex; flex-direction: column; gap: 5px; padding: 12px 0 0; }
+.commit textarea {
   background: var(--bg-sunken);
   color: var(--text);
   border: 1px solid var(--line);
@@ -214,32 +297,8 @@ main { display: flex; flex: 1; min-height: 0; }
   font: inherit;
   resize: vertical;
 }
-.diff .composer textarea:focus { outline: none; border-color: var(--accent); }
-.diff .quiet {
-  background: none;
-  border: none;
-  color: var(--dim);
-  font: inherit;
-  cursor: pointer;
-  padding: 2px 0;
-}
-.diff .quiet:hover { color: var(--accent); }
-
-/* The one thing that leaves the window, so it does not scroll away with the
-   diff it came from. */
-.review {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  justify-content: flex-end;
-  padding: 8px 0 2px;
-  margin-top: 10px;
-  border-top: 1px solid var(--line);
-  background: var(--bg);
-}
-.review .go {
+.commit textarea:focus { outline: none; border-color: var(--accent); }
+.commit .go {
   background: var(--accent);
   border: none;
   border-radius: 3px;
@@ -249,9 +308,49 @@ main { display: flex; flex: 1; min-height: 0; }
   padding: 4px 12px;
   cursor: pointer;
 }
-.review .go:disabled { background: var(--dim); cursor: default; }
-.notice.sent summary { cursor: pointer; }
-.notice.sent pre { white-space: pre-wrap; margin: 6px 0 0; }
+.commit .go:disabled { background: var(--dim); cursor: default; }
+
+/* one file's diff, and the review on it */
+.filediff { display: flex; flex-direction: column; height: 100%; }
+.filediff > header { display: flex; gap: 12px; padding: 0 0 6px; flex: none; }
+.filediff .path { overflow-wrap: anywhere; }
+.filediff .sides { color: var(--dim); margin-left: auto; white-space: nowrap; }
+.filediff .monaco { flex: 1; min-height: 220px; }
+/* A commented line, marked where Monaco will let us mark one. */
+.commented-line { background: rgba(233, 196, 106, 0.09); }
+.commented-glyph { background: var(--accent); width: 3px !important; margin-left: 3px; }
+.filediff .composer, .diff .composer { display: flex; gap: 8px; padding: 6px 0 0; }
+.filediff .composer textarea {
+  flex: 1;
+  background: var(--bg-sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 4px 7px;
+  font: inherit;
+  resize: vertical;
+}
+.filediff .composer textarea:focus { outline: none; border-color: var(--accent); }
+.filediff .quiet, .diff .quiet {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.filediff .quiet:hover { color: var(--accent); }
+.filediff .comments { list-style: none; margin: 8px 0 0; padding: 0; flex: none; }
+.filediff .comments li {
+  display: flex;
+  gap: 8px;
+  padding: 3px 6px;
+  border-left: 2px solid var(--accent);
+  background: rgba(233, 196, 106, 0.06);
+  margin-bottom: 3px;
+}
+.filediff .comments .at { color: var(--dim); flex: none; }
+.filediff .comments .body { flex: 1; white-space: pre-wrap; }
 
 /* starting a session */
 header .new {
@@ -361,6 +460,21 @@ header .new:disabled { color: var(--dim); cursor: default; }
   cursor: pointer;
 }
 .actions .go:disabled { background: var(--dim); cursor: default; }
+
+/* the icons */
+.icon { flex: none; vertical-align: -2px; }
+/* Colour by what the file is, dim enough that the name is still the thing you
+   read. The page outline stays neutral so a directory of mixed kinds does not
+   look like a paint chart. */
+.kind-rust { color: #d08770; }
+.kind-code { color: #61afef; }
+.kind-shell { color: #98c379; }
+.kind-config { color: #c586c0; }
+.kind-lock { color: #7d7d8a; }
+.kind-doc { color: #9aa4b8; }
+.kind-style { color: #56b6c2; }
+.kind-image { color: #e5c07b; }
+.kind-plain { color: #6f6f7c; }
 
 /* the terminal */
 .terminal { height: 100%; width: 100%; background: var(--bg-sunken); }

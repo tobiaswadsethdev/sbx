@@ -13,6 +13,7 @@
 
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
+import { Close, Plus } from "./icons";
 
 export type Group = {
   /// The project, or `null` for the by-repository groups at the bottom.
@@ -81,14 +82,14 @@ export function Tree({
                   title="new worktree in this project"
                   onClick={() => onNewWorktree(g.project!)}
                 >
-                  +
+                  <Plus title="new worktree" />
                 </button>
                 <button
                   className="add"
                   title="forget this project (its worktrees stay)"
                   onClick={() => onForget(g.project!)}
                 >
-                  ×
+                  <Close title="forget project" />
                 </button>
               </>
             ) : (

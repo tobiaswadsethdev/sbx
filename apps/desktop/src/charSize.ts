@@ -42,8 +42,9 @@
 // On an engine whose font metrics work -- WebView2, and every Chromium -- the
 // probe passes and none of this applies.
 
-/// Marks a terminal whose engine could not measure a font. `style.css` hangs
-/// the line-height correction off this.
+/// Marks something whose engine could not measure a font. `style.css` hangs the
+/// line-height corrections off this -- on the terminal's rows, and on the
+/// document for everything else.
 const UNTRUSTED = "broken-font-metrics";
 
 /// Whether this engine's canvas can measure a font's height. Probed once: it is
@@ -69,6 +70,25 @@ function probe(): boolean {
     // on the same thing and takes the DOM path unaided; there is nothing to do.
     return true;
   }
+}
+
+/// Mark the document if this engine's font metrics cannot be trusted.
+///
+/// The same fault as the terminal's, and it was fixed there first because that
+/// is where it was visible: a pane that would not draw at all. It is not
+/// terminal-specific. WebKit puts the baseline about two pixels too high for
+/// *any* explicit `line-height`, so every element in the window that clips --
+/// a filename with `overflow: hidden` and `text-overflow: ellipsis`, which is
+/// most of a sidebar -- loses the top of its text. `NOTES.md` renders as
+/// `NOIES.md`, which is legible enough to look like a font choice rather than
+/// a bug.
+///
+/// One rule fixes all of them, because the cause is one thing: with
+/// `line-height: normal` the font's own line box places the baseline at 13px of
+/// a 17px box, and the tallest ink is 12px. See `style.css`.
+export function markUntrustedMetrics(): void {
+  if (typeof OffscreenCanvas === "undefined" || canvasMeasuresHeight()) return;
+  document.documentElement.classList.add(UNTRUSTED);
 }
 
 /// Run `open` -- `Terminal.open`, or anything that constructs a `Terminal`'s

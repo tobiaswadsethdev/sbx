@@ -14,8 +14,8 @@ use std::path::Path;
 use openshell_client::{CliClient, OpenShell};
 use sbx_core::session::Session;
 use sbx_core::store::Store;
-use sbx_core::{comments, config, endpoints, image, ops, policy, projects, repos};
-use sbx_proto::{Failure, Outcome, Reply, Request};
+use sbx_core::{comments, config, endpoints, files, git, image, ops, policy, projects, repos};
+use sbx_proto::{Failure, GitOp, Outcome, Reply, Request};
 
 /// Answer one request.
 pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
@@ -29,6 +29,50 @@ pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
         }),
         Request::Policy { name } => with_session(&name, |s| policy(client, s)),
         Request::Events { name } => with_session(&name, |s| events(client, s)),
+        Request::GitStatus { name } => with_session(&name, |s| {
+            git::status(client, s)
+                .map(|status| Reply::Git {
+                    said: String::new(),
+                    status,
+                })
+                .map_err(Failure::failed)
+        }),
+        Request::GitDiff {
+            name,
+            path,
+            against,
+        } => with_session(&name, |s| {
+            git::file_diff(client, s, &path, against)
+                .map(Reply::GitDiff)
+                .map_err(Failure::failed)
+        }),
+        Request::Git { name, action } => with_session(&name, |s| {
+            let said = match action {
+                GitOp::Stage { path } => git::stage(client, s, &path).map(|_| String::new()),
+                GitOp::Unstage { path } => git::unstage(client, s, &path).map(|_| String::new()),
+                GitOp::Discard { path } => git::discard(client, s, &path).map(|_| String::new()),
+                GitOp::Commit { message } => git::commit(client, s, &message),
+                GitOp::Push => git::push(client, s),
+                GitOp::Pull => git::pull(client, s),
+                GitOp::Fetch => git::fetch(client, s),
+            }
+            .map_err(Failure::failed)?;
+            // Re-read rather than assume: the agent is editing while this runs,
+            // so the status after a stage is not the status before it plus one
+            // entry.
+            let status = git::status(client, s).map_err(Failure::failed)?;
+            Ok(Reply::Git { said, status })
+        }),
+        Request::Files { name, path } => with_session(&name, |s| {
+            files::list(client, s, &path)
+                .map(Reply::Files)
+                .map_err(Failure::failed)
+        }),
+        Request::File { name, path } => with_session(&name, |s| {
+            files::read(client, s, &path)
+                .map(Reply::File)
+                .map_err(Failure::failed)
+        }),
         Request::Shells { name } => with_session(&name, |s| {
             ops::shells(client, s)
                 .map(|shells| Reply::Shells { shells })

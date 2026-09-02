@@ -902,7 +902,7 @@ impl DiffStat {
 /// is recoverable even when the session did not pin one. `$base` is left empty
 /// if it cannot be resolved, which callers must handle: a fresh clone of a
 /// repository with an unusual remote layout has no usable base.
-fn resolve_base(session: &Session) -> String {
+pub(crate) fn resolve_base_script(session: &Session) -> String {
     // A stored base branch names a local branch; the remote-tracking ref is the
     // one that still points at the base after the agent commits.
     let base = match &session.base_branch {
@@ -968,7 +968,7 @@ emit 'untracked' "$untracked"
 if [ -z "$any" ]; then printf 'no changes yet\n'; fi
 "#,
         repo = seed::sh_quote(REPO_PATH),
-        resolve_base = resolve_base(session),
+        resolve_base = resolve_base_script(session),
         section = DIFF_SECTION,
         notice = DIFF_NOTICE,
         cap = DIFF_LINE_CAP,
@@ -1348,7 +1348,7 @@ printf '
 tmux -u -f /etc/tmux.conf capture-pane -pe -t {tmux} 2>/dev/null | tail -n {pane_lines}
 "#,
         repo = seed::sh_quote(REPO_PATH),
-        resolve_base = resolve_base(session),
+        resolve_base = resolve_base_script(session),
         status_marker = seed::sh_quote(status::STATUS_MARKER),
         status_path = seed::sh_quote(STATUS_PATH),
         pane_marker = seed::sh_quote(status::PANE_MARKER),
@@ -1506,12 +1506,12 @@ mod tests {
     fn base_resolution_prefers_the_remote_tracking_ref() {
         let mut s = session();
         s.base_branch = Some("develop".into());
-        let script = resolve_base(&s);
+        let script = resolve_base_script(&s);
         assert!(script.contains("base='origin/develop'"), "{script}");
 
         // With no pinned base, the clone's origin/HEAD is the fallback.
         s.base_branch = None;
-        let script = resolve_base(&s);
+        let script = resolve_base_script(&s);
         assert!(script.contains("base=''"), "{script}");
         assert!(script.contains("refs/remotes/origin/HEAD"), "{script}");
     }
@@ -1520,7 +1520,7 @@ mod tests {
     fn base_resolution_quotes_a_hostile_branch_name() {
         let mut s = session();
         s.base_branch = Some("a'; rm -rf /; echo '".into());
-        let script = resolve_base(&s);
+        let script = resolve_base_script(&s);
         assert!(
             !script.contains("rm -rf /;\n") && script.contains(r"'\''"),
             "the branch name must stay inside one quoted word: {script}"
