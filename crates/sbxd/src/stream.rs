@@ -201,10 +201,14 @@ async fn open(
             task: tokio::spawn(status(id, session, out)),
             to_terminal: None,
         },
-        Channel::Terminal { .. } => {
+        Channel::Terminal { tmux, .. } => {
             let (tx, rx) = mpsc::channel(64);
+            // Defaulted here rather than in the worker, so everything below
+            // this point has one name for its target and no opinion about
+            // which tmux session is special.
+            let target = tmux.clone().unwrap_or_else(|| session.tmux.clone());
             ChannelHandle {
-                task: tokio::spawn(terminal(id, session, out, rx)),
+                task: tokio::spawn(terminal(id, session, target, out, rx)),
                 to_terminal: Some(tx),
             }
         }
@@ -307,6 +311,7 @@ async fn status(id: ChannelId, session: Session, out: mpsc::Sender<ServerFrame>)
 async fn terminal(
     id: ChannelId,
     session: Session,
+    tmux: String,
     out: mpsc::Sender<ServerFrame>,
     mut input: mpsc::Receiver<ToTerminal>,
 ) {
@@ -315,7 +320,7 @@ async fn terminal(
 
     let worker = {
         let session = session.clone();
-        std::thread::spawn(move || pty_worker(session, from_pty, pty_input))
+        std::thread::spawn(move || pty_worker(session, tmux, from_pty, pty_input))
     };
 
     let mut reason = None;
@@ -358,13 +363,14 @@ async fn terminal(
 /// call and holds a reader that blocks until there is something to read.
 fn pty_worker(
     session: Session,
+    tmux: String,
     out: mpsc::Sender<Vec<u8>>,
     input: std::sync::mpsc::Receiver<ToTerminal>,
 ) {
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
     let client = CliClient::default();
-    let script = ops::attach_script(&session);
+    let script = ops::attach_script(&tmux);
     let argv = client.interactive_exec_argv(&session.sandbox, &["sh", "-c", &script]);
 
     // A size to start with. The client sends its own as soon as it has one, and

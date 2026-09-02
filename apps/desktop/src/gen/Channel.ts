@@ -3,4 +3,4 @@
 /**
  * What a channel carries.
  */
-export type Channel = { "kind": "terminal", session: string, } | { "kind": "events", session: string, } | { "kind": "status", session: string, };
+export type Channel = { "kind": "terminal", session: string, tmux: string | null, } | { "kind": "events", session: string, } | { "kind": "status", session: string, };

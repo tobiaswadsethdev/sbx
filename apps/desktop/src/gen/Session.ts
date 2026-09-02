@@ -10,6 +10,17 @@ export type Session = { name: string, sandbox: string,
  */
 tmux: string, repo: string, 
 /**
+ * The project this worktree belongs to, by name. `None` for a session
+ * created before projects existed, or from the command line, which does
+ * not have them: the tree shows those grouped by their clone URL instead
+ * of pretending they belong somewhere.
+ *
+ * Recorded rather than matched back by `repo`, because two projects may
+ * share a clone URL -- two checkouts of one repository is a normal thing
+ * to have -- and a worktree would then belong to both.
+ */
+project: string | null, 
+/**
  * Branch cloned from; `None` means the remote's default.
  */
 base_branch: string | null, work_branch: string, task: string, policy: string | null, providers: Array<string>, 

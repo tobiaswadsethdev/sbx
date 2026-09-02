@@ -70,13 +70,126 @@ neutral. Generated, it is a type error.
 
 ## What it shows
 
-The session list, and five panes: **terminal** (the agent's screen, live),
-**diff** (what has changed, and the review you are writing about it), **facts**
-(what the session is), **policy** (the rules the gateway is enforcing) and
-**events** (every allow and deny it has made).
+A workspace, not a list. **Projects** on the left containing **worktrees**, what
+you have open in the middle as tabs, and a **dock** on the right carrying what
+is true about the selected worktree.
 
-Policy and events are the two with no equivalent in an ADE built on git
-worktrees, and they are why this is worth building rather than adopting one.
+```
+   +-----------+--------------------------+-----------+
+   | projects  |  agent | diff | ...       |  events   |
+   |  worktree |                          |  policy   |
+   |  worktree |   whatever is open       |  facts    |
+   | projects  |                          |           |
+   +-----------+--------------------------+-----------+
+```
+
+It was a flat session list, and that was right while a session was the unit of
+work. It stopped being right at four repositories: a list sorted by name says
+nothing about which four they are.
+
+**A project is a decision, not a discovery.** `repos::discover_in` finds every
+checkout on the machine, which is tens of them; a project is the handful someone
+has said they are working on, made by picking one. So it is stored rather than
+derived from the sessions that exist -- a project with no worktrees yet is the
+normal state of one you just made, and grouping sessions by clone URL could
+never represent it.
+
+A worktree records the project it was started in rather than being matched back
+to one by URL, because two projects may share a URL: two checkouts of one
+repository is a normal thing to have, and the worktree would otherwise belong to
+both. Anything with no project -- everything `sbx new` creates, since the
+terminal has none -- is grouped by clone URL at the bottom of the tree rather
+than hidden. Forgetting a project leaves its worktrees alive and moves them
+there; a sandbox is a real thing with an agent in it, and removing one is
+`sbx rm`'s job, said out loud.
+
+**Tabs are per worktree.** A tab is a thing you have open *in* a working copy,
+so switching worktree switches the set and coming back finds it as you left it.
+Every tab stays mounted and is hidden rather than unmounted: a terminal that
+unmounts closes its channel and detaches, so switching to the diff and back
+would lose the screen and re-attach.
+
+**`+` opens another shell** in the same sandbox, under the same policy. It is
+not a way around the isolation; it is a second prompt inside it, which is the
+point -- you can run the tests while the agent is still working. Each shell is
+its own tmux session in the sandbox, so they do not contend: `attach -d` evicts
+a client left behind by a crash, and two tabs on one tmux session would evict
+each other instead.
+
+What shells exist is asked of the **sandbox**, not remembered here. tmux already
+knows, and its answer outlives this window closing, the server restarting and a
+second window opening -- a list kept in a client would show a shell that had
+been closed from elsewhere and hide one opened from elsewhere. The server also
+names them, because two windows adding a shell at once would otherwise both
+pick `shell-2` and the second would silently attach to the first's.
+
+Closing a shell kills what is running in it, so only a shell has the button. The
+agent's terminal is not one, and `kill_shell` refuses a target that is not
+prefixed `shell-` rather than trusting the request -- closing the agent's tab
+must not stop the agent.
+
+**The dock is not a tab, and that is deliberate.** Facts, policy and events sit
+beside the editor and stay on screen. The isolation being *visible* is the
+reason this is worth building rather than adopting an ADE built on git
+worktrees, and a denial you have to open a tab to find is one you will not find.
+It costs width the editor would otherwise have; that is the trade.
+
+## Starting work
+
+**new project** opens the picker; picking a checkout makes the project. Then
+**+** beside a project starts a worktree in it, which is the form without the
+repository question -- the project is the standing answer to that one, and what
+is left is the part that differs between one worktree and the next.
+
+The repositories in the picker are the **server's**. A checkout only ever names
+a remote -- the sandbox clones `origin` over the gateway either way -- but which
+checkouts exist is a fact about the machine that will do the cloning, and
+`repo_roots` is configured there. So `Repos` and `Inspect` are requests like any
+other, and a window pointed at a server on another continent lists that server's
+repositories rather than a set of paths it cannot reach.
+
+Nothing in the form decides anything `sbx new` decides differently, and that is
+enforced by where the decisions live rather than by care:
+
+* **The name is derived by the server** when the field is left blank, by the
+  same `derive_name` the command line uses. A slug rule reimplemented in
+  TypeScript would be a second answer to what a session is called.
+* **The toolchains arrive ticked**, from `Inspect` on the project's checkout --
+  it has already answered that question. All of them are listed anyway: a form
+  that hid `dotnet` because there is no `.csproj` yet would be one you cannot
+  use to start writing one.
+* **The credentials arrive ticked too**, by the same rule the TUI uses --
+  `ops::preselect_providers`, which moved into the core when this form needed
+  it. A session without the agent's credential comes up to a login prompt and
+  one without the repository host's cannot clone a private repository, so both
+  are ticked where the type identifies exactly one provider; where it does not,
+  the providers the last session for that host was given break the tie. A
+  config file naming providers replaces the rule rather than adding to it.
+* **The base branch is the checkout's own.** `Inspect` resolves it server-side
+  when the request does not name one, which is what `None` on that request has
+  always meant. Unresolved, `base_on_remote` reports every branch as missing
+  from the remote and the form silently falls back to the remote's default --
+  which is what it did for about an hour.
+* **Skills and MCP servers are shown, not offered.** They are one decision about
+  what your agents can reach, made in the server's config file, and
+  `NewSession::into_draft` reads them from there rather than from the request --
+  so a client cannot attach a tool, or the endpoint the policy then opens for
+  it, by asking.
+
+`Create` answers as soon as the request is accepted, not when the agent is
+running. Creating takes tens of seconds and the states it passes through --
+`creating`, `seeding`, `ready` -- are already on the worktree and already
+polled, so a request that waited would hold a connection open for a minute to
+say what the tree was about to say anyway. Everything that can be judged from
+the request is judged before it returns: an unknown toolchain and a name that is
+not a name come back as errors against the request that caused them.
+
+One difference from the TUI worth naming rather than hiding: the picker's filter
+is a substring match, where the TUI ranks with the fuzzy score in
+`repos::score`. The alternative to a second copy of that scorer in TypeScript is
+a request per keystroke, and of the three a plainer match on the same list is
+the one that cannot go quietly wrong. If they ever need to agree exactly, the
+scorer moves to the server.
 
 ## Reviewing, and telling the agent
 
@@ -114,61 +227,6 @@ typed at it. A bracketed paste is one block of text however many lines it has,
 and the single `Enter` afterwards is the submission. The review is cleared only
 once the paste has landed, so a sandbox that was briefly unreachable costs the
 delivery rather than the work.
-
-## Starting a session
-
-**new** opens a picker, and picking opens a form -- two stages, because they
-answer different questions: which repository is a search, and what kind of
-session is a handful of fields with defaults good enough to submit on sight.
-It is the same shape as the TUI's, for the same reason.
-
-**The repositories are the server's, not this machine's.** A checkout is only a
-way of *naming* a remote -- the sandbox clones `origin` over the gateway either
-way -- but which checkouts exist is a fact about the machine that will do the
-cloning, and `repo_roots` is configured there. So `Repos` and `Inspect` are
-requests like any other, and a window pointed at a server on another continent
-lists that server's repositories rather than a set of paths it cannot reach.
-
-Nothing in the form decides anything `sbx new` decides differently, and that is
-enforced by where the decisions live rather than by care:
-
-* **The name is derived by the server** when the field is left blank, by the
-  same `derive_name` the command line uses. A slug rule reimplemented in
-  TypeScript would be a second answer to what a session is called.
-* **The toolchains arrive ticked**, from `Inspect` on the repository actually
-  picked -- the checkout has already answered that question. All of them are
-  listed anyway: a form that hid `dotnet` because there is no `.csproj` yet
-  would be one you cannot use to start writing one.
-* **The credentials arrive ticked too**, by the same rule the TUI uses --
-  `ops::preselect_providers`, which moved into the core when this form needed
-  it. A session without the agent's credential comes up to a login prompt and
-  one without the repository host's cannot clone a private repository, so both
-  are ticked where the type identifies exactly one provider; where it does not,
-  the providers the last session for that host was given break the tie. A
-  config file naming providers replaces the rule rather than adding to it.
-* **Skills and MCP servers are shown, not offered.** They are one decision about
-  what your agents can reach, made in the server's config file, and
-  `NewSession::into_draft` reads them from there rather than from the request --
-  so a client cannot attach a tool, or the endpoint the policy then opens for
-  it, by asking.
-* **A checkout with no origin is shown and refused**, rather than hidden. There
-  is nothing for the sandbox to clone, and a repository missing from the list
-  looks like a bug in the scan.
-
-`Create` answers as soon as the request is accepted, not when the agent is
-running. Creating takes tens of seconds and the states it passes through --
-`creating`, `seeding`, `ready` -- are already on the session and already polled,
-so a request that waited would hold a connection open for a minute to say what
-the list was about to say anyway. Everything that can be judged from the request
-is judged before it returns: an unknown toolchain and a name that is not a name
-come back as errors against the request that caused them.
-
-One difference from the TUI worth naming rather than hiding: the picker's filter
-is a substring match, where the TUI ranks with the fuzzy score in
-`repos::score`. The alternative to a second copy of that scorer in TypeScript is
-a request per keystroke, and of the three a plainer match on the same list is
-the one that cannot go quietly wrong. If they ever need to agree exactly, the
-scorer moves to the server.
 
 ## The font metrics WebKit gets wrong
 

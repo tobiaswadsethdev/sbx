@@ -11,6 +11,13 @@ import type { Facts } from "./Facts";
  */
 export type Picked = { facts: Facts, 
 /**
+ * The branch the checkout is on, or `None` for a detached HEAD. Carried so
+ * a form started from a *project* can offer it as the base: a project
+ * stores a path, and the branch is a fact about the checkout that only the
+ * server can read.
+ */
+branch: string | null, 
+/**
  * Provider names a new session here should start with ticked. Empty when
  * the config file names providers, since an explicit list replaces this
  * rather than adding to it.

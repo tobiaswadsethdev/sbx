@@ -59,7 +59,10 @@ fn a_terminal_channel_produces_the_agents_screen() {
     let stream = stream();
     stream.send(ClientFrame::Open {
         id: 1,
-        channel: Channel::Terminal { session: session() },
+        channel: Channel::Terminal {
+            session: session(),
+            tmux: None,
+        },
     });
     stream.send(ClientFrame::Resize {
         id: 1,
@@ -99,7 +102,10 @@ fn a_terminal_can_be_opened_again_after_being_closed() {
         let stream = stream();
         stream.send(ClientFrame::Open {
             id: 1,
-            channel: Channel::Terminal { session: session() },
+            channel: Channel::Terminal {
+                session: session(),
+                tmux: None,
+            },
         });
 
         let got = wait_for(&stream, Duration::from_secs(20), |f| match f {

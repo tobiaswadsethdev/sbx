@@ -1922,13 +1922,70 @@ for free, with nothing persisted client-side.
   written against, verbatim: the working copy moves under a review, and a
   comment that tried to follow a line through later edits would either be wrong
   or need a diff of the diff.
-- **29. Worktree backend** — the `Backend` trait, the second implementation, and
+- **29. The workspace shell** — DONE. Projects, the tree, tabs and the dock.
+  525 tests.
+
+  The flat session list was right while a session was the unit of work and
+  stopped being right at four repositories: a list sorted by name says nothing
+  about which four. So the window is shaped like an editor -- projects contain
+  worktrees, a worktree contains what you have open in it, and the dock carries
+  the two things an ADE built on git worktrees has no equivalent for.
+
+  **A project is a decision, not a discovery.** `repos::discover_in` finds every
+  checkout on the machine; a project is the handful someone has said they are
+  working on, and it is created by picking one. Stored rather than derived,
+  because a project with no worktrees yet is the normal state of one you just
+  made and no amount of grouping sessions by clone URL can represent it. A
+  worktree records its project rather than being matched back by URL: two
+  checkouts of one repository is a normal thing to have, and it would otherwise
+  belong to both. `sbx new` has no projects, so what it creates is grouped by
+  clone URL at the bottom of the tree rather than hidden.
+
+  The picker moved out of the create flow and into project creation, which is
+  the point: it was the first question of every create and it is now a standing
+  answer, so what is asked when starting work is the part that varies.
+
+  Tabs are per worktree and stay mounted, hidden rather than unmounted -- a
+  terminal that unmounts closes its channel and detaches. The dock is not a tab
+  on purpose: a denial you have to open a tab to find is one you will not find.
+
+  One bug the restructure introduced and the app caught: the form stopped
+  sending a branch to `Inspect`, since a project stores a path and not a
+  checkout. `base_on_remote` is `branch.is_some_and(..)`, so every branch
+  reported as missing from the remote and the form fell back to the remote's
+  default without saying so. Resolved on the server now, which is what `None` on
+  that request always claimed to mean.
+
+- **30. Files, and the editor** — the file tree over a new pair of requests, and
+  Monaco for viewing a file and its diff. Read-only: the agent owns the working
+  copy. The unknown worth measuring first is Monaco under WebKitGTK, given what
+  the terminal cost.
+- **31. Shells beside the agent** — DONE. `Channel::Terminal` names a tmux
+  target, `Shells`/`NewShell`/`KillShell` manage them, and the tab bar grew a
+  `+`. 528 tests.
+
+  Each shell is its own tmux session in the sandbox, which is what removes the
+  contention rather than dropping `attach -d`: that flag evicts a client left
+  behind by a crash and is worth keeping, and two tabs on one tmux session would
+  have evicted each other instead. The same sandbox and the same policy -- a
+  shell is not a way around the isolation, it is a second prompt inside it.
+
+  What shells exist is asked of the sandbox. tmux already knows, and its answer
+  outlives the window closing and a second window opening; a list kept in a
+  client would show one closed from elsewhere and hide one opened there. The
+  server names them too, since two windows adding at once would both pick
+  `shell-2` and the second would silently attach to the first's.
+
+  `tmux: None` on the channel means the agent's own, so a client written before
+  any of this keeps working -- there is a test for exactly that, because it is
+  the kind of compatibility that breaks silently.
+- **32. Worktree backend** — the `Backend` trait, the second implementation, and
   the labelling that keeps it honest.
-- **30. Managed MCP and skill sync** — the catalog, container lifecycle, the
+- **33. Managed MCP and skill sync** — the catalog, container lifecycle, the
   secret store, and the client-to-server skill upload.
-- **31. Task inbox** — GitHub, Azure DevOps and Jira; open-from-ticket and the
+- **34. Task inbox** — GitHub, Azure DevOps and Jira; open-from-ticket and the
   publish round trip.
-- **32. Ship it** — notifications, usage and rate-limit display, Windows
+- **35. Ship it** — notifications, usage and rate-limit display, Windows
   packaging and signing, and the install story for a server that is not local.
 
 ## Risks

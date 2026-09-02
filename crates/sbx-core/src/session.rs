@@ -326,6 +326,16 @@ pub struct Session {
     /// so an older session keeps working if the default ever changes.
     pub tmux: String,
     pub repo: String,
+    /// The project this worktree belongs to, by name. `None` for a session
+    /// created before projects existed, or from the command line, which does
+    /// not have them: the tree shows those grouped by their clone URL instead
+    /// of pretending they belong somewhere.
+    ///
+    /// Recorded rather than matched back by `repo`, because two projects may
+    /// share a clone URL -- two checkouts of one repository is a normal thing
+    /// to have -- and a worktree would then belong to both.
+    #[serde(default)]
+    pub project: Option<String>,
     /// Branch cloned from; `None` means the remote's default.
     #[serde(default)]
     pub base_branch: Option<String>,
@@ -402,6 +412,7 @@ impl Session {
             work_branch: format!("sbx/{name}"),
             name,
             repo,
+            project: None,
             base_branch: None,
             task,
             policy: None,

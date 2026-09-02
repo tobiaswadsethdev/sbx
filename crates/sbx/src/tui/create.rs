@@ -702,6 +702,8 @@ impl Form {
         session::validate_name(&name).map_err(|e| e.to_string())?;
         let base = self.base.text().trim();
         Ok(ops::Draft {
+            // The terminal has no projects; see `Session::project`.
+            project: None,
             name,
             // Checked by the picker, so an empty string here is unreachable;
             // it would fail the create rather than doing something surprising.

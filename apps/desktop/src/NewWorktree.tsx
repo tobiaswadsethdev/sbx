@@ -1,86 +1,67 @@
-// Starting a session: pick a repository, then fill in the rest.
+// Starting a worktree: what this one is for.
 //
-// Two stages rather than one screen, for the reason `tui/create.rs` gives:
-// the picker answers *which repository*, which is a search, and the form
-// answers *what kind of session*, which is a handful of fields with defaults
-// good enough to submit on sight.
+// The second of the two questions the create flow used to ask on one screen.
+// The repository is already answered -- it is the project this is being started
+// in -- so what is left is the part that differs between one worktree and the
+// next, which is a handful of fields with defaults good enough to submit on
+// sight.
 //
-// The repository is a way of naming a **remote**. The sandbox clones `origin`
-// over the gateway exactly as `sbx new --repo <url>` does, so a checkout with
-// no origin cannot start a session, and local edits and unpushed commits stay
-// where they are -- which is why the form says how many of each there are.
-//
-// Nothing here decides anything the other two front ends decide differently.
-// The name is derived by the server when this leaves it blank, the policy list
-// and the ticked toolchains arrive from the server, and the skills and MCP
-// servers are shown rather than offered, because they are one decision made in
-// the config file.
+// Nothing here decides anything `sbx new` decides differently. The name is
+// derived by the server when this leaves it blank, the policy list and the
+// ticked toolchains and credentials arrive from the server, and the skills and
+// MCP servers are shown rather than offered, because they are one decision made
+// in the config file.
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api, messageOf } from "./api";
 import type { Facts } from "./gen/Facts";
-import type { Picked } from "./gen/Picked";
-import type { Listing } from "./gen/Listing";
-import type { LocalRepo } from "./gen/LocalRepo";
 import type { NewOptions } from "./gen/NewOptions";
+import type { Picked } from "./gen/Picked";
+import type { Project } from "./gen/Project";
 
-export function NewSessionDialog({
+export function NewWorktreeDialog({
   server,
+  project,
   onClose,
   onCreated,
 }: {
   server: string;
+  project: Project;
   onClose: () => void;
   onCreated: (name: string) => void;
 }) {
-  const [listing, setListing] = useState<Listing | null>(null);
   const [options, setOptions] = useState<NewOptions | null>(null);
-  const [picked, setPicked] = useState<LocalRepo | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Both at once: the form cannot be drawn without either, and asking in
-  // sequence is two chances to show half a dialog.
   useEffect(() => {
     let live = true;
-    Promise.all([api.repos(server), api.newOptions(server)])
-      .then(([l, o]) => {
-        if (!live) return;
-        setListing(l);
-        setOptions(o);
-      })
+    api
+      .newOptions(server)
+      .then((o) => live && setOptions(o))
       .catch((e) => live && setError(messageOf(e)));
     return () => {
       live = false;
     };
   }, [server]);
 
-  // Escape closes from either stage. On the form it steps back to the picker
-  // instead, which is the only way back to a different repository.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
-      if (picked) setPicked(null);
-      else onClose();
-    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [picked, onClose]);
+  }, [onClose]);
 
   return (
     <div className="scrim" onMouseDown={onClose}>
       <div className="dialog" onMouseDown={(e) => e.stopPropagation()}>
         {error && <p className="error">{error}</p>}
-        {!error && (!listing || !options) && <p className="loading">looking for repositories…</p>}
-        {listing && options && !picked && (
-          <Picker listing={listing} onPick={setPicked} onClose={onClose} />
-        )}
-        {listing && options && picked && (
+        {!options && !error && <p className="loading">reading the options…</p>}
+        {options && (
           <Form
             server={server}
-            repo={picked}
+            project={project}
             options={options}
-            onBack={() => setPicked(null)}
+            onClose={onClose}
             onCreated={onCreated}
           />
         )}
@@ -89,98 +70,23 @@ export function NewSessionDialog({
   );
 }
 
-/// Which repository.
-///
-/// The filter is a substring match, where the TUI ranks with the fuzzy score in
-/// `repos::score`. Not an oversight: the alternative to a second copy of that
-/// scorer in TypeScript is a request per keystroke, and of the three options a
-/// plainer match on the same list is the one that cannot go quietly wrong. If
-/// the two ever need to agree exactly, the scorer moves to the server.
-function Picker({
-  listing,
-  onPick,
-  onClose,
-}: {
-  listing: Listing;
-  onPick: (repo: LocalRepo) => void;
-  onClose: () => void;
-}) {
-  const [query, setQuery] = useState("");
-  const field = useRef<HTMLInputElement>(null);
-
-  useEffect(() => field.current?.focus(), []);
-
-  const rows = useMemo(() => {
-    const needle = query.trim().toLowerCase();
-    if (!needle) return listing.repos;
-    return listing.repos.filter((r) => r.display.toLowerCase().includes(needle));
-  }, [listing.repos, query]);
-
-  return (
-    <>
-      <header className="dialog-head">
-        <h2>New session</h2>
-        <button className="quiet" onClick={onClose}>
-          close
-        </button>
-      </header>
-      <input
-        ref={field}
-        className="search"
-        placeholder="filter repositories"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-      />
-      {listing.repos.length === 0 ? (
-        <div className="none">
-          <p>No git repositories on the server.</p>
-          <p>
-            It looked in {listing.roots.join(", ") || "nowhere"}. Set{" "}
-            <code>repo_roots</code> in its config file to look elsewhere.
-          </p>
-        </div>
-      ) : (
-        <ul className="repos">
-          {rows.map((r) => (
-            <li key={r.path}>
-              <button
-                // A checkout with no origin has nothing for the sandbox to
-                // clone. Shown and refused rather than hidden, which is clearer
-                // than a repository that is simply missing from the list.
-                disabled={!r.origin}
-                onClick={() => onPick(r)}
-              >
-                <span className="name">{r.name}</span>
-                <span className="branch">{r.branch ?? "detached"}</span>
-                <span className="path">{r.display}</span>
-                <span className="origin">{r.origin ?? "no origin — cannot be cloned"}</span>
-              </button>
-            </li>
-          ))}
-          {rows.length === 0 && <li className="none">nothing matches “{query}”</li>}
-        </ul>
-      )}
-    </>
-  );
-}
-
-/// What kind of session.
+/// What kind of worktree.
 function Form({
   server,
-  repo,
+  project,
   options,
-  onBack,
+  onClose,
   onCreated,
 }: {
   server: string;
-  repo: LocalRepo;
+  project: Project;
   options: NewOptions;
-  onBack: () => void;
+  onClose: () => void;
   onCreated: (name: string) => void;
 }) {
   const [task, setTask] = useState("");
   const [name, setName] = useState("");
-  const [base, setBase] = useState(repo.branch ?? options.default_base ?? "");
+  const [base, setBase] = useState(options.default_base ?? "");
   const [policy, setPolicy] = useState(options.default_policy);
   const [toolchains, setToolchains] = useState<string[]>([]);
   const [providers, setProviders] = useState<string[]>(options.default_providers);
@@ -195,11 +101,14 @@ function Form({
   useEffect(() => {
     let live = true;
     api
-      .inspect(server, repo.path, repo.branch)
+      // The project stores a path; which branch that checkout is on is a fact
+      // only the server can read, so it comes back with the rest.
+      .inspect(server, project.path, null)
       .then((picked: Picked) => {
         if (!live) return;
         setFacts(picked.facts);
         setToolchains(picked.facts.toolchains);
+        if (picked.branch) setBase(picked.branch);
         // Empty when the config file names providers, since an explicit list
         // replaces the rule rather than adding to it -- so the defaults already
         // in state stand.
@@ -213,7 +122,7 @@ function Form({
     return () => {
       live = false;
     };
-  }, [server, repo.path, repo.branch]);
+  }, [server, project.path]);
 
   const toggle = (list: string[], set: (v: string[]) => void, value: string) =>
     set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
@@ -223,10 +132,11 @@ function Form({
     setError(null);
     try {
       const created = await api.create(server, {
+        project: project.name,
         // Blank means "derive it", which is what `sbx new` without `--name`
         // does. The rule lives on the server so there is one of it.
         name: name.trim() || null,
-        repo: repo.origin!,
+        repo: project.repo,
         task,
         base: base.trim() || null,
         policy,
@@ -244,13 +154,13 @@ function Form({
   return (
     <>
       <header className="dialog-head">
-        <h2>{repo.name}</h2>
-        <button className="quiet" onClick={onBack}>
-          another repository
+        <h2>{project.name}</h2>
+        <button className="quiet" onClick={onClose}>
+          close
         </button>
       </header>
 
-      <p className="origin">{repo.origin}</p>
+      <p className="origin">{project.repo}</p>
       {facts && <Drift facts={facts} />}
 
       <label>
@@ -340,7 +250,7 @@ function Form({
       {error && <p className="error">{error}</p>}
 
       <div className="actions">
-        <button className="go" disabled={busy || !repo.origin} onClick={() => void submit()}>
+        <button className="go" disabled={busy} onClick={() => void submit()}>
           {busy ? "starting…" : "start session"}
         </button>
       </div>

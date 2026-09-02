@@ -35,8 +35,16 @@ pub type ChannelId = u32;
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Channel {
-    /// The agent's terminal: bytes in, bytes out.
-    Terminal { session: String },
+    /// A terminal in the sandbox: bytes in, bytes out.
+    ///
+    /// `tmux` names which one. `None` is the agent's own, which is what every
+    /// client meant before there were others -- so an older one keeps working
+    /// and the field is a default rather than a break.
+    Terminal {
+        session: String,
+        #[serde(default)]
+        tmux: Option<String>,
+    },
     /// The allow/deny feed, as decisions are made.
     Events { session: String },
     /// What the agent is doing, and how far the working copy has moved.
@@ -46,7 +54,7 @@ pub enum Channel {
 impl Channel {
     pub fn session(&self) -> &str {
         match self {
-            Channel::Terminal { session }
+            Channel::Terminal { session, .. }
             | Channel::Events { session }
             | Channel::Status { session } => session,
         }
@@ -144,6 +152,7 @@ mod tests {
             id: 3,
             channel: Channel::Terminal {
                 session: "readme-fix".into(),
+                tmux: None,
             },
         };
         let v: serde_json::Value = serde_json::to_value(&f).unwrap();
@@ -180,6 +189,7 @@ mod tests {
         for c in [
             Channel::Terminal {
                 session: "a".into(),
+                tmux: None,
             },
             Channel::Events {
                 session: "a".into(),
@@ -244,5 +254,38 @@ mod tests {
             panic!("not an output frame");
         };
         assert_eq!(bytes::decode(&data).as_deref(), Some(typed));
+    }
+
+    /// A client written before there were shells sends a terminal channel with
+    /// no `tmux` in it at all. That has to keep meaning the agent's own, or
+    /// upgrading the server would leave every one of them attaching to nothing.
+    #[test]
+    fn a_terminal_channel_without_a_tmux_name_still_parses() {
+        let json = r#"{"kind":"terminal","session":"readme-fix"}"#;
+        let c: Channel = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            c,
+            Channel::Terminal {
+                session: "readme-fix".into(),
+                tmux: None,
+            }
+        );
+    }
+
+    /// And a named one round-trips, so a second shell is a different channel
+    /// rather than the same one twice.
+    #[test]
+    fn a_named_shell_is_a_different_channel_from_the_agent() {
+        let agent = Channel::Terminal {
+            session: "s".into(),
+            tmux: None,
+        };
+        let shell = Channel::Terminal {
+            session: "s".into(),
+            tmux: Some("shell-1".into()),
+        };
+        assert_ne!(agent, shell);
+        let back: Channel = serde_json::from_value(serde_json::to_value(&shell).unwrap()).unwrap();
+        assert_eq!(back, shell);
     }
 }

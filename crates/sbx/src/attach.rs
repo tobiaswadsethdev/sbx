@@ -39,7 +39,7 @@ pub fn interactively(
     session: &Session,
 ) -> std::io::Result<std::process::ExitStatus> {
     let _raw = RawMode::enter();
-    let script = ops::attach_script(session);
+    let script = ops::attach_script(&session.tmux);
     // Not `.output()` and never killed: the child must exit on its own, because
     // killing an `exec --tty` wedges the exec path for that sandbox until it is
     // recreated.

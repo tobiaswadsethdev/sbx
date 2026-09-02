@@ -297,6 +297,11 @@ pub fn new_options(client: &dyn OpenShell, cfg: &crate::config::Config) -> NewOp
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Picked {
     pub facts: crate::repos::Facts,
+    /// The branch the checkout is on, or `None` for a detached HEAD. Carried so
+    /// a form started from a *project* can offer it as the base: a project
+    /// stores a path, and the branch is a fact about the checkout that only the
+    /// server can read.
+    pub branch: Option<String>,
     /// Provider names a new session here should start with ticked. Empty when
     /// the config file names providers, since an explicit list replaces this
     /// rather than adding to it.
@@ -378,6 +383,9 @@ pub fn preselect_providers(
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewSession {
+    /// The project to start it in. `None` from the command line, which has no
+    /// projects, and from a client that is not working inside one.
+    pub project: Option<String>,
     /// `None` to have one derived from the task, which is what `sbx new`
     /// without `--name` does. Derived here rather than in a client, because a
     /// second implementation of the slug rule is a second answer to what a
@@ -412,6 +420,7 @@ impl NewSession {
         session::validate_name(&name).map_err(|e| e.to_string())?;
         Ok(Draft {
             name,
+            project: self.project,
             repo: self.repo,
             task: self.task,
             base: self.base.or_else(|| cfg.base.clone()),
@@ -433,6 +442,9 @@ impl NewSession {
 #[derive(Debug, Clone, Default)]
 pub struct Draft {
     pub name: String,
+    /// The project this worktree is being started in, if it was started from
+    /// one. See [`Session::project`].
+    pub project: Option<String>,
     /// Clone URL. A local checkout is only ever a way of *naming* one: see
     /// [`crate::repos`].
     pub repo: String,
@@ -678,6 +690,7 @@ pub fn create(
 
     let mut s = Session::new(draft.name.clone(), draft.repo.clone(), draft.task.clone());
     s.base_branch = draft.base.clone();
+    s.project = draft.project.clone();
     s.policy = Some(resolved.label.clone());
     s.providers = draft.providers.clone();
     s.mcp = draft.mcp.clone();
@@ -1116,7 +1129,7 @@ pub fn publish(
 /// the window as usual; with nothing attached, tmux has no client size to apply
 /// and the wide one stands. Every part of it is best-effort: a session that has
 /// just been created by the fallback above is not worth failing an attach over.
-pub fn attach_script(session: &Session) -> String {
+pub fn attach_script(tmux: &str) -> String {
     let (cols, rows) = session::SCRAPE_SIZE;
     format!(
         "{UTF8_ENV} \
@@ -1125,9 +1138,90 @@ pub fn attach_script(session: &Session) -> String {
          tmux -u resize-window -t {tmux} -x {cols} -y {rows} 2>/dev/null; \
          tmux -u set -w -t {tmux} window-size latest 2>/dev/null; \
          true",
-        tmux = seed::sh_quote(&session.tmux),
+        tmux = seed::sh_quote(tmux),
         repo = seed::sh_quote(REPO_PATH),
     )
+}
+
+/// The prefix every shell's tmux session is named with.
+///
+/// A prefix rather than a list kept somewhere: what shells exist is a fact
+/// about the sandbox, and tmux is already the thing that knows it. Asking tmux
+/// means a shell survives the window closing, the server restarting, and a
+/// second window opening -- none of which a list in a client would.
+const SHELL_PREFIX: &str = "shell-";
+
+/// The shells beside the agent, by tmux session name.
+///
+/// The agent's own is filtered out: it is not a shell you opened and not one
+/// you may close, and every caller would otherwise have to remember that.
+pub fn shells(client: &dyn OpenShell, session: &Session) -> Result<Vec<String>, String> {
+    let out = client
+        .exec(
+            &session.sandbox,
+            &["tmux", "list-sessions", "-F", "#{session_name}"],
+        )
+        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    // A sandbox with no tmux server at all exits non-zero saying so, which is
+    // "no shells" rather than a failure worth showing.
+    if !out.ok() {
+        return Ok(Vec::new());
+    }
+    let mut names: Vec<String> = out
+        .trimmed()
+        .lines()
+        .map(str::trim)
+        .filter(|n| !n.is_empty() && *n != session.tmux)
+        .map(str::to_string)
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// Open another shell in the same sandbox, and answer with its name.
+///
+/// Named by the *server* rather than by the client: two windows adding a shell
+/// at once would otherwise both pick `shell-2`, and the second would silently
+/// attach to the first's.
+///
+/// It is the same sandbox under the same policy. A shell is not a way around
+/// the isolation -- it is a second prompt inside it, which is the point: you
+/// can run the tests while the agent is still working.
+pub fn new_shell(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
+    let taken = shells(client, session)?;
+    let name = (1..)
+        .map(|n| format!("{SHELL_PREFIX}{n}"))
+        .find(|candidate| !taken.contains(candidate))
+        .ok_or("no free shell name")?;
+
+    let script = format!(
+        "{UTF8_ENV} tmux -u -f /etc/tmux.conf new-session -d -s {name} -c {repo}",
+        name = seed::sh_quote(&name),
+        repo = seed::sh_quote(REPO_PATH),
+    );
+    let out = client
+        .exec(&session.sandbox, &["sh", "-c", &script])
+        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    if !out.ok() {
+        return Err(format!("could not open a shell: {}", out.stderr.trim()));
+    }
+    Ok(name)
+}
+
+/// Close one, killing whatever is running in it.
+pub fn kill_shell(client: &dyn OpenShell, session: &Session, tmux: &str) -> Result<(), String> {
+    // The agent's session is not a shell and closing its tab must not stop it.
+    // Checked here rather than trusted from the request, which is a client's.
+    if tmux == session.tmux || !tmux.starts_with(SHELL_PREFIX) {
+        return Err(format!("`{tmux}` is not a shell"));
+    }
+    let out = client
+        .exec(&session.sandbox, &["tmux", "kill-session", "-t", tmux])
+        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    if !out.ok() {
+        return Err(format!("could not close it: {}", out.stderr.trim()));
+    }
+    Ok(())
 }
 
 /// The locale a tmux client needs, and the `-u` that does not depend on it.
@@ -1340,7 +1434,7 @@ mod tests {
     /// invisible until it is missing.
     #[test]
     fn the_attach_script_attaches_falls_back_and_puts_the_size_back() {
-        let script = attach_script(&session());
+        let script = attach_script(&session().tmux);
         assert!(script.contains("attach -d"), "{script}");
         // Without these the client draws Claude Code's glyphs as underscores.
         assert!(
@@ -1692,5 +1786,34 @@ mod tests {
             script.contains(r"'\''"),
             "the apostrophe was not escaped: {script}"
         );
+    }
+
+    /// A worktree records the project it was started in, so the tree can group
+    /// it. Matching back by clone URL could not: two checkouts of one
+    /// repository is a normal thing to have, and the worktree would belong to
+    /// both projects.
+    #[test]
+    fn a_new_session_carries_its_project_into_the_draft() {
+        let cfg = crate::config::Config::default();
+        let draft = NewSession {
+            project: Some("sbx".into()),
+            name: Some("x".into()),
+            repo: "https://github.com/o/sbx.git".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap();
+        assert_eq!(draft.project.as_deref(), Some("sbx"));
+
+        // And `sbx new`, which has no projects, leaves it unset rather than
+        // inventing one.
+        let from_terminal = NewSession {
+            name: Some("y".into()),
+            repo: "https://github.com/o/sbx.git".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap();
+        assert_eq!(from_terminal.project, None);
     }
 }

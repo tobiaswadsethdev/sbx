@@ -21,6 +21,7 @@ use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll};
 use sbx_core::policy::View as PolicyView;
+use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
@@ -118,6 +119,31 @@ fn diff(server: String, name: String) -> Result<String, Failed> {
     expect_reply!(reply, Reply::Diff { body } => body, "a diff")
 }
 
+/// The shells open beside a worktree's agent.
+#[tauri::command]
+fn shells(server: String, name: String) -> Result<Vec<String>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Shells { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Shells { shells } => shells, "a shell list")
+}
+
+#[tauri::command]
+fn new_shell(server: String, name: String) -> Result<Vec<String>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::NewShell { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Shells { shells } => shells, "a shell list")
+}
+
+#[tauri::command]
+fn kill_shell(server: String, name: String, tmux: String) -> Result<Vec<String>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::KillShell { name, tmux })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Shells { shells } => shells, "a shell list")
+}
+
 #[tauri::command]
 fn comments(server: String, name: String) -> Result<Vec<Comment>, Failed> {
     let reply = remote(&server)?
@@ -149,6 +175,29 @@ fn send_comments(server: String, name: String) -> Result<String, Failed> {
         .call(Request::SendComments { name })
         .map_err(to_message)?;
     expect_reply!(reply, Reply::Told { message } => message, "a delivered review")
+}
+
+/// The projects on the server: what the tree is grouped under.
+#[tauri::command]
+fn projects(server: String) -> Result<Vec<Project>, Failed> {
+    let reply = remote(&server)?.call(Request::Projects).map_err(to_message)?;
+    expect_reply!(reply, Reply::Projects { projects } => projects, "a project list")
+}
+
+#[tauri::command]
+fn new_project(server: String, project: NewProject) -> Result<Vec<Project>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::NewProject(project))
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Projects { projects } => projects, "a project list")
+}
+
+#[tauri::command]
+fn forget_project(server: String, name: String) -> Result<Vec<Project>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::ForgetProject { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Projects { projects } => projects, "a project list")
 }
 
 /// The repositories the *server* can see, for the picker.
@@ -329,10 +378,16 @@ fn main() {
             policy,
             events,
             diff,
+            shells,
+            new_shell,
+            kill_shell,
             comments,
             comment,
             uncomment,
             send_comments,
+            projects,
+            new_project,
+            forget_project,
             repos,
             inspect,
             new_options,

@@ -11,6 +11,11 @@
  */
 export type NewSession = { 
 /**
+ * The project to start it in. `None` from the command line, which has no
+ * projects, and from a client that is not working inside one.
+ */
+project: string | null, 
+/**
  * `None` to have one derived from the task, which is what `sbx new`
  * without `--name` does. Derived here rather than in a client, because a
  * second implementation of the slug rule is a second answer to what a

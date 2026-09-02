@@ -623,6 +623,8 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
     };
 
     let draft = ops::Draft {
+        // The terminal has no projects; see `Session::project`.
+        project: None,
         name,
         repo,
         task: args.task,

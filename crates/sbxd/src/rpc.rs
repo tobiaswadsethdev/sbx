@@ -14,7 +14,7 @@ use std::path::Path;
 use openshell_client::{CliClient, OpenShell};
 use sbx_core::session::Session;
 use sbx_core::store::Store;
-use sbx_core::{comments, config, endpoints, image, ops, policy, repos};
+use sbx_core::{comments, config, endpoints, image, ops, policy, projects, repos};
 use sbx_proto::{Failure, Outcome, Reply, Request};
 
 /// Answer one request.
@@ -29,6 +29,23 @@ pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
         }),
         Request::Policy { name } => with_session(&name, |s| policy(client, s)),
         Request::Events { name } => with_session(&name, |s| events(client, s)),
+        Request::Shells { name } => with_session(&name, |s| {
+            ops::shells(client, s)
+                .map(|shells| Reply::Shells { shells })
+                .map_err(Failure::gateway)
+        }),
+        Request::NewShell { name } => with_session(&name, |s| {
+            ops::new_shell(client, s).map_err(Failure::failed)?;
+            ops::shells(client, s)
+                .map(|shells| Reply::Shells { shells })
+                .map_err(Failure::gateway)
+        }),
+        Request::KillShell { name, tmux } => with_session(&name, |s| {
+            ops::kill_shell(client, s, &tmux).map_err(Failure::failed)?;
+            ops::shells(client, s)
+                .map(|shells| Reply::Shells { shells })
+                .map_err(Failure::gateway)
+        }),
         Request::Comments { name } => with_session(&name, |s| Ok(review(comments::list(&s.name)))),
         Request::Comment { name, comment } => with_session(&name, |s| {
             comments::add(&s.name, comment)
@@ -45,6 +62,18 @@ pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
                 .map(|message| Reply::Told { message })
                 .map_err(Failure::failed)
         }),
+        Request::Projects => Reply::Projects {
+            projects: projects::list(),
+        }
+        .into(),
+        Request::NewProject(new) => match projects::add(new) {
+            Ok(projects) => Reply::Projects { projects }.into(),
+            Err(e) => Failure::failed(e).into(),
+        },
+        Request::ForgetProject { name } => match projects::remove(&name) {
+            Ok(projects) => Reply::Projects { projects }.into(),
+            Err(e) => Failure::failed(e).into(),
+        },
         Request::Repos => repo_list(),
         Request::Inspect { path, branch } => inspect(client, &path, branch.as_deref()),
         Request::NewOptions => match config::Config::load() {
@@ -79,7 +108,16 @@ fn repo_list() -> Outcome {
 /// about git.
 fn inspect(client: &dyn OpenShell, path: &str, branch: Option<&str>) -> Outcome {
     let path = Path::new(path);
-    let facts = repos::inspect(path, branch);
+    let checkout = repos::read(path);
+    // `None` means the checkout's own branch, which is what the request says it
+    // means -- and `inspect` cannot work that out for itself, because it is
+    // handed a path rather than the record `read` produces. Left unresolved it
+    // reports every branch as missing from the remote, and a form built on that
+    // silently falls back to the remote's default.
+    let branch = branch
+        .map(str::to_string)
+        .or_else(|| checkout.branch.clone());
+    let facts = repos::inspect(path, branch.as_deref());
     let cfg = config::Config::load().unwrap_or_default();
 
     // An explicit list in the config file replaces this rather than adding to
@@ -87,7 +125,7 @@ fn inspect(client: &dyn OpenShell, path: &str, branch: Option<&str>) -> Outcome 
     let providers = if !cfg.providers().is_empty() {
         Vec::new()
     } else {
-        let origin = repos::read(path).origin;
+        let origin = checkout.origin.clone();
         let choices: Vec<ops::ProviderChoice> = client
             .providers()
             .unwrap_or_default()
@@ -106,7 +144,12 @@ fn inspect(client: &dyn OpenShell, path: &str, branch: Option<&str>) -> Outcome 
         ops::preselect_providers(&choices, origin.as_deref(), &used)
     };
 
-    Reply::Inspect(ops::Picked { facts, providers }).into()
+    Reply::Inspect(ops::Picked {
+        facts,
+        branch: checkout.branch,
+        providers,
+    })
+    .into()
 }
 
 /// Start a session, and answer before it has finished starting.

@@ -28,6 +28,7 @@ use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll, Refreshed};
 use sbx_core::policy::View as PolicyView;
+use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 
@@ -109,6 +110,14 @@ pub enum Request {
     Policy { name: String },
     /// The allow/deny feed, newest first.
     Events { name: String },
+    /// The projects on this server: the repositories someone has said they are
+    /// working on, which is what the worktrees are grouped under.
+    Projects,
+    /// Make one, from a checkout the picker found.
+    NewProject(NewProject),
+    /// Forget one. The worktrees in it are left alone -- a sandbox is a real
+    /// thing with an agent in it, and removing one is `rm`'s job.
+    ForgetProject { name: String },
     /// Git repositories on the server's disk, for starting a session from one.
     ///
     /// The server's and not the client's: the checkout is only a way of *naming*
@@ -126,6 +135,18 @@ pub enum Request {
     },
     /// Everything a create form needs that is not about a repository.
     NewOptions,
+    /// The shells open beside a worktree's agent, by tmux session name.
+    ///
+    /// Asked of the sandbox rather than remembered by a client: what shells
+    /// exist is a fact about the sandbox, and one that survives the window
+    /// closing and a second window opening.
+    Shells { name: String },
+    /// Open another shell in the same sandbox. Answers with the list, including
+    /// the new one, whose name the server chose.
+    NewShell { name: String },
+    /// Close one, killing whatever is running in it. The agent's own is not a
+    /// shell and is refused.
+    KillShell { name: String, tmux: String },
     /// A session's unsent review.
     Comments { name: String },
     /// Add one remark to it. Answers with the review as it now stands, so a
@@ -155,11 +176,20 @@ impl Request {
     /// and what an authorisation check would key on.
     pub fn session(&self) -> Option<&str> {
         match self {
-            Request::Ls | Request::Repos | Request::Inspect { .. } | Request::NewOptions => None,
+            Request::Ls
+            | Request::Repos
+            | Request::Inspect { .. }
+            | Request::NewOptions
+            | Request::Projects
+            | Request::NewProject(_)
+            | Request::ForgetProject { .. } => None,
             Request::Poll { name }
             | Request::Diff { name }
             | Request::Policy { name }
             | Request::Events { name }
+            | Request::Shells { name }
+            | Request::NewShell { name }
+            | Request::KillShell { name, .. }
             | Request::Comments { name }
             | Request::Comment { name, .. }
             | Request::Uncomment { name, .. }
@@ -207,10 +237,16 @@ pub enum Reply {
     Comments {
         comments: Vec<Comment>,
     },
+    Shells {
+        shells: Vec<String>,
+    },
     /// What was actually said to the agent, so a client can show the message it
     /// sent rather than a claim that it sent one.
     Told {
         message: String,
+    },
+    Projects {
+        projects: Vec<Project>,
     },
     Repos(Listing),
     Inspect(Picked),

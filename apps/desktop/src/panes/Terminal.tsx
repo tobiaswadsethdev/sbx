@@ -19,7 +19,17 @@ import "@xterm/xterm/css/xterm.css";
 import { withUsableFontMetrics } from "../charSize";
 import { close, decodeBytes, encodeBytes, nextChannelId, open, terminal } from "../stream";
 
-export function TerminalPane({ server, name }: { server: string; name: string }) {
+export function TerminalPane({
+  server,
+  name,
+  tmux,
+}: {
+  server: string;
+  name: string;
+  /// Which tmux session in the sandbox. `null` is the agent's own, which is
+  /// what this meant before there were others.
+  tmux: string | null;
+}) {
   const host = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -71,7 +81,7 @@ export function TerminalPane({ server, name }: { server: string; name: string })
       terminal.resize(id, xterm.cols, xterm.rows).catch(() => {});
     };
 
-    void open(server, id, { kind: "terminal", session: name }, (frame) => {
+    void open(server, id, { kind: "terminal", session: name, tmux }, (frame) => {
       if (!live) return;
       switch (frame.is) {
         case "opened":
@@ -104,7 +114,7 @@ export function TerminalPane({ server, name }: { server: string; name: string })
       void close(id);
       xterm.dispose();
     };
-  }, [server, name]);
+  }, [server, name, tmux]);
 
   return <div className="terminal" ref={host} />;
 }
