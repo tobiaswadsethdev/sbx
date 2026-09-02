@@ -70,13 +70,68 @@ neutral. Generated, it is a type error.
 
 ## What it shows
 
-The session list, and three panes: **facts** (what the session is), **policy**
-(the rules the gateway is enforcing) and **events** (every allow and deny it has
-made). Read-only so far. The terminal, the diff with comments, and creating a
-session are increments of their own.
+The session list, and four panes: **terminal** (the agent's screen, live),
+**facts** (what the session is), **policy** (the rules the gateway is enforcing)
+and **events** (every allow and deny it has made). The diff with its inline
+comments is an increment of its own.
 
 Policy and events are the two with no equivalent in an ADE built on git
 worktrees, and they are why this is worth building rather than adopting one.
+
+## Starting a session
+
+**new** opens a picker, and picking opens a form -- two stages, because they
+answer different questions: which repository is a search, and what kind of
+session is a handful of fields with defaults good enough to submit on sight.
+It is the same shape as the TUI's, for the same reason.
+
+**The repositories are the server's, not this machine's.** A checkout is only a
+way of *naming* a remote -- the sandbox clones `origin` over the gateway either
+way -- but which checkouts exist is a fact about the machine that will do the
+cloning, and `repo_roots` is configured there. So `Repos` and `Inspect` are
+requests like any other, and a window pointed at a server on another continent
+lists that server's repositories rather than a set of paths it cannot reach.
+
+Nothing in the form decides anything `sbx new` decides differently, and that is
+enforced by where the decisions live rather than by care:
+
+* **The name is derived by the server** when the field is left blank, by the
+  same `derive_name` the command line uses. A slug rule reimplemented in
+  TypeScript would be a second answer to what a session is called.
+* **The toolchains arrive ticked**, from `Inspect` on the repository actually
+  picked -- the checkout has already answered that question. All of them are
+  listed anyway: a form that hid `dotnet` because there is no `.csproj` yet
+  would be one you cannot use to start writing one.
+* **The credentials arrive ticked too**, by the same rule the TUI uses --
+  `ops::preselect_providers`, which moved into the core when this form needed
+  it. A session without the agent's credential comes up to a login prompt and
+  one without the repository host's cannot clone a private repository, so both
+  are ticked where the type identifies exactly one provider; where it does not,
+  the providers the last session for that host was given break the tie. A
+  config file naming providers replaces the rule rather than adding to it.
+* **Skills and MCP servers are shown, not offered.** They are one decision about
+  what your agents can reach, made in the server's config file, and
+  `NewSession::into_draft` reads them from there rather than from the request --
+  so a client cannot attach a tool, or the endpoint the policy then opens for
+  it, by asking.
+* **A checkout with no origin is shown and refused**, rather than hidden. There
+  is nothing for the sandbox to clone, and a repository missing from the list
+  looks like a bug in the scan.
+
+`Create` answers as soon as the request is accepted, not when the agent is
+running. Creating takes tens of seconds and the states it passes through --
+`creating`, `seeding`, `ready` -- are already on the session and already polled,
+so a request that waited would hold a connection open for a minute to say what
+the list was about to say anyway. Everything that can be judged from the request
+is judged before it returns: an unknown toolchain and a name that is not a name
+come back as errors against the request that caused them.
+
+One difference from the TUI worth naming rather than hiding: the picker's filter
+is a substring match, where the TUI ranks with the fuzzy score in
+`repos::score`. The alternative to a second copy of that scorer in TypeScript is
+a request per keystroke, and of the three a plainer match on the same list is
+the one that cannot go quietly wrong. If they ever need to agree exactly, the
+scorer moves to the server.
 
 ## The font metrics WebKit gets wrong
 

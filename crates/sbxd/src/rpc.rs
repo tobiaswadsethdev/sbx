@@ -9,9 +9,12 @@
 //! subprocess, so every one of these blocks for a few hundred milliseconds;
 //! [`crate::serve`] is what keeps that off the runtime's threads.
 
-use openshell_client::OpenShell;
+use std::path::Path;
+
+use openshell_client::{CliClient, OpenShell};
+use sbx_core::session::Session;
 use sbx_core::store::Store;
-use sbx_core::{endpoints, ops, policy, session::Session};
+use sbx_core::{config, endpoints, image, ops, policy, repos};
 use sbx_proto::{Failure, Outcome, Reply, Request};
 
 /// Answer one request.
@@ -26,7 +29,108 @@ pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
         }),
         Request::Policy { name } => with_session(&name, |s| policy(client, s)),
         Request::Events { name } => with_session(&name, |s| events(client, s)),
+        Request::Repos => repo_list(),
+        Request::Inspect { path, branch } => inspect(client, &path, branch.as_deref()),
+        Request::NewOptions => match config::Config::load() {
+            Ok(cfg) => Reply::NewOptions(ops::new_options(client, &cfg)).into(),
+            Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
+        },
+        Request::Create(new) => create(new),
     }
+}
+
+/// The repositories on this machine, and where it looked for them.
+fn repo_list() -> Outcome {
+    let cfg = config::Config::load().unwrap_or_default();
+    let roots = repos::roots(cfg.repo_roots.as_deref());
+    let repos = repos::discover_in(&roots);
+    Reply::Repos(repos::Listing {
+        roots: roots.iter().map(|r| r.path.display().to_string()).collect(),
+        repos,
+    })
+    .into()
+}
+
+/// What is known about the repository a client has picked.
+///
+/// The provider half fails softly, like the list in [`ops::new_options`]: a
+/// gateway that cannot be reached leaves nothing ticked, which is a form you
+/// can still fill in, rather than an error against a question that was mostly
+/// about git.
+fn inspect(client: &dyn OpenShell, path: &str, branch: Option<&str>) -> Outcome {
+    let path = Path::new(path);
+    let facts = repos::inspect(path, branch);
+    let cfg = config::Config::load().unwrap_or_default();
+
+    // An explicit list in the config file replaces this rather than adding to
+    // it, so there is nothing to work out when there is one.
+    let providers = if !cfg.providers().is_empty() {
+        Vec::new()
+    } else {
+        let origin = repos::read(path).origin;
+        let choices: Vec<ops::ProviderChoice> = client
+            .providers()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| ops::ProviderChoice {
+                name: p.name,
+                kind: p.kind,
+            })
+            .collect();
+        let sessions: Result<Vec<Session>, _> =
+            Store::load().map(|s| s.list().into_iter().cloned().collect());
+        let used = match (&origin, &sessions) {
+            (Some(url), Ok(list)) => ops::providers_used_for(url, list),
+            _ => Vec::new(),
+        };
+        ops::preselect_providers(&choices, origin.as_deref(), &used)
+    };
+
+    Reply::Inspect(ops::Picked { facts, providers }).into()
+}
+
+/// Start a session, and answer before it has finished starting.
+///
+/// Everything that can be judged from the request is judged here, so a name
+/// with a slash in it or a toolchain nobody has heard of comes back as an error
+/// against the request that caused it. What is left is tens of seconds of
+/// gateway and network, and that runs on a thread: the states it passes through
+/// are on the session, and the session is already polled.
+fn create(new: sbx_core::ops::NewSession) -> Outcome {
+    let cfg = match config::Config::load() {
+        Ok(c) => c,
+        Err(e) => return Failure::failed(format!("could not read the config file: {e}")).into(),
+    };
+
+    // Built here and not on the thread: naming, validating and resolving the
+    // toolchains are everything that can fail on the client's account, and they
+    // belong to the request that caused them.
+    let draft = match new.into_draft(&cfg) {
+        Ok(d) => d,
+        Err(e) => return Failure::failed(e).into(),
+    };
+    let name = draft.name.clone();
+
+    std::thread::spawn(move || {
+        // The CLI builds the image before creating, because the build streams
+        // docker's output to a terminal. There is no terminal here, so it
+        // happens on this thread with the session sitting in `creating` -- which
+        // is what a client watching the list sees either way, only for longer
+        // the first time a set of toolchains is used.
+        let client = CliClient::default();
+        if let Err(e) = image::ensure_for(&draft.toolchains) {
+            eprintln!("sbxd: {}: could not build the image: {e}", draft.name);
+            return;
+        }
+        // Progress is dropped rather than reported: the steps map onto states
+        // the record already carries, and a channel per create would be a second
+        // way to learn the same thing.
+        if let Err(e) = ops::create(&client, &draft, &mut |_| {}) {
+            eprintln!("sbxd: {}: could not create the session: {e}", draft.name);
+        }
+    });
+
+    Reply::Created { name }.into()
 }
 
 fn ls(client: &dyn OpenShell) -> Outcome {

@@ -165,6 +165,115 @@ main { display: flex; flex: 1; min-height: 0; }
 .loading { color: var(--dim); }
 .error { color: var(--bad); }
 
+/* starting a session */
+header .new {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text);
+  font: inherit;
+  padding: 2px 10px;
+  cursor: pointer;
+}
+header .new:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+header .new:disabled { color: var(--dim); cursor: default; }
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  overflow-y: auto;
+}
+.dialog {
+  width: 620px;
+  max-width: 100%;
+  background: var(--bg-raised);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px 16px 16px;
+}
+.dialog-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+.dialog-head h2 { font-size: 14px; margin: 0; flex: 1; }
+.dialog .quiet {
+  background: none;
+  border: none;
+  color: var(--dim);
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+.dialog .quiet:hover { color: var(--text); }
+
+.dialog input, .dialog textarea, .dialog select {
+  background: var(--bg-sunken);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 4px 7px;
+  font: inherit;
+  width: 100%;
+}
+.dialog input:focus, .dialog textarea:focus, .dialog select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.dialog textarea { resize: vertical; }
+
+.dialog > label { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: start; margin: 8px 0; }
+.dialog > label > span:first-child { color: var(--dim); padding-top: 5px; }
+
+.dialog fieldset { border: none; margin: 12px 0 0; padding: 0; }
+.dialog legend { color: var(--dim); padding: 0; margin-bottom: 4px; }
+.dialog .tick { display: flex; align-items: center; gap: 8px; padding: 2px 0; cursor: pointer; }
+.dialog .tick input { width: auto; }
+.dialog .hint { color: var(--dim); }
+
+.repos { list-style: none; margin: 8px 0 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+.repos button {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "name branch" "path path" "origin origin";
+  gap: 1px 8px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+.repos button:hover:not(:disabled) { background: var(--bg-sunken); border-color: var(--line); }
+.repos button:disabled { cursor: default; opacity: 0.55; }
+.repos .name { grid-area: name; }
+.repos .branch { grid-area: branch; color: var(--dim); }
+.repos .path { grid-area: path; color: var(--dim); }
+.repos .origin { grid-area: origin; color: var(--dim); }
+.dialog .none { color: var(--dim); padding: 10px 2px; }
+.dialog > .origin { color: var(--dim); margin: 0 0 8px; overflow-wrap: anywhere; }
+
+.carried { display: grid; grid-template-columns: 72px 1fr; gap: 2px 10px; margin: 14px 0 0; }
+.carried dt { color: var(--dim); }
+.carried dd { margin: 0; }
+
+.actions { display: flex; justify-content: flex-end; margin-top: 16px; }
+.actions .go {
+  background: var(--accent);
+  border: none;
+  border-radius: 3px;
+  color: #17171d;
+  font: inherit;
+  font-weight: 700;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.actions .go:disabled { background: var(--dim); cursor: default; }
+
 /* the terminal */
 .pane.bare { padding: 0; overflow: hidden; }
 .terminal { height: 100%; width: 100%; background: var(--bg-sunken); }

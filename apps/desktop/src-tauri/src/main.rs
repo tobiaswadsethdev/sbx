@@ -18,8 +18,9 @@ use std::sync::Mutex;
 
 use sbx_client::{Incoming, Remote, Remotes, Sink};
 use sbx_core::events::Event;
-use sbx_core::ops::Poll;
+use sbx_core::ops::{NewOptions, NewSession, Picked, Poll};
 use sbx_core::policy::View as PolicyView;
+use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
 use sbx_proto::{Reply, Request};
@@ -114,6 +115,44 @@ fn diff(server: String, name: String) -> Result<String, Failed> {
         .call(Request::Diff { name })
         .map_err(to_message)?;
     expect_reply!(reply, Reply::Diff { body } => body, "a diff")
+}
+
+/// The repositories the *server* can see, for the picker.
+///
+/// The server's and not this machine's: a checkout is only a way of naming a
+/// remote, but which checkouts exist is a fact about the machine that will do
+/// the cloning, and `repo_roots` is configured there.
+#[tauri::command]
+fn repos(server: String) -> Result<Listing, Failed> {
+    let reply = remote(&server)?.call(Request::Repos).map_err(to_message)?;
+    expect_reply!(reply, Reply::Repos(listing) => listing, "a repository list")
+}
+
+#[tauri::command]
+fn inspect(server: String, path: String, branch: Option<String>) -> Result<Picked, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Inspect { path, branch })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Inspect(picked) => picked, "repository facts")
+}
+
+#[tauri::command]
+fn new_options(server: String) -> Result<NewOptions, Failed> {
+    let reply = remote(&server)?
+        .call(Request::NewOptions)
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::NewOptions(options) => options, "the create options")
+}
+
+/// Ask for a session. Answers as soon as the server has accepted the request,
+/// which is before the session exists: it appears in the list a moment later,
+/// in `creating`.
+#[tauri::command]
+fn create(server: String, session: NewSession) -> Result<String, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Create(session))
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Created { name } => name, "a created session")
 }
 
 /// The one streaming connection, and which server it is to.
@@ -256,6 +295,10 @@ fn main() {
             policy,
             events,
             diff,
+            repos,
+            inspect,
+            new_options,
+            create,
             watch,
             unwatch,
             terminal_input,

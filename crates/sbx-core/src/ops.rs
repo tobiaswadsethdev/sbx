@@ -147,6 +147,284 @@ pub fn refresh_with(
     Ok(out)
 }
 
+/// One entry in a create form's policy chooser.
+///
+/// A [`policy::Template`] flattened, plus the one case a template cannot cover:
+/// a config file may name a YAML path instead, and that has to be offered or a
+/// client would quietly create sessions under a different policy from
+/// `sbx new`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PolicyChoice {
+    /// What goes into the draft: a template name, or a path.
+    pub spec: String,
+    pub summary: String,
+}
+
+/// One toolchain a session's image can carry.
+///
+/// Sent by name rather than as a [`Toolchain`], which holds a Dockerfile
+/// fragment and a registry list that no form has any use for.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolchainChoice {
+    pub name: String,
+    pub summary: String,
+}
+
+/// One credential provider the gateway knows about.
+///
+/// Flattened for the same reason [`policy::View`] exists: `openshell_client`'s
+/// own types belong to a `0.0.x` project, and putting them on the wire would
+/// make their churn protocol churn.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProviderChoice {
+    pub name: String,
+    /// The profile type, which is what says what a provider is *for*. Names are
+    /// chosen by whoever created them and several may share a type.
+    pub kind: String,
+}
+
+/// Everything a create form needs that is not about a repository.
+///
+/// One request rather than four, because a form cannot be drawn until it has all
+/// of them and four round trips to a server that may be a continent away is four
+/// chances to show a half-built form.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NewOptions {
+    pub policies: Vec<PolicyChoice>,
+    /// Every toolchain, not only the ones a checkout points at. The list is
+    /// three lines long, and one that hid `dotnet` because there is no `.csproj`
+    /// yet would be a form you cannot use to start writing one.
+    pub toolchains: Vec<ToolchainChoice>,
+    pub providers: Vec<ProviderChoice>,
+    /// Why the provider list is empty, when it is. An unreachable gateway is a
+    /// fact about the server worth showing beside the field rather than a list
+    /// that is simply blank.
+    pub providers_error: Option<String>,
+    /// The policy `sbx new` would use here, so a client can preselect what the
+    /// command line would have chosen.
+    pub default_policy: String,
+    /// From the config file. Replaces a client's own guesswork rather than
+    /// adding to it, for the reason [`Draft::providers`] gives.
+    pub default_providers: Vec<String>,
+    /// Only consulted for a checkout on a detached HEAD: the branch a repository
+    /// is sitting on is evidence about *that* repository, and a config entry is
+    /// a guess about all of them.
+    pub default_base: Option<String>,
+    /// Named, not chosen. Skills and MCP servers are one decision about what
+    /// your agents can reach, made in the config file; a form shows them so a
+    /// session's tools are not a surprise, and has nothing to offer about them.
+    pub skills: Vec<String>,
+    pub mcp: Vec<String>,
+}
+
+/// The templates, with a configured YAML path in front of them when there is
+/// one.
+///
+/// In front rather than instead: a config file naming a path is saying what a
+/// session should get by default, and a form that then offered only the
+/// built-in templates would quietly create sessions under a different policy
+/// from `sbx new`.
+pub fn policy_choices(configured: &str) -> Vec<PolicyChoice> {
+    let mut out = Vec::new();
+    if policy::find(configured).is_none() {
+        out.push(PolicyChoice {
+            spec: configured.to_string(),
+            summary: "from your config file".to_string(),
+        });
+    }
+    out.extend(policy::TEMPLATES.iter().map(|t| PolicyChoice {
+        spec: t.name.to_string(),
+        summary: t.summary.to_string(),
+    }));
+    out
+}
+
+/// Every toolchain there is.
+pub fn toolchain_choices() -> Vec<ToolchainChoice> {
+    toolchain::TOOLCHAINS
+        .iter()
+        .map(|t| ToolchainChoice {
+            name: t.name.to_string(),
+            summary: t.summary.to_string(),
+        })
+        .collect()
+}
+
+/// Build [`NewOptions`] from the config file and the gateway.
+///
+/// The provider list is the only part that can fail, and it fails softly: a
+/// gateway that cannot be reached leaves the field empty with a reason attached,
+/// rather than refusing to open a form whose other five fields are fine.
+pub fn new_options(client: &dyn OpenShell, cfg: &crate::config::Config) -> NewOptions {
+    let configured = cfg.policy();
+    let (providers, providers_error) = match client.providers() {
+        Ok(list) => (
+            list.into_iter()
+                .map(|p| ProviderChoice {
+                    name: p.name,
+                    kind: p.kind,
+                })
+                .collect(),
+            None,
+        ),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
+
+    NewOptions {
+        policies: policy_choices(configured),
+        toolchains: toolchain_choices(),
+        providers,
+        providers_error,
+        default_policy: configured.to_string(),
+        default_providers: cfg.providers().to_vec(),
+        default_base: cfg.base.clone(),
+        skills: cfg.skills().iter().map(|s| s.name.clone()).collect(),
+        mcp: cfg.mcp().iter().map(|m| m.name.clone()).collect(),
+    }
+}
+
+/// What is known about the repository a client has picked.
+///
+/// The git facts, and the credentials to tick. Both are answers about *this*
+/// repository and both cost something to work out -- subprocesses for one, the
+/// gateway and the session cache for the other -- so they are asked for
+/// together, once, about the repository actually picked.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Picked {
+    pub facts: crate::repos::Facts,
+    /// Provider names a new session here should start with ticked. Empty when
+    /// the config file names providers, since an explicit list replaces this
+    /// rather than adding to it.
+    pub providers: Vec<String>,
+}
+
+/// Provider names the most recent session for this remote's host and
+/// organisation was given.
+///
+/// A record of what worked, not a guess: it can only be wrong where the person
+/// was wrong.
+pub fn providers_used_for(origin: &str, sessions: &[Session]) -> Vec<String> {
+    let key = |url: &str| {
+        crate::forge::Remote::parse(url)
+            .ok()
+            .map(|r| (r.host, r.org))
+    };
+    let Some(wanted) = key(origin) else {
+        return Vec::new();
+    };
+    sessions
+        .iter()
+        .filter(|s| key(&s.repo).is_some_and(|k| k == wanted))
+        .filter(|s| !s.providers.is_empty())
+        // Newest first: the last thing that worked is the best evidence.
+        .max_by_key(|s| s.created_at)
+        .map(|s| s.providers.clone())
+        .unwrap_or_default()
+}
+
+/// Which credentials a new session for this repository should start with.
+///
+/// Two rules, in order. A provider is the obvious choice when it is the only
+/// one of the type that is wanted -- the agent's, and the repository host's --
+/// since a session without the agent's credential comes up to a login prompt
+/// and one without the host's cannot clone a private repository.
+///
+/// When there are several of a type, the type alone cannot say which: two Azure
+/// PATs are two organisations, and the wrong one fails three steps later. That
+/// used to mean nothing was ticked, which is just as wrong for the common case
+/// -- the answer is almost always the one used last time. So `used_before`
+/// breaks the tie.
+///
+/// Here rather than in either front end because both need it and neither may
+/// answer it differently: a session created from the window and one created
+/// from the terminal have to arrive with the same credentials.
+pub fn preselect_providers(
+    providers: &[ProviderChoice],
+    origin: Option<&str>,
+    used_before: &[String],
+) -> Vec<String> {
+    let agent = session::agent_provider_type("claude");
+    let forge = origin
+        .and_then(|url| crate::forge::Remote::parse(url).ok())
+        .map(|r| r.forge.provider_profile());
+
+    let unique = |kind: &str| providers.iter().filter(|p| p.kind == kind).count() == 1;
+
+    providers
+        .iter()
+        .filter(|p| {
+            [agent, forge]
+                .into_iter()
+                .flatten()
+                .any(|kind| kind == p.kind)
+                && (unique(&p.kind) || used_before.contains(&p.name))
+        })
+        .map(|p| p.name.clone())
+        .collect()
+}
+
+/// A session a client is asking for.
+///
+/// The wire twin of [`Draft`], and deliberately not [`Draft`] itself: a draft
+/// carries resolved `&'static Toolchain`s and the config file's skills and MCP
+/// servers, and none of those are a client's to send. Skills and MCP in
+/// particular are read from the *server's* config when this is turned into a
+/// draft, so a client cannot attach a tool by asking for one.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NewSession {
+    /// `None` to have one derived from the task, which is what `sbx new`
+    /// without `--name` does. Derived here rather than in a client, because a
+    /// second implementation of the slug rule is a second answer to what a
+    /// session is called.
+    pub name: Option<String>,
+    pub repo: String,
+    pub task: String,
+    pub base: Option<String>,
+    pub policy: String,
+    pub providers: Vec<String>,
+    /// Toolchain names. Resolved against the server's own list, so an unknown
+    /// one fails here rather than as a docker tag nothing has ever built.
+    pub toolchains: Vec<String>,
+    pub start: bool,
+}
+
+impl NewSession {
+    /// Turn a request into something [`create`] will accept.
+    ///
+    /// The only place a client's message becomes a draft, which is why the
+    /// fields it may not set are filled from `cfg` here rather than trusted.
+    pub fn into_draft(self, cfg: &crate::config::Config) -> Result<Draft, String> {
+        let name = match self
+            .name
+            .map(|n| n.trim().to_string())
+            .filter(|n| !n.is_empty())
+        {
+            Some(n) => n,
+            None => session::derive_name(&self.task, &self.repo)
+                .ok_or("could not work out a name for this session; give it one")?,
+        };
+        session::validate_name(&name).map_err(|e| e.to_string())?;
+        Ok(Draft {
+            name,
+            repo: self.repo,
+            task: self.task,
+            base: self.base.or_else(|| cfg.base.clone()),
+            policy: self.policy,
+            providers: self.providers,
+            mcp: cfg.mcp().to_vec(),
+            skills: cfg.skills().to_vec(),
+            toolchains: toolchain::resolve(&self.toolchains).map_err(|e| e.to_string())?,
+            start: self.start,
+        })
+    }
+}
+
 /// Everything needed to start a session, however it was asked for.
 ///
 /// The one description of a new session shared by `sbx new` and the TUI's
@@ -1191,5 +1469,143 @@ mod tests {
     fn the_diff_script_emits_the_markers_the_renderer_strips() {
         assert_eq!(DIFF_SECTION, "### ");
         assert_eq!(DIFF_NOTICE, "!!! ");
+    }
+
+    /// A blank name is the normal case from a form, and the rule that fills it
+    /// has to be the same one `sbx new` uses -- which is why it lives here and
+    /// not in a client.
+    #[test]
+    fn a_new_session_with_no_name_is_named_from_its_task() {
+        let cfg = crate::config::Config::default();
+        let draft = NewSession {
+            name: None,
+            repo: "https://github.com/o/thing.git".into(),
+            task: "Fix the flaky login test".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .expect("a name should have been derived");
+        assert_eq!(
+            draft.name,
+            session::derive_name("Fix the flaky login test", "").unwrap()
+        );
+    }
+
+    /// A name of nothing but spaces is not a name. Trimmed to empty and then
+    /// derived, rather than accepted and rejected later by `validate_name`.
+    #[test]
+    fn a_whitespace_name_falls_back_to_the_task() {
+        let cfg = crate::config::Config::default();
+        let draft = NewSession {
+            name: Some("   ".into()),
+            repo: "https://github.com/o/thing.git".into(),
+            task: "tidy the docs".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .expect("a name should have been derived");
+        // Compared against the rule rather than against a slug spelled out
+        // here: `derive_name` drops stop words, and a literal would be a second
+        // copy of that decision, wrong the next time it changes.
+        assert_eq!(
+            draft.name,
+            session::derive_name("tidy the docs", "").unwrap()
+        );
+    }
+
+    /// With no task to slug, the repository names the session -- and with
+    /// neither, the client is told rather than handed a session called nothing.
+    #[test]
+    fn with_no_task_the_repository_names_it_and_with_neither_it_refuses() {
+        let cfg = crate::config::Config::default();
+        let draft = NewSession {
+            name: None,
+            repo: "https://github.com/o/thing.git".into(),
+            task: String::new(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .expect("the repository should have named it");
+        assert_eq!(draft.name, "thing");
+
+        let err = NewSession::default().into_draft(&cfg).unwrap_err();
+        assert!(err.contains("name"), "{err}");
+    }
+
+    /// The name is validated where it is made, so a client cannot get a session
+    /// called `../..` past the form by sending one.
+    #[test]
+    fn a_name_that_is_not_a_name_is_refused() {
+        let cfg = crate::config::Config::default();
+        let err = NewSession {
+            name: Some("../../etc".into()),
+            repo: "https://github.com/o/thing.git".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    /// An unknown toolchain fails against the request that named it, rather
+    /// than later as a docker tag nothing has ever built.
+    #[test]
+    fn an_unknown_toolchain_is_refused_by_name() {
+        let cfg = crate::config::Config::default();
+        let err = NewSession {
+            name: Some("x".into()),
+            repo: "https://github.com/o/thing.git".into(),
+            toolchains: vec!["cobol".into()],
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap_err();
+        assert!(err.contains("cobol"), "{err}");
+    }
+
+    /// Skills and MCP servers are read from the server's config, never from the
+    /// request. A client that could send them could attach a tool -- and an
+    /// endpoint the policy then opens -- that nobody configured.
+    #[test]
+    fn skills_and_mcp_come_from_the_config_and_not_from_the_request() {
+        let cfg = crate::config::Config {
+            mcp: vec![mcp::Server {
+                name: "jira".into(),
+                url: "http://mcp:9000/mcp".into(),
+                transport: mcp::Transport::default(),
+                endpoint: "mcp:9000".into(),
+            }],
+            ..Default::default()
+        };
+        let draft = NewSession {
+            name: Some("x".into()),
+            repo: "https://github.com/o/thing.git".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap();
+        assert_eq!(draft.mcp.len(), 1);
+        assert_eq!(draft.mcp[0].name, "jira");
+    }
+
+    /// A YAML path from the config file is offered as well as the templates,
+    /// and first, because it is what `sbx new` would have used.
+    #[test]
+    fn a_configured_policy_path_is_offered_ahead_of_the_templates() {
+        let choices = policy_choices("/etc/sbx/mine.yaml");
+        assert_eq!(choices[0].spec, "/etc/sbx/mine.yaml");
+        assert_eq!(choices.len(), policy::TEMPLATES.len() + 1);
+
+        // A configured *template* is already in the list, so it is not repeated.
+        let named = policy_choices(policy::TEMPLATES[0].name);
+        assert_eq!(named.len(), policy::TEMPLATES.len());
+    }
+
+    /// Every toolchain is offered, not only the ones a checkout points at: a
+    /// form that hid `dotnet` because there is no `.csproj` yet would be one you
+    /// cannot use to start writing one.
+    #[test]
+    fn every_toolchain_is_offered() {
+        assert_eq!(toolchain_choices().len(), toolchain::TOOLCHAINS.len());
     }
 }

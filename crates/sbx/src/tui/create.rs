@@ -854,37 +854,25 @@ pub struct History {
     pub providers: Vec<String>,
 }
 
-/// Which credentials to tick.
+/// Which credentials to tick, as [`Choice`]es for the chooser.
 ///
-/// Two rules, in order. A provider is the obvious choice when it is the only one
-/// of the type that is wanted -- the agent's, and the repository host's -- since
-/// a session without the agent's credential comes up to a login prompt and one
-/// without the host's cannot clone a private repository.
-///
-/// When there are several of a type, the type alone cannot say which: two Azure
-/// PATs are two organisations, and the wrong one fails three steps later. That
-/// used to mean nothing was ticked, which is just as wrong for the common case --
-/// the answer is almost always the one used last time. So `used_before`, the
-/// providers the last session for this host was given, breaks the tie. It is
-/// evidence rather than a guess: it can only be wrong where the user was wrong.
+/// The rule itself is [`ops::preselect_providers`], in the core, because the
+/// window's create form needs the same answer and a session started from either
+/// has to arrive with the same credentials. This is only the shape the chooser
+/// wants it in.
 fn preselect(providers: &[Provider], repo: &LocalRepo, used_before: &[String]) -> Vec<Choice> {
-    let agent = session::agent_provider_type("claude");
-    let forge = repo
-        .origin
-        .as_deref()
-        .and_then(|url| sbx_core::forge::Remote::parse(url).ok())
-        .map(|r| r.forge.provider_profile());
-
-    let unique = |kind: &str| providers.iter().filter(|p| p.kind == kind).count() == 1;
-
+    let choices: Vec<ops::ProviderChoice> = providers
+        .iter()
+        .map(|p| ops::ProviderChoice {
+            name: p.name.clone(),
+            kind: p.kind.clone(),
+        })
+        .collect();
+    let ticked = ops::preselect_providers(&choices, repo.origin.as_deref(), used_before);
     providers
         .iter()
         .map(|p| Choice {
-            selected: [agent, forge]
-                .into_iter()
-                .flatten()
-                .any(|kind| kind == p.kind)
-                && (unique(&p.kind) || used_before.contains(&p.name)),
+            selected: ticked.contains(&p.name),
             name: p.name.clone(),
             kind: p.kind.clone(),
         })

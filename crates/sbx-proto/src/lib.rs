@@ -25,8 +25,9 @@ pub mod stream;
 pub use pairing::Pairing;
 
 use sbx_core::events::Event;
-use sbx_core::ops::{Poll, Refreshed};
+use sbx_core::ops::{NewOptions, NewSession, Picked, Poll, Refreshed};
 use sbx_core::policy::View as PolicyView;
+use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 
 /// The protocol this build speaks.
@@ -107,6 +108,31 @@ pub enum Request {
     Policy { name: String },
     /// The allow/deny feed, newest first.
     Events { name: String },
+    /// Git repositories on the server's disk, for starting a session from one.
+    ///
+    /// The server's and not the client's: the checkout is only a way of *naming*
+    /// a remote, but which checkouts exist is a fact about the machine that will
+    /// do the cloning, and `repo_roots` is configured there.
+    Repos,
+    /// What is known about one of them: git's account of the drift and the
+    /// toolchains it points at, and the credentials a session here should
+    /// start with. Costs subprocesses and a gateway call, so it is asked once,
+    /// about the repository actually picked, rather than for every row.
+    Inspect {
+        path: String,
+        /// The branch to measure against; `None` means the checkout's own.
+        branch: Option<String>,
+    },
+    /// Everything a create form needs that is not about a repository.
+    NewOptions,
+    /// Start a session, and answer as soon as the record exists rather than when
+    /// the agent is running.
+    ///
+    /// Creating takes tens of seconds, and the states it passes through --
+    /// `creating`, `seeding`, `ready` -- are already on the session and already
+    /// polled. A request that waited would hold a connection open for a minute
+    /// to tell a client something the list was about to tell it anyway.
+    Create(NewSession),
 }
 
 impl Request {
@@ -114,11 +140,12 @@ impl Request {
     /// and what an authorisation check would key on.
     pub fn session(&self) -> Option<&str> {
         match self {
-            Request::Ls => None,
+            Request::Ls | Request::Repos | Request::Inspect { .. } | Request::NewOptions => None,
             Request::Poll { name }
             | Request::Diff { name }
             | Request::Policy { name }
             | Request::Events { name } => Some(name),
+            Request::Create(new) => new.name.as_deref(),
         }
     }
 }
@@ -157,6 +184,15 @@ pub enum Reply {
     Policy(PolicyView),
     Events {
         events: Vec<Event>,
+    },
+    Repos(Listing),
+    Inspect(Picked),
+    NewOptions(NewOptions),
+    /// The session's name, which the client already sent -- echoed because it is
+    /// what every later request about the session is keyed on, and because a
+    /// server that derived one would otherwise leave the client guessing.
+    Created {
+        name: String,
     },
 }
 

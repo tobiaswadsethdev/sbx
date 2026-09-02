@@ -1860,8 +1860,45 @@ for free, with nothing persisted client-side.
   "the emulator cannot draw" from "the stream is wrong" was writing one literal
   string into xterm -- which was identified as the right first move several
   rounds before it was run.
-- **27. Create** — the repo picker and the create form as a GUI: policy,
-  toolchain, skills, MCP servers.
+- **27. Create** — DONE. The picker and the form as a GUI, and the protocol's
+  first write: `Repos`, `Inspect`, `NewOptions` and `Create`. 509 tests.
+
+  Two stages, like the TUI's and for the same reason: which repository is a
+  search, what kind of session is a handful of fields with defaults good enough
+  to submit on sight.
+
+  **The repositories are the server's.** A checkout only ever *names* a remote,
+  but which checkouts exist is a fact about the machine that will do the
+  cloning, and `repo_roots` is configured there -- so a window pointed at a
+  server elsewhere lists that server's repositories rather than a set of paths
+  it cannot reach.
+
+  `Create` answers when the request is accepted, not when the agent is running.
+  The states a create passes through are already on the session and already
+  polled, so a request that waited would hold a connection open for a minute to
+  say what the list was about to say anyway; what it does do before returning is
+  everything that can be judged from the request, so an unknown toolchain or a
+  name that is not a name fails against the request that caused it. The image
+  build moved onto that thread, since the reason it sits in `sbx new` rather
+  than in `ops::create` is that it streams docker's output to a terminal, and a
+  server has none.
+
+  Three decisions kept out of the webview on purpose, all because a second
+  implementation is a second answer: the name is derived by the server from the
+  same `derive_name` the command line uses when the field is blank; the
+  credentials are ticked by `preselect_providers`, which moved out of the TUI
+  into the core when this form needed the same answer -- caught by looking at
+  the finished form and seeing nothing ticked, which would have created sessions
+  whose agent comes up to a login prompt; and skills and MCP servers are read
+  from the server's config by `into_draft` rather than from the request -- so a client cannot attach a tool, or the endpoint the
+  policy then opens for it, by asking for one. `NewSession` exists rather than
+  `Draft` on the wire for that reason.
+
+  The one place the two front ends differ is the picker's filter, which matches
+  substrings where the TUI ranks with `repos::score`. Reimplementing the scorer
+  in TypeScript would be the copy this whole crate layout exists to avoid, and
+  the alternative is a request per keystroke. Written down in docs/desktop.md
+  rather than left to be discovered.
 - **28. Diff** — the three sections, and inline comments batched back to the agent.
 - **29. Worktree backend** — the `Backend` trait, the second implementation, and
   the labelling that keeps it honest.

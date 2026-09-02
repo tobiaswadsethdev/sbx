@@ -18,8 +18,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// A git repository found on disk.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LocalRepo {
+    /// Absolute, and the server's own -- a client never opens it, it only sends
+    /// it back to name the repository it picked.
+    #[cfg_attr(feature = "ts", ts(type = "string"))]
     pub path: PathBuf,
     /// The path with `$HOME` collapsed to `~`, which is what the picker shows
     /// and what the filter matches against.
@@ -33,6 +37,18 @@ pub struct LocalRepo {
     pub origin: Option<String>,
     /// Current branch, or `None` when `HEAD` is detached.
     pub branch: Option<String>,
+}
+
+/// What a scan found, and where it looked.
+///
+/// The roots are carried because "no repositories" is not an answer on its own:
+/// a client showing an empty picker can say which directories were searched,
+/// which is usually enough to see that `repo_roots` is pointing somewhere else.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Listing {
+    pub repos: Vec<LocalRepo>,
+    pub roots: Vec<String>,
 }
 
 /// A directory to scan, and how deep.
@@ -351,7 +367,8 @@ fn origin_url(git_dir: &Path) -> Option<String> {
 /// The point of showing this is honesty about the design: the sandbox clones
 /// `origin`, so uncommitted edits and unpushed commits stay on the host. The
 /// form says so with numbers rather than in the abstract.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Facts {
     /// Entries `git status --porcelain` reports.
     pub uncommitted: usize,
