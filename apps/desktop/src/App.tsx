@@ -11,7 +11,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { api, messageOf, type ServerSummary } from "./api";
+import { api, messageOf, type Paired, type ServerSummary } from "./api";
+import { ConnectDialog } from "./Connect";
 import { Dock } from "./Dock";
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
@@ -54,6 +55,7 @@ export default function App() {
 
   const [creatingProject, setCreatingProject] = useState(false);
   const [creatingIn, setCreatingIn] = useState<Project | null>(null);
+  const [connecting, setConnecting] = useState(false);
 
   /// The shells each worktree has, and which tab is in front of it. Both are
   /// per worktree: switching away and back finds it as you left it, because a
@@ -95,6 +97,36 @@ export default function App() {
     return () => clearInterval(timer);
   }, [refresh]);
 
+  /// Pairing from the window, which used to be a terminal and a restart.
+  ///
+  /// The paired server is selected immediately: someone who has just pasted a
+  /// pairing string is asking to look at that server, and the poll below finds
+  /// its worktrees within the second.
+  const paired = (p: Paired) => {
+    setServers(p.servers);
+    setServer(p.server.name);
+    setConnecting(false);
+  };
+
+  /// Forgetting one. Selection moves off it rather than staying on a name that
+  /// no longer resolves -- `remote()` on the Rust side would answer "no server
+  /// named" to every request after it.
+  const forgot = (list: ServerSummary[]) => {
+    setServers(list);
+    setServer((current) =>
+      current && list.some((s) => s.name === current) ? current : (list[0]?.name ?? null),
+    );
+  };
+
+  const connect = connecting ? (
+    <ConnectDialog
+      servers={servers ?? []}
+      onClose={() => setConnecting(false)}
+      onPaired={paired}
+      onForgot={forgot}
+    />
+  ) : null;
+
   const groups = useMemo(() => group(projects, sessions), [projects, sessions]);
   const session = sessions.find((s) => s.name === selected) ?? null;
 
@@ -128,33 +160,42 @@ export default function App() {
 
   if (servers !== null && servers.length === 0) {
     return (
-      <Empty
-        title="No server paired"
-        body={
-          <>
-            <p>
-              This window talks to an <code>sbxd</code>, which may be on this
-              machine or another one. Pair with it from a terminal:
-            </p>
-            <pre>
-              sbxd serve{"\n"}
-              sbxd pair desktop --host 127.0.0.1{"\n"}
-              sbx connect 'sbx://…'
-            </pre>
-            <p>
-              {/* Without --host the string carries the machine's own hostname,
-                  which on a Debian-family box resolves to 127.0.1.1 while the
-                  server is bound to 127.0.0.1 -- a connection refused from a
-                  server that is running perfectly well. */}
-              <code>--host</code> is the address this window should dial, and
-              leaving it out is the usual reason a paired server cannot be
-              reached. For a server on another machine, see{" "}
-              <code>docs/server.md</code>.
-            </p>
-            <p>Then reopen this window.</p>
-          </>
-        }
-      />
+      <>
+        <Empty
+          title="No server paired"
+          body={
+            <>
+              <p>
+                This window talks to an <code>sbxd</code>, which may be on this
+                machine or another one. On the machine with the sandboxes:
+              </p>
+              <pre>
+                sbxd serve{"\n"}
+                sbxd pair desktop --host 127.0.0.1
+              </pre>
+              <p>
+                {/* Without --host the string carries the machine's own hostname,
+                    which on a Debian-family box resolves to 127.0.1.1 while the
+                    server is bound to 127.0.0.1 -- a connection refused from a
+                    server that is running perfectly well. */}
+                <code>--host</code> is the address this window should dial, and
+                leaving it out is the usual reason a paired server cannot be
+                reached. For a server on another machine, see{" "}
+                <code>docs/server.md</code>.
+              </p>
+              <button className="go" onClick={() => setConnecting(true)}>
+                paste a pairing string
+              </button>
+              <p className="hint">
+                Or, where there is an <code>sbx</code> on this machine,{" "}
+                <code>sbx connect &apos;sbx://…&apos;</code> in a terminal. Both
+                save the same connection.
+              </p>
+            </>
+          }
+        />
+        {connect}
+      </>
     );
   }
 
@@ -179,6 +220,9 @@ export default function App() {
         </span>
         <button className="new" disabled={!server} onClick={() => setCreatingProject(true)}>
           new project
+        </button>
+        <button className="new" onClick={() => setConnecting(true)}>
+          servers
         </button>
         {error && <span className="error">{error}</span>}
       </header>
@@ -284,6 +328,8 @@ export default function App() {
           }}
         />
       )}
+
+      {connect}
 
       {creatingIn && server && (
         <NewWorktreeDialog

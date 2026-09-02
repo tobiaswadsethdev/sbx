@@ -25,30 +25,76 @@ an unauthenticated one. So the connection is made on the Rust side, by
 `sbx-client` -- the same client `sbx --server` uses -- and the webview calls
 commands.
 
-## Running it
+## Connecting it to a server
 
-**It needs a server to talk to**, and pairing with one is the first step
-whether that server is this machine or another. On the machine with the
-sandboxes:
+**It needs a server to talk to**, and saying which is the first thing a new
+window asks. On the machine with the sandboxes:
 
 ```sh
 sbxd serve                              # or under systemd; see server.md
 sbxd pair desktop --host 127.0.0.1      # ... or the address the window will dial
 ```
 
-then, on the machine with the window, paste what that printed:
+`pair` prints one line -- an address, a token, and the fingerprint of the
+certificate the server will present. Paste it into the window: **paste a
+pairing string** on the empty screen, or **servers** in the header once
+something is paired. The name is optional and defaults to the host.
 
-```sh
-sbx connect 'sbx://…'
+```
+   +-------------------------------------------------------+
+   |  Connect to a server                           close   |
+   |                                                        |
+   |  pairing   sbx://box.lan:17671/8f3c…#d8fa…             |
+   |  name      work                                        |
+   |                                                        |
+   |  paired    wsl        127.0.0.1:17671        forget    |
+   |                                             [connect]  |
+   +-------------------------------------------------------+
 ```
 
-`--host` is the one to get right: without it the pairing string carries the
-server's own hostname, which is often not what the client should dial and on a
-Debian-family box resolves to `127.0.1.1` while `sbxd` is bound to `127.0.0.1`.
-[server.md](server.md) has the two-machine case in full.
+`sbx connect 'sbx://…'` in a terminal does the same thing, and a server paired
+either way appears in both -- they are one saved list (`~/.local/state/sbx/remotes.json`,
+or `%LOCALAPPDATA%\sbx\remotes.json` on Windows) and one implementation:
+`sbx_client::pair`, called by the command and by the dialog. Two implementations of "is this a
+server I can talk to" would be one implementation and one place a mistake is
+silent.
 
-Linux needs `webkit2gtk-4.1`, `gtk3` and `libsoup3` and their development
-headers; Windows needs WebView2, which Windows 11 has already.
+**The dialog is there because the machine holding the window may have no `sbx`
+on it.** On Windows there is none to install: the CLI drives Docker, tmux and a
+gateway, which are on the Linux side. Requiring a terminal to pair would have
+made the Windows client depend on a program that cannot run there.
+
+What it does with the string is what `connect` does. It parses it, dials the
+address, accepts the certificate only if it matches the fingerprint the string
+carries, checks that what answered is an `sbxd` speaking this protocol version
+-- and saves nothing until all of that has happened. A pairing string that names
+nothing fails there, in front of you, rather than on every request afterwards.
+What comes back on success is the server's own version, which is the one thing
+a paste cannot fake.
+
+The string is a credential, so it is never echoed back into an error message:
+the errors say what is wrong with the *shape* of a pairing string, never what
+was pasted.
+
+**`--host` is the one to get right.** Without it the string carries the server's
+own hostname, which is often not what the client should dial and on a
+Debian-family box resolves to `127.0.1.1` while `sbxd` is bound to `127.0.0.1`
+-- `Connection refused` from a server that is running perfectly well.
+[server.md](server.md) has the two-machine case in full, and the WSL case, where
+the address depends on how WSL is networked.
+
+**forget** drops the token this machine holds and nothing on the server. The
+server stops accepting one when `sbxd revoke` says so, which is the half that
+matters if a pairing string has been somewhere it should not.
+
+## Running it
+
+Installing it is [install.md](install.md#the-desktop-application): a Windows
+installer from the release page, or built from the tree on Linux, where
+`webkit2gtk-4.1`, `gtk3` and `libsoup3` and their development headers are the
+prerequisite.
+
+From a checkout:
 
 ```sh
 cd apps/desktop
@@ -384,9 +430,23 @@ nothing, and it is not a nudge until it looks right: the cell height was
 only setting consistent with it. That equivalence would break if xterm's
 `lineHeight` option moved off 1, which is why nothing does that.
 
-Both are worth reporting upstream. The first belongs in that constructor, which
-should measure once and reject a strategy that returns nothing rather than trust
-a property that exists but does not work.
+**And a third, which is the same zero metrics costing the opposite thing.** A
+form control takes its height from its line-height -- rows times that, for a
+textarea -- and `.dialog input { font: inherit }` hands it the `normal` the fix
+above put on the document, which this engine resolves from metrics it reports as
+zero. Every input and textarea in the window collapsed to a sliver with its text
+clipped through the middle: a three-row textarea 14 pixels high, a placeholder
+sheared in half, and nothing about it that looks like a line-height. It survived
+because the fields are usually typed into rather than read, and because a
+`<select>` beside them renders correctly -- a native control brings its own
+metrics. Found while adding the connect dialog, where a pairing string is the
+one thing you *do* read back. These need the explicit line-height the rest of
+the document must not have, and the padding they already carry absorbs the two
+pixels it puts the baseline out by, so the rule stops at controls.
+
+All three are worth reporting upstream. The first belongs in that constructor,
+which should measure once and reject a strategy that returns nothing rather than
+trust a property that exists but does not work.
 
 Two things this cost that are worth not re-deriving. The renderer *was* running
 even when nothing appeared -- `.xterm-rows` had its row elements and their text

@@ -92,7 +92,7 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `tui/create.rs` | *(sbx)* the repo picker and the create form, as pure state machines |
 | `tui/ansi.rs` | *(sbx)* the captured screen mapped into ratatui's own styles |
 | `tui/attach.rs` | *(sbx)* suspending the interface around an attach, and putting it back |
-| `lib.rs` | *(sbx-client)* the servers this machine is paired with, and one request against one |
+| `lib.rs` | *(sbx-client)* the servers this machine is paired with, pairing with one, and one request against one. `pair` is shared: `sbx connect` and the desktop application's connect dialog are both it |
 | `pin.rs` | *(sbx-client)* judging a server by its certificate's fingerprint and nothing else |
 | `http.rs` | *(sbx-client)* enough HTTP/1.1 to ask an `sbxd` a question |
 | `state.rs` | where secrets live: keys, tokens, and saved connections |

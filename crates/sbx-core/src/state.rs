@@ -16,10 +16,30 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// `$XDG_STATE_HOME/sbx`, or `~/.local/state/sbx`.
+#[cfg(unix)]
 pub fn dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("sbx")
+}
+
+/// `%LOCALAPPDATA%\sbx`.
+///
+/// Windows has no server in it -- there is no gateway and no Docker daemon to
+/// reach -- so the only thing that lands here is the desktop application's
+/// list of paired servers. `LocalAppData` rather than `AppData\Roaming` for
+/// the reason the module exists: roaming is the half of a profile that follows
+/// a user to another machine, and a pairing token is a login to one particular
+/// host.
+#[cfg(windows)]
+pub fn dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("AppData").join("Local"))
+        })
         .unwrap_or_else(|| PathBuf::from("."))
         .join("sbx")
 }
@@ -29,6 +49,7 @@ pub fn dir() -> PathBuf {
 /// The mode is set at creation rather than after it, because the window between
 /// the two is one another process can read the key in -- short, but this is the
 /// one directory where that matters.
+#[cfg(unix)]
 pub fn private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     if path.is_dir() {
@@ -40,36 +61,63 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
         .create(path)
 }
 
+/// The same directory, with no mode to set.
+///
+/// NTFS has no permission bits, and the ACL a directory inherits under the
+/// user's profile already denies every other non-administrative account --
+/// which is the property `0o700` is asked for above, administrators being able
+/// to read it either way exactly as root can. Writing an explicit DACL would
+/// need the Windows API to buy nothing, so this says what it does instead of
+/// pretending to enforce more.
+#[cfg(windows)]
+pub fn private_dir(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)
+}
+
 /// Write a file only its owner may read, replacing whatever was there.
 ///
 /// Via a temporary file and a rename, like the session cache: a key half
 /// written by an interrupted start is worse than no key, because it looks like
 /// a key.
 pub fn write_private(path: &Path, contents: &str) -> io::Result<()> {
-    use std::os::unix::fs::OpenOptionsExt;
-
     if let Some(parent) = path.parent() {
         private_dir(parent)?;
     }
     let tmp = path.with_extension("tmp");
     {
         use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
+        let mut f = private_file(&tmp)?;
         f.write_all(contents.as_bytes())?;
         f.sync_all()?;
     }
+    // Replaces what is there on both platforms: on Windows this is
+    // `MoveFileEx` with `MOVEFILE_REPLACE_EXISTING`, so the rename is as
+    // atomic as the unix one and needs no unlink first.
     std::fs::rename(&tmp, path)
+}
+
+/// Open a new file only its owner may read, mode set at creation for the same
+/// reason [`private_dir`] sets it there.
+#[cfg(unix)]
+fn private_file(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+}
+
+/// The same file, inheriting the ACL of the private directory it is in.
+#[cfg(windows)]
+fn private_file(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::create(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn scratch(name: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("sbxd-state-test-{name}-{}", std::process::id()));
@@ -91,6 +139,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn xdg_state_home_wins_when_it_is_set() {
         // Read through the same env the process would; no other test in this
         // crate sets it.
@@ -110,14 +159,22 @@ mod tests {
         write_private(&path, "secret").unwrap();
 
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "secret");
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "file mode was {mode:o}");
-        let dmode = std::fs::metadata(path.parent().unwrap())
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(dmode, 0o700, "directory mode was {dmode:o}");
+
+        // The mode is the unix half of the promise. On Windows the file
+        // inherits the profile's ACL and there is no bit to read back, which
+        // is why `private_file` says so rather than asserting it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "file mode was {mode:o}");
+            let dmode = std::fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dmode, 0o700, "directory mode was {dmode:o}");
+        }
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -64,6 +64,55 @@ fn servers() -> Result<Vec<ServerSummary>, Failed> {
         .collect())
 }
 
+/// What pairing produced: the server just added, the list it is now in, and
+/// the version of the `sbxd` that answered.
+///
+/// The version is in here because it is the proof: a pairing string is a claim
+/// about an address, and a version that came back over the pinned connection is
+/// that claim answered. Hand-written like [`ServerSummary`], being the bridge's
+/// own shape rather than a message on the wire.
+#[derive(Debug, Clone, Serialize)]
+struct Paired {
+    server: ServerSummary,
+    servers: Vec<ServerSummary>,
+    version: String,
+}
+
+/// Pair with a server from the window, rather than from a terminal.
+///
+/// The whole of the checking is `sbx_client::pair`, which is what `sbx connect`
+/// calls -- so a string this window accepts is one the CLI would accept, and a
+/// server it refuses is refused for the same stated reason. This command exists
+/// because the alternative on Windows is installing a CLI whose other half
+/// cannot run there at all.
+#[tauri::command]
+fn connect(pairing: String, name: Option<String>) -> Result<Paired, Failed> {
+    let (remote, hello) = sbx_client::pair(&pairing, name.as_deref())?;
+    Ok(Paired {
+        server: ServerSummary {
+            name: remote.name.clone(),
+            address: remote.address(),
+        },
+        servers: servers()?,
+        version: hello.version,
+    })
+}
+
+/// Forget one, which is `sbx remotes --forget`.
+///
+/// It drops a token this machine holds and nothing on the server: the server
+/// stops accepting one when `sbxd revoke` says so, which is the half that
+/// matters if the token has been somewhere it should not.
+#[tauri::command]
+fn forget(name: String) -> Result<Vec<ServerSummary>, Failed> {
+    let mut remotes = Remotes::load().map_err(|e| e.to_string())?;
+    if !remotes.remove(&name) {
+        return Err(format!("no server named `{name}`"));
+    }
+    remotes.save().map_err(|e| e.to_string())?;
+    servers()
+}
+
 fn remote(name: &str) -> Result<Remote, Failed> {
     let remotes = Remotes::load().map_err(|e| e.to_string())?;
     remotes.select(Some(name)).cloned()
@@ -433,6 +482,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             servers,
+            connect,
+            forget,
             sessions,
             poll,
             policy,

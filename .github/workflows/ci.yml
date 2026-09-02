@@ -61,3 +61,28 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --release
+
+  # The client half has to compile for Windows, because the desktop application
+  # runs there and `sbx-core` is underneath it. Only the client half: there is no
+  # gateway, no Docker daemon and no tmux on that side, so `sbx` and `sbxd`
+  # remain Linux programs and are not built here.
+  #
+  # A check rather than a build, and only these three crates, because what it is
+  # guarding against is one `use std::os::unix::fs` -- which costs seconds to
+  # catch here and a tagged release to catch anywhere else.
+  windows:
+    name: the client half compiles on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check -p sbx-client -p sbx-proto -p sbx-core --all-targets

@@ -113,6 +113,12 @@ crates/sbx` does the same job.
 Nothing updates itself in the background; `sbx doctor` is what mentions that a
 newer release is out.
 
+**The window is installed separately, and can be on another machine.** On Linux
+it is built from the tree; on Windows it is an installer from the [releases
+page](https://github.com/tobiaswadsethdev/sbx/releases) and is all that side
+needs -- it pairs with a server from its own dialog, so there is no `sbx` to
+install there. Both are [docs/install.md](docs/install.md#the-desktop-application).
+
 `sbx doctor` is the one to run when something looks wrong -- it checks the
 gateway, Docker, tmux, lingering, the image and the Claude Code version in it,
 plus the providers, skills and MCP servers your config names and the toolchain
@@ -173,7 +179,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 
 |                                            |                                                                       |
 | ------------------------------------------ | --------------------------------------------------------------------- |
-| [Install](docs/install.md)                 | prerequisites, the gateway, providers, and `sbx` itself               |
+| [Install](docs/install.md)                 | prerequisites, the gateway, providers, `sbx`, and the window on Linux and Windows |
 | [The TUI](docs/tui.md)                     | the list, the panes, starting and ending sessions, names and branches |
 | [The desktop app](docs/desktop.md)         | projects and worktrees, files, git, the editor, and the review        |
 | [The server](docs/server.md)               | `sbxd`, pairing a client on another machine, WSL, what a token is worth |

@@ -141,7 +141,11 @@ Two more things that are not sbx's to fix but look exactly like it:
   shows up.
 
 The desktop application reads the same paired servers as the CLI: pair once with
-`sbx connect` and the window lists that server without being told again.
+`sbx connect` and the window lists that server without being told again. It can
+also *be* the thing that pairs -- paste the string into its **servers** dialog,
+which runs the same checks and writes the same file. That is what a Windows
+client does, having no `sbx` to run:
+[desktop.md](desktop.md#connecting-it-to-a-server).
 
 ## The WSL case
 
@@ -154,7 +158,11 @@ firewall problem:
 * **NAT**, the default -- the client uses the address of the WSL VM, *which
   changes every time WSL restarts*. Every restart then needs pairing again.
 
-`sbx doctor` says which one is in force and what to dial:
+Only the window goes on the Windows side -- there is no `sbx` there, and the
+pairing is done from the window itself. [install.md](install.md#windows) is the
+installer.
+
+`sbx doctor`, on the Linux side, says which one is in force and what to dial:
 
 ```
 [  ok  ] wsl          mirrored networking: a client on Windows uses localhost:17671

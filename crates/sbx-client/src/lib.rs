@@ -242,6 +242,55 @@ impl Remotes {
     }
 }
 
+/// Pair with a server: check the string, check what answers, and save it.
+///
+/// `sbx connect` is this and a `println!`, and so is the desktop application's
+/// connect dialog. Shared rather than written twice because the three checks
+/// *are* the pairing: a string that names nothing, something that is not an
+/// `sbxd`, and one whose protocol this build cannot speak all produce a saved
+/// connection that fails on every request afterwards, and a client that skipped
+/// one of them would fail later and somewhere less obvious. The name defaults
+/// to the host, which is what `sbx connect` has always done.
+pub fn pair(pairing: &str, name: Option<&str>) -> Result<(Remote, Hello), String> {
+    // Whatever was pasted may carry the token, so a parse error says what is
+    // wrong with the shape of a pairing string and never echoes the string back.
+    let pairing: Pairing = pairing
+        .trim()
+        .parse()
+        .map_err(|e: sbx_proto::pairing::ParseError| e.to_string())?;
+    let name = name
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(&pairing.host)
+        .to_string();
+    let candidate = Remote::from_pairing(&name, pairing);
+
+    // Tried before it is saved, so a mistyped address or a fingerprint from the
+    // wrong server is an error now rather than on every command afterwards.
+    let hello = candidate.hello().map_err(|e| e.to_string())?;
+    if !hello.is_sbxd() {
+        return Err(format!(
+            "`{}` is a {}, not an sbxd",
+            candidate.address(),
+            hello.server
+        ));
+    }
+    if !hello.speaks(sbx_proto::VERSION) {
+        return Err(format!(
+            "`{}` speaks protocol {} and this sbx speaks {}. Update whichever is older.",
+            candidate.address(),
+            hello.protocol,
+            sbx_proto::VERSION
+        ));
+    }
+
+    let mut remotes = Remotes::load().map_err(|e| e.to_string())?;
+    remotes.insert(candidate.clone());
+    remotes.save().map_err(|e| e.to_string())?;
+
+    Ok((candidate, hello))
+}
+
 /// One `doctor` line per paired server.
 ///
 /// Asked in two steps, because the answers point in different directions: a
@@ -331,6 +380,22 @@ mod tests {
             token: "tok".into(),
             fingerprint: FP.into(),
         }
+    }
+
+    /// The one half of [`pair`] that needs no server: a string that is not a
+    /// pairing string is refused before anything is dialled, and the refusal
+    /// does not repeat what was pasted -- which may be a token.
+    #[test]
+    fn a_string_that_is_not_a_pairing_is_refused_without_dialling_anything() {
+        let err = pair("box.lan:17671", None).expect_err("that is not a pairing string");
+        assert!(
+            err.contains("sbx://"),
+            "the error says what one looks like: {err}"
+        );
+        assert!(
+            !err.contains("box.lan"),
+            "a pairing string carries a credential and must not be echoed back: {err}"
+        );
     }
 
     #[test]

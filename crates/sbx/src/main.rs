@@ -390,42 +390,18 @@ fn server(flag: Option<&str>) -> Result<Option<remote::Remote>, Box<dyn std::err
 }
 
 fn cmd_connect(pairing: &str, name: Option<&str>) -> Fallible {
-    let pairing: sbx_proto::Pairing = pairing.parse()?;
-    let name = name.unwrap_or(&pairing.host).to_string();
-    let candidate = remote::Remote::from_pairing(&name, pairing);
-
-    // Tried before it is saved, so a mistyped address or a fingerprint from the
-    // wrong server is an error now rather than on every command afterwards.
-    let hello = candidate.hello()?;
-    if !hello.is_sbxd() {
-        return Err(format!(
-            "`{}` is a {}, not an sbxd",
-            candidate.address(),
-            hello.server
-        )
-        .into());
-    }
-    if !hello.speaks(sbx_proto::VERSION) {
-        return Err(format!(
-            "`{}` speaks protocol {} and this sbx speaks {}. Update whichever is older.",
-            candidate.address(),
-            hello.protocol,
-            sbx_proto::VERSION
-        )
-        .into());
-    }
-
-    let mut remotes = remote::Remotes::load()?;
-    remotes.insert(candidate.clone());
-    remotes.save()?;
-
+    // The checking and the saving are `sbx_client::pair`, because the desktop
+    // application's connect dialog does the same thing and two implementations
+    // of "is this a server I can talk to" would be one implementation and one
+    // place a mistake is silent. What is left here is what a terminal adds.
+    let (remote, hello) = remote::pair(pairing, name)?;
     println!(
         "paired with `{}` at {} (sbxd {})",
-        name,
-        candidate.address(),
+        remote.name,
+        remote.address(),
         hello.version
     );
-    println!("try: sbx --server {name} ls");
+    println!("try: sbx --server {} ls", remote.name);
     Ok(())
 }
 

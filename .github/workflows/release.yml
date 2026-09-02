@@ -89,9 +89,94 @@ jobs:
             ${{ matrix.target }}.sha256
           if-no-files-found: error
 
+  # The desktop application for Windows, which is the one platform where there
+  # is nothing else to install: `sbx` and `sbxd` need a gateway, a Docker daemon
+  # and tmux, so the Windows side is the window and nothing but the window. It
+  # pairs with a server from its own connect dialog rather than from a CLI --
+  # see docs/desktop.md -- which is what makes an installer on its own useful.
+  #
+  # Linux is deliberately not built here. A Tauri bundle links against the
+  # webkit2gtk of the distribution that built it, so one .deb or AppImage would
+  # be a promise about GTK versions this cannot keep; there, it is built from the
+  # tree. See docs/install.md.
+  desktop:
+    name: desktop (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag looks like a version
+        shell: bash
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) echo "building $TAG" ;;
+            *) echo "TAG=$TAG is not a vX.Y.Z tag"; exit 1 ;;
+          esac
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: desktop-windows
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      # The version in the bundle is the one Windows shows in Add or Remove
+      # Programs and the one an upgrade compares against, so it has to be the
+      # tag rather than whatever the file said when it was last edited.
+      - name: Take the version from the tag
+        shell: bash
+        run: |
+          set -eu
+          conf=apps/desktop/src-tauri/tauri.conf.json
+          jq --arg v "${TAG#v}" '.version = $v' "$conf" > "$conf.new"
+          mv "$conf.new" "$conf"
+          jq -r .version "$conf"
+
+      - name: Build
+        run: |
+          npm --prefix apps/desktop ci
+          npm --prefix apps/desktop run tauri -- build
+
+      # Renamed to carry the tag and the target, like the tarballs, and
+      # checksummed into the same SHA256SUMS -- an installer downloaded from a
+      # release page deserves the same verification as a binary.
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          bundle=apps/desktop/src-tauri/target/release/bundle
+          mkdir -p dist
+          for msi in "$bundle"/msi/*.msi; do
+            cp "$msi" "dist/sbx-desktop-${TAG}-x86_64-pc-windows-msvc.msi"
+          done
+          for exe in "$bundle"/nsis/*-setup.exe; do
+            cp "$exe" "dist/sbx-desktop-${TAG}-x86_64-pc-windows-msvc-setup.exe"
+          done
+          cd dist
+          sha256sum *.msi *.exe > desktop-windows.sha256
+          cat desktop-windows.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbx-desktop-windows
+          path: |
+            dist/sbx-desktop-${{ env.TAG }}-x86_64-pc-windows-msvc.msi
+            dist/sbx-desktop-${{ env.TAG }}-x86_64-pc-windows-msvc-setup.exe
+            dist/desktop-windows.sha256
+          if-no-files-found: error
+
   publish:
     name: Publish the release
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -118,4 +203,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
+            dist/*.msi
+            dist/*.exe
             dist/SHA256SUMS

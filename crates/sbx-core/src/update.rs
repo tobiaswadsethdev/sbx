@@ -341,10 +341,20 @@ fn swap(fresh: &Path, at: &Path) -> Result<(), String> {
     })
 }
 
+#[cfg(unix)]
 fn make_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Nothing to do: Windows takes "executable" from the extension, not from a
+/// bit on the file. Reachable only because this crate compiles for Windows for
+/// the desktop application's sake -- there are no Windows releases of `sbx` to
+/// download and no `sbx update` there to download one.
+#[cfg(windows)]
+fn make_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
 }
 
 fn download(url: &str, to: &Path) -> Result<(), String> {
@@ -522,6 +532,8 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
         );
     }
 
+    /// Only the swap tests need a scratch directory, and both are unix-only.
+    #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("sbx-update-test-{name}-{}", std::process::id()));
@@ -536,6 +548,7 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
     /// so the staging file has to be a sibling of the target rather than the
     /// download itself.
     #[test]
+    #[cfg(unix)]
     fn the_new_binary_lands_on_the_old_one_from_another_filesystem() {
         let downloaded = scratch("swap-src");
         let installed = scratch("swap-dst");
@@ -567,6 +580,7 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
     /// The likely failure, and the one whose message has to carry its fix:
     /// `sbx` installed somewhere root owns.
     #[test]
+    #[cfg(unix)]
     fn a_directory_that_cannot_be_written_says_what_to_do_about_it() {
         let downloaded = scratch("swap-ro-src");
         let installed = scratch("swap-ro-dst");

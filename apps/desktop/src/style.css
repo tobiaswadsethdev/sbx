@@ -28,6 +28,16 @@
 html.broken-font-metrics body,
 html.broken-font-metrics #root { line-height: normal; }
 
+/* The same zero metrics, costing the opposite thing. A form control takes its
+   height from its line-height -- rows times that, for a textarea -- and
+   `font: inherit` hands it the `normal` above, which this engine resolves from
+   the metrics it reports as zero. Every input and textarea collapses to a
+   sliver with its text clipped through the middle. An explicit line-height is
+   what these need, and the two pixels it puts the baseline out by are absorbed
+   by the padding they already have rather than shaved off, which is why the
+   rule stops at controls and does not go back on the document. */
+html.broken-font-metrics :is(input, textarea, select) { line-height: 1.5; }
+
 body, html, #root {
   margin: 0;
   height: 100%;
@@ -447,6 +457,41 @@ header .new:disabled { color: var(--dim); cursor: default; }
 .carried { display: grid; grid-template-columns: 72px 1fr; gap: 2px 10px; margin: 14px 0 0; }
 .carried dt { color: var(--dim); }
 .carried dd { margin: 0; }
+
+/* The servers this machine is paired with, in the connect dialog. A token is
+   not among them: it is a credential, and the webview has no use for one it can
+   never present. */
+.paired { list-style: none; margin: 0; padding: 0; }
+.paired li { display: flex; align-items: baseline; gap: 10px; padding: 2px 0; }
+.paired .name { min-width: 110px; }
+.paired .address { color: var(--dim); flex: 1; overflow-wrap: anywhere; }
+.paired .quiet:hover { color: var(--bad); }
+
+/* Nothing selected, or nothing paired yet -- the first thing a new install
+   shows, so it is the one screen that has to read as instructions. */
+.empty { margin: auto; max-width: 52ch; padding: 24px; }
+.empty h1 { font-size: 15px; margin: 0 0 10px; }
+.empty p { color: var(--dim); }
+.empty pre {
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+.empty code { color: var(--accent); }
+.empty .go {
+  background: var(--accent);
+  border: none;
+  border-radius: 3px;
+  color: #17171d;
+  font: inherit;
+  font-weight: 700;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.empty .hint { color: var(--dim); }
 
 .actions { display: flex; justify-content: flex-end; margin-top: 16px; }
 .actions .go {
