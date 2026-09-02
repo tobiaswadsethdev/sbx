@@ -169,3 +169,11 @@ main { display: flex; flex: 1; min-height: 0; }
 .pane.bare { padding: 0; overflow: hidden; }
 .terminal { height: 100%; width: 100%; background: var(--bg-sunken); }
 .terminal .xterm { height: 100%; padding: 6px 8px; }
+
+/* Where the engine could not measure the font, xterm's rows are drawn two
+   pixels too high and clipped -- see charSize.ts, which adds this class. The
+   row's own `line-height` is an inline style set to the pixel height of the
+   cell; the spans inside inherit it, and it is only there that it can be put
+   back without `!important`. `normal` is the same number of pixels, and the
+   number is not the problem: WebKit derives a different baseline from it. */
+.terminal.broken-font-metrics .xterm-rows span { line-height: normal; }

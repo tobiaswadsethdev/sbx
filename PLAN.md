@@ -1812,10 +1812,9 @@ for free, with nothing persisted client-side.
   window. And a screenshot has to name the window id: `x11grab` on a region of
   the screen returns solid black for a redirected window, which is what made the
   first captures lie about what was on screen.
-- **26. Terminal** — DONE except the drawing, which is the one part that does
-  not work; see below. The multiplexed websocket, the events, status and
-  terminal channels, `sbx-client`'s streaming half, `sbx watch`, and the pane.
-  501 tests plus three `#[ignore]`d live ones.
+- **26. Terminal** — DONE, drawing included. The multiplexed websocket, the
+  events, status and terminal channels, `sbx-client`'s streaming half,
+  `sbx watch`, and the pane. 501 tests plus three `#[ignore]`d live ones.
 
   One socket, several channels, JSON frames so a connection stays readable in a
   log -- terminal bytes base64 inside them, because a pty read lands wherever it
@@ -1841,13 +1840,21 @@ for free, with nothing persisted client-side.
   that opens a terminal, closes it, and opens it again, because a test that
   opened one would pass either way.
 
-  **xterm.js does not paint under WSLg**, and the cause is not in the stream.
-  The bytes reach the buffer -- `getLine(1)` reads Claude Code's banner -- and
-  the renderer never draws them, because the character cell measures zero.
-  Writing a literal string with no channel open does not appear either.
-  docs/desktop.md records what has been ruled out. Whether WebView2 on Windows
-  is affected is unknown and untried, and worth finding out before spending more
-  on it.
+  **xterm.js did not paint under WebKitGTK**, and the cause was not in the
+  stream: the bytes reached the buffer -- `getLine(1)` read Claude Code's
+  banner -- and the character cell measured zero, which is a renderer that
+  skips. WebKit reports a font's bounding box as zero through a canvas, and
+  xterm picks its canvas measuring strategy on whether those properties exist
+  rather than whether they answer, so it never falls back to measuring the DOM.
+  `src/charSize.ts` probes the canvas and hides `OffscreenCanvas` for the length
+  of `Terminal.open` where it cannot measure, which forces the fallback. Drawing
+  then revealed a second fault with the same cause: WebKit puts the baseline
+  five pixels higher for `line-height: 17px` than for `line-height: normal`,
+  though the two are the same seventeen pixels, and rows are `overflow: hidden`
+  -- so the top of every line was shaved and `README` read as `KEADME`. The
+  rows' spans are put back to `line-height: normal`, which is the only setting
+  consistent with a cell height that was measured that way. Both written up in
+  docs/desktop.md, and both worth reporting upstream.
 
   Seven rounds went into that last hop, and the test that finally separated
   "the emulator cannot draw" from "the stream is wrong" was writing one literal

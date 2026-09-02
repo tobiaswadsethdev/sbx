@@ -78,37 +78,80 @@ session are increments of their own.
 Policy and events are the two with no equivalent in an ADE built on git
 worktrees, and they are why this is worth building rather than adopting one.
 
-## The terminal does not draw under WSLg
+## The font metrics WebKit gets wrong
 
-Known, and unresolved. The terminal pane is written and its data path is
-verified end to end -- the live tests in `crates/sbx-client/tests/live.rs` open
-a channel against a real session and assert bytes come back -- but xterm.js
-never paints them in WebKitGTK under WSLg.
+The terminal pane did not draw at all in WebKitGTK, which is the engine Tauri
+links against on Linux; once it drew, every row was sheared off two pixels short
+of the top. One cause underneath both: WebKit reports a font's vertical metrics
+wrongly, and xterm believes them. `src/charSize.ts` corrects both under a single
+probe, and does nothing on an engine that measures correctly.
 
-What is established, so nobody re-derives it:
+**The cell had no height.** xterm sizes its grid by measuring one character, and
+everything else is that measurement: a zero-sized cell is a renderer that skips,
+a `FitAddon` that returns `undefined` instead of a column count, and a pane that
+stays blank with the agent's screen sitting in the buffer behind it.
+`buffer.active.getLine(1)` read `▐███▌  Claude Code v2.1.251` the whole time.
 
-* The bytes arrive. Frames of two to five kilobytes reach the webview, `write`
-  acknowledges them, and the agent's own screen is in xterm's buffer:
-  `buffer.active.getLine(1)` reads `▐███▌  Claude Code v2.1.251`.
-* The renderer never runs. `.xterm-rows` stays empty -- the DOM is not
-  populated, which is not what a compositing failure looks like -- and
-  `FitAddon.proposeDimensions()` returns `undefined`, meaning the character cell
-  measures zero. A zero cell is what makes the renderer skip.
-* It is not the stream. `terminal.write("hello")`, with no channel open and no
-  base64 involved, does not appear either.
-* Ruled out: WebKit's sandbox, `requestAnimationFrame` (it fires; the page is
-  visible), font availability (`document.fonts.ready` awaited, family reduced to
-  plain `monospace`), and a missing stylesheet (`xterm.css` is bundled and
-  applied, and `.xterm-rows` computes to 13px).
+`CharSizeService` measures with a canvas where it can and falls back to
+measuring a DOM element where it cannot, and the test it applies is whether
+`fontBoundingBoxAscent` and `fontBoundingBoxDescent` **exist**. In WebKitGTK
+they exist and are always zero -- for an ordinary canvas as much as an offscreen
+one -- so the height comes out zero and the fallback is never reached. Zero is
+then read as "the element is `display:none`, keep the value from last time", and
+there is no value from last time. Measured in 2.52.6 at `13px monospace`:
 
-Whether this is WSLg-only is **not known**. It has not been tried on Windows
-against WebView2, which is a different engine entirely and the platform the
-desktop application is actually for; nor on a Linux desktop with a GPU. Saying
-"it works on Windows" would be a guess, and this file is not the place for one.
+```
+canvas  measureText('W')  ->  width 7.8,     ascent + descent 0
+DOM     offsetWidth / 32  ->  width 7.8125,  height 17
+```
 
-The other three panes draw, and the terminal channel is exercised by the live
-tests, so the increment is not blocked on it -- but the pane has never been seen
-to render, and that is the state it is in.
+So the canvas is asked whether it can measure a height, and where it cannot,
+`OffscreenCanvas` is taken away for exactly as long as xterm is choosing a
+strategy -- which is inside `Terminal.open` and nowhere else. xterm throws,
+catches its own throw, and measures the DOM, which on this engine is right.
+
+**Then the rows were drawn too high.** The DOM fallback measures a span whose
+`line-height` is `normal`, so the height it returns *is* the font's natural line
+box. xterm takes that number and renders each row with `line-height: <that>px`
+-- the same number, and in WebKit not the same thing:
+
+```
+line-height: normal   ->  baseline 13px from the top of the row
+line-height: 17px     ->  baseline  8px from the top of the row
+```
+
+Capitals ink 10px above the baseline and brackets 12px, and rows are
+`overflow: hidden`, so at a baseline of 8 the top of every line is shaved:
+`README` reads as `KEADME`, `HEAD` as `HEAU`. Raising xterm's `lineHeight`
+option is not a fix -- it moves the baseline by only half of what it adds, and
+could not lift brackets clear at any row height anyone would want. Restoring
+`line-height: normal` on the rows' spans puts the baseline back at 13 and costs
+nothing, and it is not a nudge until it looks right: the cell height was
+*measured* as the natural line box, so rendering at the natural line box is the
+only setting consistent with it. That equivalence would break if xterm's
+`lineHeight` option moved off 1, which is why nothing does that.
+
+Both are worth reporting upstream. The first belongs in that constructor, which
+should measure once and reject a strategy that returns nothing rather than trust
+a property that exists but does not work.
+
+Two things this cost that are worth not re-deriving. The renderer *was* running
+even when nothing appeared -- `.xterm-rows` had its row elements and their text
+-- so a DOM inspection that stops at "is the text there" says everything is
+fine. Every row simply had no height. And ruling out WebKit's sandbox,
+`requestAnimationFrame`, font availability and a missing stylesheet ruled out
+nothing, because the failure was never in any of them.
+
+Verified in the running application, not only in a harness: against a live
+`sbxd` and a real sandbox, the pane draws the sandbox's shell, renders colour
+from `git log`, paints bytes as they arrive, sends what is typed into it, and
+draws `README HEAD 7fd1a60 EIT013 pqy|{[()]}` with every glyph whole. `tput
+cols` inside the sandbox reads **113**, matching `tmux list-clients` -- so the
+grid is sized from a measured cell rather than the 80x24 a zero cell used to
+leave behind.
+
+Whether WebView2 on Windows was ever affected is still untried. The probe makes
+it moot: if its metrics work, nothing here changes.
 
 ## Wayland, X11, and WSLg
 

@@ -5,17 +5,18 @@
 // sequences are the agent's, and the one thing this must not do is try to
 // understand them.
 //
-// **This does not paint under WSLg**, and the cause is not in this file or
-// anywhere below it. See docs/desktop.md: the bytes arrive and reach xterm's
-// buffer, and its renderer never draws them because the character cell measures
-// zero. Verified by writing a literal string with no stream involved, which
-// does not appear either.
+// `xterm.open` goes through `withUsableFontMetrics` because WebKitGTK reports a
+// font's vertical metrics wrongly and xterm believes them. See charSize.ts:
+// without it the character cell is zero -- a pane that stays empty however much
+// arrives in the buffer behind it -- and every row it does draw is sheared off
+// two pixels short of the top.
 
 import { useEffect, useRef } from "react";
 import { Terminal as Xterm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
+import { withUsableFontMetrics } from "../charSize";
 import { close, decodeBytes, encodeBytes, nextChannelId, open, terminal } from "../stream";
 
 export function TerminalPane({ server, name }: { server: string; name: string }) {
@@ -42,7 +43,7 @@ export function TerminalPane({ server, name }: { server: string; name: string })
     });
     const fit = new FitAddon();
     xterm.loadAddon(fit);
-    xterm.open(element);
+    withUsableFontMetrics(element, () => xterm.open(element));
 
     const refit = () => {
       try {
