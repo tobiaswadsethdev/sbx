@@ -4,8 +4,9 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 
-A terminal UI for running several coding agents in parallel, each in its own
-[NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell) sandbox.
+A terminal UI and a desktop workspace for running several coding agents in
+parallel, each in its own [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
+sandbox.
 
 Claude Squad's workflow, with real isolation underneath: kernel-enforced
 filesystem, network and process policy per session, credentials injected at
@@ -43,15 +44,32 @@ curl https://github.com                                 -> DENIED
    j/k move · 1-9 jump · n new  │  enter open · a attach · P publish · D destroy  │  tab view · q quit
 ```
 
+The desktop application is the same thing as a workspace: projects containing
+worktrees, the agent's terminal and extra shells beside it, the working copy in
+a file tree, diffs in an editor with comments that go back to the agent, and git
+on the right.
+
+```
+  sbx  127.0.0.1:17671  3 worktrees in 1 project   [new project]
+  +--------------+-------------------------------------+----------------------+
+  | sbx          | agent | shell-1 x | main.rs | diff ~ | files git events ... |
+  |   readme-fix |                                     |  branch sbx/readme   |
+  |   add-tests  |   1  -Hello Wrold!                  |  fetch pull push     |
+  | octocat/demo |   1  +Hello World!                  |  CHANGES 2           |
+  |   spike      |                                     |  M README            |
+  +--------------+-------------------------------------+----------------------+
+```
+
 ## What it does
 
 - **One sandbox per session.** The agent clones the repository inside it and
   works on `sbx/<name>`; your worktree is never handed over.
 - **Credentials the sandbox never sees.** OpenShell providers hold the tokens
   and the gateway substitutes them into outgoing requests.
-- **Isolation you can look at.** The policy pane shows the rules being enforced,
-  the events feed shows every allow and deny, and both are keys away from
-  changing a rule for a running session.
+- **Isolation you can look at.** The policy view shows the rules being enforced
+  and the events feed shows every allow and deny -- in both front ends, one key
+  or one click away, and a rule can be widened for a running session from there.
+  This is the part an ADE built on git worktrees has no equivalent for.
 - **Several agents at once, without babysitting.** A session blocked on a
   permission prompt says so in the list, so watching is cheaper than attaching.
 - **A toolchain when the task needs one.** `--toolchain dotnet` runs the session
@@ -62,6 +80,9 @@ curl https://github.com                                 -> DENIED
   are granted per-binary like everything else.
 - **Publish from inside.** `sbx publish` pushes the branch and opens a pull
   request on GitHub or Azure DevOps without the token ever reaching your host.
+- **Two front ends over one server.** The same sessions from a terminal or from
+  a window, and the window can be on a different machine from the sandboxes --
+  see [docs/server.md](docs/server.md).
 
 ## Quickstart
 
@@ -128,10 +149,11 @@ sbx update                                    # fetch and verify the newest rele
 sbx rm <name>                                 # delete session and sandbox
 sbx                                           # the TUI: n starts a session, no shell needed
 
-sbxd pair <client>                            # a string that pairs a client with this machine
 sbxd serve                                    # serve this machine's sessions over one TLS port
+sbxd pair <client>                            # a string that pairs a client with this machine
 sbx connect <string>                          # pair with a server
 sbx --server=<name> ls                        # ... and ask it instead of the local gateway
+sbx watch <name> --server=<name>              # follow a session's events and state as they happen
 ```
 
 `--policy` takes a template name or a path to a YAML file. Three templates ship
@@ -153,8 +175,8 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 | ------------------------------------------ | --------------------------------------------------------------------- |
 | [Install](docs/install.md)                 | prerequisites, the gateway, providers, and `sbx` itself               |
 | [The TUI](docs/tui.md)                     | the list, the panes, starting and ending sessions, names and branches |
-| [The server](docs/server.md)               | running `sbxd`, pairing a client, WSL, and what a token is worth      |
-| [The desktop app](docs/desktop.md)         | the window onto a server, and why the webview never connects itself   |
+| [The desktop app](docs/desktop.md)         | projects and worktrees, files, git, the editor, and the review        |
+| [The server](docs/server.md)               | `sbxd`, pairing a client on another machine, WSL, what a token is worth |
 | [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |
 | [Policy and events](docs/policy.md)        | what is enforced, the audit feed, and acting on a denial              |
 | [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |
@@ -172,7 +194,7 @@ Contributions are welcome -- issues, questions and pull requests alike.
 strategy and what a reviewable change looks like here; the short version is:
 
 ```sh
-cargo test --workspace               # 403 tests, no gateway or Docker needed
+cargo test --workspace               # 539 tests, no gateway or Docker needed
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```

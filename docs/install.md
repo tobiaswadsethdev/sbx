@@ -98,8 +98,13 @@ sbx doctor
 ```
 
 Start something: `sbx new --repo <url> --task "..."`, or `sbx` for the
-TUI, where `n` does the same thing with a picker and a form --
+terminal interface, where `n` does the same thing with a picker and a form --
 [tui.md](tui.md).
+
+There is a desktop workspace as well, and it talks to a server rather than to
+the gateway directly -- so it works whether the sandboxes are on this machine or
+another one. [server.md](server.md) is how to pair the two; [desktop.md](desktop.md)
+is what the window does once they are.
 
 If you would rather see each step yourself before trusting a tool with it,
 [manual-loop.md](manual-loop.md) is the whole loop run by hand, against the

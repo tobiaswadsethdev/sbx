@@ -3,15 +3,15 @@
 | | |
 | --- | --- |
 | [install.md](install.md) | prerequisites, the OpenShell gateway, providers, and `sbx` itself |
-| [tui.md](tui.md) | the list, the panes, starting and ending sessions, names and branches |
+| [tui.md](tui.md) | the terminal interface: the list, the panes, starting and ending sessions |
+| [desktop.md](desktop.md) | the desktop workspace: projects and worktrees, files, git, the editor, the review |
 | [configuration.md](configuration.md) | `~/.config/sbx/config.toml`, and which default wins |
 | [policy.md](policy.md) | the rules being enforced, the audit feed, and acting on a denial |
 | [git-hosts.md](git-hosts.md) | GitHub and Azure DevOps, and how publishing keeps the token off your host |
 | [toolchains.md](toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [skills.md](skills.md) | carrying your own skills into a sandbox |
 | [mcp.md](mcp.md) | MCP servers on the host, and what an MCP server costs you |
-| [desktop.md](desktop.md) | the window onto a server: running it, and why the webview never connects |
-| [server.md](server.md) | running `sbxd`, pairing a client with it, and what a token is worth |
+| [server.md](server.md) | running `sbxd`, pairing a client on another machine, and what a token is worth |
 | [sandbox-image.md](sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |
 | [architecture.md](architecture.md) | the crates, the modules, and three rules worth knowing before changing them |
 | [manual-loop.md](manual-loop.md) | the whole thing run by hand, with the versions it was verified against |

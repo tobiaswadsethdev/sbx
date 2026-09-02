@@ -27,6 +27,26 @@ commands.
 
 ## Running it
 
+**It needs a server to talk to**, and pairing with one is the first step
+whether that server is this machine or another. On the machine with the
+sandboxes:
+
+```sh
+sbxd serve                              # or under systemd; see server.md
+sbxd pair desktop --host 127.0.0.1      # ... or the address the window will dial
+```
+
+then, on the machine with the window, paste what that printed:
+
+```sh
+sbx connect 'sbx://…'
+```
+
+`--host` is the one to get right: without it the pairing string carries the
+server's own hostname, which is often not what the client should dial and on a
+Debian-family box resolves to `127.0.1.1` while `sbxd` is bound to `127.0.0.1`.
+[server.md](server.md) has the two-machine case in full.
+
 Linux needs `webkit2gtk-4.1`, `gtk3` and `libsoup3` and their development
 headers; Windows needs WebView2, which Windows 11 has already.
 

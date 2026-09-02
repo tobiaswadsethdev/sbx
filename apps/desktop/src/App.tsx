@@ -133,12 +133,24 @@ export default function App() {
         body={
           <>
             <p>
-              This window talks to an <code>sbxd</code>. Pair with one from a terminal:
+              This window talks to an <code>sbxd</code>, which may be on this
+              machine or another one. Pair with it from a terminal:
             </p>
             <pre>
-              sbxd pair desktop{"\n"}
+              sbxd serve{"\n"}
+              sbxd pair desktop --host 127.0.0.1{"\n"}
               sbx connect 'sbx://…'
             </pre>
+            <p>
+              {/* Without --host the string carries the machine's own hostname,
+                  which on a Debian-family box resolves to 127.0.1.1 while the
+                  server is bound to 127.0.0.1 -- a connection refused from a
+                  server that is running perfectly well. */}
+              <code>--host</code> is the address this window should dial, and
+              leaving it out is the usual reason a paired server cannot be
+              reached. For a server on another machine, see{" "}
+              <code>docs/server.md</code>.
+            </p>
             <p>Then reopen this window.</p>
           </>
         }

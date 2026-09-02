@@ -6,17 +6,24 @@ has the decisions and the increments that got here; this is the map.
 ## The shape of it
 
 ```
-                +-------------------------+
-                |   sbx (CLI and TUI)     |   clap + ratatui
-                | list | agent  | diff    |
-                |      | policy | events  |
-                +-----------+-------------+
-                            |
-                +-----------+-------------+
-                |        sbx-core         |   nothing here draws
-                |  ops, sessions, policy, |
-                |  events, seed, publish  |
-                +-----------+-------------+
+      +-------------------------+     +---------------------------+
+      |   sbx (CLI and TUI)     |     |  apps/desktop (webview)   |
+      | list | agent  | diff    |     |  projects | tabs | dock   |
+      |      | policy | events  |     +-------------+-------------+
+      +-----------+-------------+                   | tauri commands
+                  |                   +-------------+-------------+
+                  |                   |  sbx-client (pinned TLS)  |
+                  |                   +-------------+-------------+
+                  |                                 | https + wss
+                  |                   +-------------+-------------+
+                  |                   |  sbxd  (/rpc, /ws)        |
+                  |                   +-------------+-------------+
+                  |                                 |
+                +-+---------------------------------+-+
+                |             sbx-core                |   nothing here draws
+                |  ops, sessions, policy, events,     |
+                |  seed, publish, git, files, projects|
+                +-----------------+-------------------+
                             |
         +-------------------+--------------------+
         |                   |                    |
@@ -68,7 +75,11 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `toolchain.rs` | the toolchains, their image variants, and the registry each one opens |
 | `skills.rs` | packing host skills into a session |
 | `mcp.rs` | MCP servers on the host, and the endpoints granted for them |
-| `repos.rs` | the git repositories on your own disk -- the only module that reads the host |
+| `repos.rs` | the git repositories on the machine `sbx` or `sbxd` runs on -- the only module that reads that host's filesystem |
+| `projects.rs` | the repositories someone has said they are working on, which is what worktrees are grouped under. A decision, not a discovery: stored rather than derived from the sessions that exist |
+| `git.rs` | the working copy inside a sandbox as git describes it, and the operations on it. The status parser is pure, because git's output is the part that is easy to get subtly wrong and impossible to notice |
+| `files.rs` | reading a worktree's files from outside it, one directory at a time. Read-only: the agent owns the working copy |
+| `comments.rs` | review comments on a diff, kept per session until they go to the agent as one message |
 | `config.rs` | `~/.config/sbx/config.toml`, and which default wins |
 | `doctor.rs` | the preflight checks, each carrying its fix |
 | `update.rs` | fetching, verifying and replacing the `sbx` binary itself |
@@ -85,6 +96,15 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `pin.rs` | *(sbx-client)* judging a server by its certificate's fingerprint and nothing else |
 | `http.rs` | *(sbx-client)* enough HTTP/1.1 to ask an `sbxd` a question |
 | `state.rs` | where secrets live: keys, tokens, and saved connections |
+| `lib.rs` | *(sbx-proto)* every message on the wire, carrying the core's own types |
+| `stream.rs` | *(sbx-proto)* the multiplexed websocket: the channels, and the frames both ends speak |
+| `ws.rs` | *(sbx-client)* the streaming half, and the pty a terminal channel needs on this side of it |
+| `rpc.rs` | *(sbxd)* one request in, one outcome out; every arm a call into `ops` |
+| `serve.rs` | *(sbxd)* the routes, the token check, and keeping blocking work off the runtime |
+| `stream.rs` | *(sbxd)* the channels a client subscribes to, and the pty behind a terminal |
+| `App.tsx` | *(desktop)* the workspace: the project tree, the tabs and the dock |
+| `charSize.ts` | *(desktop)* the font metrics WebKit gets wrong, and the probe that corrects them |
+| `panes/` | *(desktop)* the terminal, a file in Monaco, and a file's diff with the review on it |
 
 ## Three rules worth knowing before you change anything
 
@@ -96,7 +116,8 @@ pane body is the obvious thing to do. Two places used to and no longer do --
 `ansi.rs` tokenizes into its own `Style` and the TUI maps that onto ratatui's in
 `tui/ansi.rs`, and raw-mode attaching moved out to `attach.rs` in the binary. The
 frozen TUI still building against the core is the cheapest test that the rule has
-held.
+held -- and `sbxd`, which links the core and has no display at all, is the
+expensive one.
 
 
 **The render thread does no I/O.** Every gateway call is a subprocess round trip

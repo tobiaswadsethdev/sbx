@@ -24,7 +24,7 @@ diff pane's wrapping.
 
 ```sh
 cargo build
-cargo test --workspace                                    # 403 tests
+cargo test --workspace                                    # 539 tests
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- doctor                                       # the CLI, from the tree

@@ -1,5 +1,10 @@
 # The TUI
 
+This is the terminal interface. There is also a desktop workspace over the same
+sessions -- [desktop.md](desktop.md) -- and neither is the other's front end:
+both build on `sbx-core`, and a decision that lives in only one of them is a bug
+that has been caught more than once here.
+
 `sbx` with no arguments opens the TUI: every session in one list, and
 whatever one of them is doing beside it.
 

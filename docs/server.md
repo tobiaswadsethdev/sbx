@@ -56,9 +56,92 @@ Neither needs a restart.
 
 ## What works over a connection
 
-`ls`, `diff`, `policy` and `events` -- the reading half. Creating, publishing and
-attaching still act on the local machine, and will grow their remote halves
-along with the desktop application.
+Nearly everything, now. Listing and reconciling sessions; creating one; the
+policy and the event feed; the working copy's files; git, including staging,
+commit, push, pull and fetch; the diff and the review comments that go back to
+the agent; and the agent's terminal and any shells beside it, streamed.
+
+Two things are still the local machine's. **Attaching** with `sbx attach` hands
+*this* terminal to the agent, which is a thing about the process you are
+sitting in rather than a request; the desktop application's terminal is the
+remote equivalent and it works over the connection. **Publishing** with
+`sbx publish` has no remote half yet.
+
+Reading is `/rpc`, one request and one answer. The three things a client wants
+*told* -- the agent's screen, the gateway's decisions as it makes them, and the
+terminal -- are a websocket on `/ws`, multiplexed by channel, because polling
+them would be a handshake per session per second to hear that nothing had
+changed.
+
+## Two machines
+
+The server needs to listen somewhere the client can reach, and the pairing
+string needs to name that address.
+
+On the server:
+
+```sh
+# Listen on the network rather than on loopback. `--bind 0.0.0.0` is every
+# interface; a single address is better where there is a choice.
+sbxd serve --bind 0.0.0.0
+
+# In another shell: mint a token, and name the address the *client* should dial.
+sbxd pair laptop --host box.lan
+```
+
+On the client, paste the string it printed:
+
+```sh
+sbx connect 'sbx://box.lan:17671/8f3c...#d8fa...' --name work
+sbx --server=work ls
+```
+
+**`--host` is the flag that matters, and leaving it out is the usual failure.**
+The pairing string carries an address, and without `--host` that address is the
+machine's own `/etc/hostname` -- which is frequently not a name the client can
+resolve, and on a Debian-family box resolves *on the server itself* to
+`127.0.1.1` while `sbxd serve` is bound to `127.0.0.1`. The result is
+`Connection refused` from a server that is running perfectly well, on the same
+machine. Pass the address you want the client to dial:
+
+```sh
+sbxd pair laptop --host 127.0.0.1     # same machine
+sbxd pair laptop --host box.lan       # over the network by name
+sbxd pair laptop --host 10.0.0.7      # ... or by address
+```
+
+**The certificate's names do not matter to `sbx`.** The client judges a server
+by the fingerprint in the pairing string and by nothing else -- `verify_server_cert`
+ignores the name it was given -- so there is no "certificate is not valid for
+this host" to run into, whatever address you dial. That is the point of pinning:
+a self-signed certificate has no authority to appeal to, and a name check
+against one proves nothing anyway.
+
+`--san` is therefore for *other* clients: `curl`, a browser, anything that does
+check names against a certificate. It is repeatable:
+
+```sh
+sbxd serve --bind 0.0.0.0 --san sbx.internal
+```
+
+Two things to know if you do use it. The certificate is generated once and then
+reused whatever the SANs say, so a `--san` added after the first start does not
+appear in it. And `sbxd pair` generates the certificate too, with the defaults
+only -- so pairing before the first `serve --san` locks the extra name out.
+Delete `~/.local/state/sbx/cert.pem` and `key.pem` and start again, which means
+pairing again: the fingerprint every client holds has changed.
+
+Two more things that are not sbx's to fix but look exactly like it:
+
+* **The port has to be open.** 17671/tcp on the server's firewall.
+* **Both ends need the same protocol version.** `GET /version` answers without a
+  token, so a client says "this server speaks 2, I speak 1" rather than failing
+  in the middle of a request. `sbx doctor` on the client checks every paired
+  server, which is where a moved address, a revoked token or a version skew
+  shows up.
+
+The desktop application reads the same paired servers as the CLI: pair once with
+`sbx connect` and the window lists that server without being told again.
 
 ## The WSL case
 
