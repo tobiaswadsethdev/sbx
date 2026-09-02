@@ -14,7 +14,7 @@ use std::path::Path;
 use openshell_client::{CliClient, OpenShell};
 use sbx_core::session::Session;
 use sbx_core::store::Store;
-use sbx_core::{config, endpoints, image, ops, policy, repos};
+use sbx_core::{comments, config, endpoints, image, ops, policy, repos};
 use sbx_proto::{Failure, Outcome, Reply, Request};
 
 /// Answer one request.
@@ -29,6 +29,22 @@ pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
         }),
         Request::Policy { name } => with_session(&name, |s| policy(client, s)),
         Request::Events { name } => with_session(&name, |s| events(client, s)),
+        Request::Comments { name } => with_session(&name, |s| Ok(review(comments::list(&s.name)))),
+        Request::Comment { name, comment } => with_session(&name, |s| {
+            comments::add(&s.name, comment)
+                .map(review)
+                .map_err(Failure::failed)
+        }),
+        Request::Uncomment { name, id } => with_session(&name, |s| {
+            comments::remove(&s.name, id)
+                .map(review)
+                .map_err(Failure::failed)
+        }),
+        Request::SendComments { name } => with_session(&name, |s| {
+            ops::send_comments(client, s)
+                .map(|message| Reply::Told { message })
+                .map_err(Failure::failed)
+        }),
         Request::Repos => repo_list(),
         Request::Inspect { path, branch } => inspect(client, &path, branch.as_deref()),
         Request::NewOptions => match config::Config::load() {
@@ -37,6 +53,10 @@ pub fn dispatch(client: &dyn OpenShell, request: Request) -> Outcome {
         },
         Request::Create(new) => create(new),
     }
+}
+
+fn review(comments: Vec<comments::Comment>) -> Reply {
+    Reply::Comments { comments }
 }
 
 /// The repositories on this machine, and where it looked for them.

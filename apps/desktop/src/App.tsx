@@ -14,12 +14,13 @@ import { api, messageOf, type ServerSummary } from "./api";
 import type { Session } from "./gen/Session";
 import { Facts } from "./panes/Facts";
 import { PolicyPane } from "./panes/Policy";
+import { DiffPane } from "./panes/Diff";
 import { EventsPane } from "./panes/Events";
 import { NewSessionDialog } from "./NewSession";
 import { TerminalPane } from "./panes/Terminal";
 import { SessionList } from "./SessionList";
 
-const PANES = ["terminal", "facts", "policy", "events"] as const;
+const PANES = ["terminal", "diff", "facts", "policy", "events"] as const;
 export type Pane = (typeof PANES)[number];
 
 /// How often the session list is re-read.
@@ -146,6 +147,7 @@ export default function App() {
                   // would leave the previous session's scrollback in place.
                   <TerminalPane key={session.name} server={server!} name={session.name} />
                 )}
+                {pane === "diff" && <DiffPane server={server!} name={session.name} />}
                 {pane === "facts" && <Facts session={session} />}
                 {pane === "policy" && (
                   <PolicyPane server={server!} name={session.name} />

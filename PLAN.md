@@ -1899,7 +1899,29 @@ for free, with nothing persisted client-side.
   in TypeScript would be the copy this whole crate layout exists to avoid, and
   the alternative is a request per keystroke. Written down in docs/desktop.md
   rather than left to be discovered.
-- **28. Diff** — the three sections, and inline comments batched back to the agent.
+- **28. Diff** — DONE. The three sections as a pane, and a review that goes to
+  the agent rather than to a pull request. 520 tests.
+
+  The body is the same marked-up text `sbx new`'s TUI draws, so this is the
+  second renderer of the `pane::SECTION`/`NOTICE` contract rather than a second
+  format. Line numbers come from the hunk headers, counted forward as git wrote
+  them, which is what lets a comment name a line at all.
+
+  **A review is one message, sent once.** Six remarks delivered as they are
+  written would interrupt the agent six times, and the second interruption lands
+  while it is acting on the first. `ops::tell` uses `load-buffer` +
+  `paste-buffer -p` rather than `send-keys` for the same reason at a smaller
+  scale: `send-keys` types a multi-line message a key at a time, so every
+  newline in it is a submission. A bracketed paste is one block of text, and the
+  single `Enter` after it is the submission.
+
+  Kept on the server, per session, beside the events feed -- a client is a
+  window onto a session, and a review half-written when the window closes is
+  work. Cleared only after the paste lands, so an unreachable sandbox costs the
+  delivery and not the review. What is stored is the remark plus the line it was
+  written against, verbatim: the working copy moves under a review, and a
+  comment that tried to follow a line through later edits would either be wrong
+  or need a diff of the diff.
 - **29. Worktree backend** — the `Backend` trait, the second implementation, and
   the labelling that keeps it honest.
 - **30. Managed MCP and skill sync** — the catalog, container lifecycle, the

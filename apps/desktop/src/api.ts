@@ -7,7 +7,9 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+import type { Comment } from "./gen/Comment";
 import type { Event } from "./gen/Event";
+import type { NewComment } from "./gen/NewComment";
 import type { Picked } from "./gen/Picked";
 import type { Listing } from "./gen/Listing";
 import type { NewOptions } from "./gen/NewOptions";
@@ -25,6 +27,16 @@ export const api = {
   policy: (server: string, name: string) => invoke<PolicyView>("policy", { server, name }),
   events: (server: string, name: string) => invoke<Event[]>("events", { server, name }),
   diff: (server: string, name: string) => invoke<string>("diff", { server, name }),
+
+  // The review. Kept on the server, per session, so an unsent one survives the
+  // window closing -- see `sbx_core::comments`.
+  comments: (server: string, name: string) => invoke<Comment[]>("comments", { server, name }),
+  comment: (server: string, name: string, comment: NewComment) =>
+    invoke<Comment[]>("comment", { server, name, comment }),
+  uncomment: (server: string, name: string, id: number) =>
+    invoke<Comment[]>("uncomment", { server, name, id }),
+  sendComments: (server: string, name: string) =>
+    invoke<string>("send_comments", { server, name }),
 
   // The create flow. `repos` and `inspect` answer about the *server's* disk:
   // a checkout is only a way of naming a remote, but which checkouts exist is a

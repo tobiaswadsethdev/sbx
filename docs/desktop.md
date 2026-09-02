@@ -70,13 +70,50 @@ neutral. Generated, it is a type error.
 
 ## What it shows
 
-The session list, and four panes: **terminal** (the agent's screen, live),
-**facts** (what the session is), **policy** (the rules the gateway is enforcing)
-and **events** (every allow and deny it has made). The diff with its inline
-comments is an increment of its own.
+The session list, and five panes: **terminal** (the agent's screen, live),
+**diff** (what has changed, and the review you are writing about it), **facts**
+(what the session is), **policy** (the rules the gateway is enforcing) and
+**events** (every allow and deny it has made).
 
 Policy and events are the two with no equivalent in an ADE built on git
 worktrees, and they are why this is worth building rather than adopting one.
+
+## Reviewing, and telling the agent
+
+Three sections, from `ops::repo_diff`: committed work against the base branch,
+uncommitted work, and untracked files. The body arrives marked up rather than
+structured -- `### ` for a heading, `!!! ` for a notice, a unified diff
+otherwise -- and `sbx_core::pane` calls those markers a contract with whatever
+draws it. The pane is the second thing to draw one; the TUI's `diff_line` is the
+first, and they strip the same two prefixes.
+
+The comments are the half with no equivalent in a code host. They are not going
+to a pull request; they are going to an agent that is **still running**. Click
+any line of the diff to write one, and the review sits at the bottom until it is
+sent.
+
+**A review is one message, sent once.** Telling the agent about each remark as
+it is written would interrupt it six times to say six things that belong
+together, and the second interruption would land while it is acting on the
+first. So the review accumulates and `SendComments` delivers it whole,
+grouped by file and in line order, quoting the line each remark was written
+against -- the working copy moves under a review, and a line number that has
+gone stale is worth less than the line itself.
+
+**It is kept on the server, per session**, beside the events feed and for the
+same reason: a client is a window onto a session, and a review half-written when
+the window closes is work. It also makes the review the session's rather than
+the window's, so a second client sees it and the agent is told once whichever
+one sends it.
+
+Delivery is `tmux load-buffer` then `paste-buffer -p`, not `send-keys`. The
+difference is everything for text with newlines in it: `send-keys` types a
+message a key at a time, so a review of six comments arrives as six
+submissions and the agent starts on the first while the rest is still being
+typed at it. A bracketed paste is one block of text however many lines it has,
+and the single `Enter` afterwards is the submission. The review is cleared only
+once the paste has landed, so a sandbox that was briefly unreachable costs the
+delivery rather than the work.
 
 ## Starting a session
 

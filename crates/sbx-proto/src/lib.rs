@@ -24,6 +24,7 @@ pub mod pairing;
 pub mod stream;
 pub use pairing::Pairing;
 
+use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll, Refreshed};
 use sbx_core::policy::View as PolicyView;
@@ -125,6 +126,20 @@ pub enum Request {
     },
     /// Everything a create form needs that is not about a repository.
     NewOptions,
+    /// A session's unsent review.
+    Comments { name: String },
+    /// Add one remark to it. Answers with the review as it now stands, so a
+    /// client never has to guess what the server made of what it sent.
+    Comment { name: String, comment: NewComment },
+    /// Remove one remark by id.
+    Uncomment {
+        name: String,
+        #[cfg_attr(feature = "ts", ts(type = "number"))]
+        id: u64,
+    },
+    /// Send the review to the agent and forget it. One message, once: see
+    /// `sbx_core::comments`.
+    SendComments { name: String },
     /// Start a session, and answer as soon as the record exists rather than when
     /// the agent is running.
     ///
@@ -144,7 +159,11 @@ impl Request {
             Request::Poll { name }
             | Request::Diff { name }
             | Request::Policy { name }
-            | Request::Events { name } => Some(name),
+            | Request::Events { name }
+            | Request::Comments { name }
+            | Request::Comment { name, .. }
+            | Request::Uncomment { name, .. }
+            | Request::SendComments { name } => Some(name),
             Request::Create(new) => new.name.as_deref(),
         }
     }
@@ -184,6 +203,14 @@ pub enum Reply {
     Policy(PolicyView),
     Events {
         events: Vec<Event>,
+    },
+    Comments {
+        comments: Vec<Comment>,
+    },
+    /// What was actually said to the agent, so a client can show the message it
+    /// sent rather than a claim that it sent one.
+    Told {
+        message: String,
     },
     Repos(Listing),
     Inspect(Picked),

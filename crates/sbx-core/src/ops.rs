@@ -968,6 +968,62 @@ if [ -z "$any" ]; then printf 'no changes yet\n'; fi
     }
 }
 
+/// Say something to the agent, as if it had been pasted into its terminal.
+///
+/// Through tmux's paste buffer rather than `send-keys`, and the difference
+/// matters for anything with a newline in it. `send-keys` types a message a key
+/// at a time, so a review of six comments arrives as six submissions -- the
+/// agent starts on the first line while the rest is still being typed at it.
+/// `load-buffer` then `paste-buffer -p` sends the whole thing as one bracketed
+/// paste, which is what a terminal agent is built to receive: it treats the
+/// bracketed run as text rather than as input, however many newlines are in it.
+/// The `Enter` afterwards is the submission, once, on purpose.
+///
+/// `-d` deletes the buffer after pasting, so a review does not sit in the
+/// sandbox's tmux buffer stack after it has been delivered.
+pub fn tell(client: &dyn OpenShell, session: &Session, message: &str) -> Result<(), String> {
+    if message.trim().is_empty() {
+        return Err("nothing to say".into());
+    }
+    let script = tell_script(&session.tmux, message);
+    match client.exec(&session.sandbox, &["sh", "-c", &script]) {
+        Ok(out) if out.ok() => Ok(()),
+        Ok(out) => Err(format!(
+            "the agent could not be told: {}",
+            out.stderr.trim()
+        )),
+        Err(e) => Err(format!("sandbox unreachable: {e}")),
+    }
+}
+
+/// The shell that delivers one message. Separated so its shape can be asserted
+/// without a sandbox: what makes this correct is invisible at the call site.
+fn tell_script(tmux: &str, message: &str) -> String {
+    format!(
+        "printf '%s' {message} | tmux -u load-buffer -b sbx-tell - \
+         && tmux -u paste-buffer -b sbx-tell -t {tmux} -d -p \
+         && tmux -u send-keys -t {tmux} Enter",
+        message = seed::sh_quote(message),
+        tmux = seed::sh_quote(tmux),
+    )
+}
+
+/// Send a session's unsent review to its agent, and forget it.
+///
+/// Cleared only once the paste has landed: a review that failed to arrive is
+/// still a review, and losing it to a sandbox that was briefly unreachable
+/// would be losing the work rather than the delivery.
+pub fn send_comments(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
+    let review = crate::comments::list(&session.name);
+    if review.is_empty() {
+        return Err("there are no comments to send".into());
+    }
+    let message = crate::comments::message(&review);
+    tell(client, session, &message)?;
+    crate::comments::clear(&session.name)?;
+    Ok(message)
+}
+
 /// The effective policy of a session's sandbox.
 ///
 /// A gateway call, not an exec, so unlike the diff and the poll this does not
@@ -1607,5 +1663,34 @@ mod tests {
     #[test]
     fn every_toolchain_is_offered() {
         assert_eq!(toolchain_choices().len(), toolchain::TOOLCHAINS.len());
+    }
+
+    /// A review is one paste, not one submission per line. `paste-buffer -p`
+    /// brackets it, which is what stops an agent acting on the first comment
+    /// while the rest is still arriving; the single `Enter` is the submission.
+    #[test]
+    fn a_multi_line_message_is_one_bracketed_paste_and_one_enter() {
+        let script = tell_script("agent", "first line\nsecond line");
+        assert!(script.contains("load-buffer -b sbx-tell -"), "{script}");
+        assert!(
+            script.contains("paste-buffer -b sbx-tell -t 'agent' -d -p"),
+            "{script}"
+        );
+        assert_eq!(script.matches("send-keys").count(), 1, "{script}");
+        assert!(script.contains("Enter"), "{script}");
+    }
+
+    /// A comment is free text and will contain quotes. It has to reach the
+    /// agent as text rather than as shell.
+    #[test]
+    fn a_message_with_quotes_in_it_cannot_break_out_of_the_script() {
+        let script = tell_script("agent", "it's `wrong`; rm -rf / #");
+        // The dangerous run is inside a quoted literal, not sitting in the
+        // command position where the shell would act on it.
+        assert!(!script.contains("; rm -rf / #'\n"), "{script}");
+        assert!(
+            script.contains(r"'\''"),
+            "the apostrophe was not escaped: {script}"
+        );
     }
 }

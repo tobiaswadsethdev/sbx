@@ -20,6 +20,7 @@
 //! is the map of what each module owns.
 
 pub mod ansi;
+pub mod comments;
 pub mod config;
 pub mod doctor;
 pub mod endpoints;

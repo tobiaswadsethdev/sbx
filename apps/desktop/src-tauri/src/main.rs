@@ -17,6 +17,7 @@
 use std::sync::Mutex;
 
 use sbx_client::{Incoming, Remote, Remotes, Sink};
+use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll};
 use sbx_core::policy::View as PolicyView;
@@ -115,6 +116,39 @@ fn diff(server: String, name: String) -> Result<String, Failed> {
         .call(Request::Diff { name })
         .map_err(to_message)?;
     expect_reply!(reply, Reply::Diff { body } => body, "a diff")
+}
+
+#[tauri::command]
+fn comments(server: String, name: String) -> Result<Vec<Comment>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Comments { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Comments { comments } => comments, "a review")
+}
+
+#[tauri::command]
+fn comment(server: String, name: String, comment: NewComment) -> Result<Vec<Comment>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Comment { name, comment })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Comments { comments } => comments, "a review")
+}
+
+#[tauri::command]
+fn uncomment(server: String, name: String, id: u64) -> Result<Vec<Comment>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Uncomment { name, id })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Comments { comments } => comments, "a review")
+}
+
+/// Send the review to the agent. Answers with the message it sent.
+#[tauri::command]
+fn send_comments(server: String, name: String) -> Result<String, Failed> {
+    let reply = remote(&server)?
+        .call(Request::SendComments { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Told { message } => message, "a delivered review")
 }
 
 /// The repositories the *server* can see, for the picker.
@@ -295,6 +329,10 @@ fn main() {
             policy,
             events,
             diff,
+            comments,
+            comment,
+            uncomment,
+            send_comments,
             repos,
             inspect,
             new_options,
