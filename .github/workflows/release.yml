@@ -102,6 +102,11 @@ jobs:
   desktop:
     name: desktop (windows)
     runs-on: windows-latest
+    # Whether there is a certificate to sign with, decided once here because
+    # the `secrets` context is not in scope for a step's `if` -- see the import
+    # step below. Job-level `env` is, and it may read `secrets`.
+    env:
+      HAS_SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -158,10 +163,14 @@ jobs:
       # Never verified against a real certificate at the time of writing: there
       # was none to test with. What is verified is the unsigned path, which is
       # every release so far.
-      # `secrets` and not a step-level `env`: a step's own `env` is not in scope
-      # for its `if`, so that reads as empty and the step never runs.
+      #
+      # The condition reads the job-level `env` above and not `secrets`
+      # directly: `secrets` is not an available context for a step's `if`, and
+      # naming it there is not a false condition but an invalid workflow --
+      # every job in the file, tarballs included, refuses to start. A step's
+      # *own* `env` is no good either, since that is not in scope for its `if`.
       - name: Import the signing certificate
-        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        if: env.HAS_SIGNING_CERT == 'true'
         id: cert
         shell: pwsh
         env:
