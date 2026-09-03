@@ -461,9 +461,19 @@ mod tests {
         assert_eq!(back.get("wsl").unwrap().token, "tok");
 
         // A token is a credential, so the file is the owner's alone.
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "mode was {mode:o}");
+        //
+        // Unix only, and not because Windows is exempt: there is no mode there
+        // to assert on. `state::write_private` says as much -- a file under a
+        // Windows profile inherits an ACL that already denies every other
+        // non-administrative account, which is the property 0600 is asked for.
+        // The `cfg` is what was missing: `--all-targets` on the Windows job
+        // checks tests too, and this one had `use std::os::unix::fs` in it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "mode was {mode:o}");
+        }
 
         std::fs::remove_file(&path).unwrap();
     }

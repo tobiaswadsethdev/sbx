@@ -13,13 +13,42 @@
 //! Its own file so it gets its own process: it sets `XDG_STATE_HOME`, which is
 //! how the secret store is found, and an environment variable is not something
 //! to change under the rest of the suite.
+//!
+//! **And one directory for the whole file, set once.** A file's tests share a
+//! process and run on threads, so two of them each pointing `XDG_STATE_HOME` at
+//! a directory of their own is a race: whichever sets it last decides where
+//! *both* look, and the other reads a directory with no secret in it. It passed
+//! here and failed on the first CI run, which is the only kind of luck this
+//! sort of test has.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::sync::mpsc::{Sender, channel};
 
 use sbx_core::secrets;
 use sbx_core::tracker::{Kind, Source, Ticket, on_publish};
+
+/// The one state directory this file uses, with the credential already in it.
+///
+/// Set once however many tests ask for it: `set_var` is process-global, and the
+/// point is that every test in this process agrees about where the secret store
+/// is. Storing the token here too means neither test writes it, so neither can
+/// race the other into writing it somewhere the other is not looking.
+fn state() -> &'static PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("sbx-tracker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Safety: once, and before anything in this process reads the
+        // environment -- which is what `OnceLock` is here to guarantee.
+        unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
+        secrets::set("JIRA_TOKEN", "a-token").expect("stored");
+        dir
+    })
+}
 
 /// One request the stand-in received.
 #[derive(Debug)]
@@ -103,13 +132,7 @@ fn serve(mut stream: TcpStream, seen: &Sender<Seen>) {
 
 #[test]
 fn publishing_comments_on_the_ticket_and_moves_it() {
-    let dir = std::env::temp_dir().join(format!("sbx-tracker-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    // The secret store is found through the environment, which is why this test
-    // has a process to itself.
-    unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
-    secrets::set("JIRA_TOKEN", "a-token").expect("stored");
+    state();
 
     let (tx, rx) = channel();
     let port = stand_in(tx);
@@ -173,8 +196,6 @@ fn publishing_comments_on_the_ticket_and_moves_it() {
     assert_eq!(moved.method, "POST");
     let sent: serde_json::Value = serde_json::from_str(&moved.body).expect("json");
     assert_eq!(sent["transition"]["id"], "21", "matched by name");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A status nothing can transition to is a configuration mistake, and the
@@ -182,11 +203,7 @@ fn publishing_comments_on_the_ticket_and_moves_it() {
 /// transition names neither.
 #[test]
 fn a_transition_that_does_not_exist_says_what_does() {
-    let dir = std::env::temp_dir().join(format!("sbx-tracker-bad-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    unsafe { std::env::set_var("XDG_STATE_HOME", &dir) };
-    secrets::set("JIRA_TOKEN", "a-token").expect("stored");
+    state();
 
     let (tx, _rx) = channel();
     let port = stand_in(tx);
@@ -217,6 +234,4 @@ fn a_transition_that_does_not_exist_says_what_does() {
     assert!(said.contains("In Review"), "{said}");
     assert!(said.contains("Ready for Review"), "{said}");
     assert!(said.contains("Done"), "{said}");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
