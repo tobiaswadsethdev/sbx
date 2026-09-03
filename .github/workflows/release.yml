@@ -42,7 +42,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # A dispatch takes the tag as free text, and a junk one would be baked
       # into an asset name and a git tag that outlives the mistake.
@@ -81,7 +81,7 @@ jobs:
           tar -czf "sbx-${TAG}-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" sbx
           sha256sum "sbx-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbx-${{ matrix.target }}
           path: |
@@ -108,7 +108,7 @@ jobs:
     env:
       HAS_SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Check the tag looks like a version
         shell: bash
@@ -128,7 +128,7 @@ jobs:
           workspaces: apps/desktop/src-tauri
           key: desktop-windows
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -221,7 +221,7 @@ jobs:
           sha256sum *.msi *.exe > desktop-windows.sha256
           cat desktop-windows.sha256
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbx-desktop-windows
           path: |
@@ -235,7 +235,7 @@ jobs:
     needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -252,7 +252,7 @@ jobs:
           cat SHA256SUMS
 
       - name: Publish
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
