@@ -25,6 +25,6 @@ axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rcgen = "0.14"
 portable-pty = "0.9"
-rand = "0.9"
-sha2 = "0.10"
+rand = "0.10"
+sha2 = "0.11"
 subtle = "2"
