@@ -64,7 +64,12 @@ impl Remote {
 
         let (socket, _response) = tungstenite::client_tls_with_config(
             request,
-            std::net::TcpStream::connect((strip_brackets(&self.host), self.port))
+            // The same dial the request half makes: a per-address timeout and
+            // the memory of which address answered. `TcpStream::connect` on a
+            // hostname walks the addresses with the kernel's own retry behind
+            // each, which on Windows is twenty seconds of nothing happening
+            // before `localhost` falls back from `::1` to `127.0.0.1`.
+            super::http::connect(&self.host, self.port)
                 .map_err(|e| Error::Server(format!("could not reach the server: {e}")))?,
             None,
             Some(tungstenite::Connector::Rustls(Arc::new(config))),
@@ -236,21 +241,9 @@ fn tidy(text: &str) -> String {
     text.to_string()
 }
 
-fn strip_brackets(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn brackets_come_off_the_host_before_it_is_dialled() {
-        assert_eq!(strip_brackets("[::1]"), "::1");
-        assert_eq!(strip_brackets("box.lan"), "box.lan");
-    }
 
     /// A read timeout is how a queued send gets noticed, so it must not be
     /// reported as the connection failing.

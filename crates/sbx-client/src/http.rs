@@ -12,9 +12,10 @@
 //! handshake per request, which against a server on the same machine, or one
 //! being asked something once a second, is not the cost worth optimising first.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use rustls::pki_types::ServerName;
@@ -183,7 +184,27 @@ fn is_clean_close(e: &std::io::Error) -> bool {
 /// Every address the name resolves to is tried, because a host with both an
 /// IPv6 and an IPv4 address where only one is reachable is the ordinary case
 /// for `localhost` on a machine with IPv6 half-configured.
-fn connect(host: &str, port: u16) -> Result<TcpStream, Error> {
+/// Dial a host, in the one way this crate dials anything.
+///
+/// `pub(crate)` because the websocket needs it too: it used to call
+/// `TcpStream::connect((host, port))`, which walks the addresses with the
+/// *kernel's* retry behind each -- twenty-odd seconds on Windows for a SYN that
+/// is dropped rather than refused, with nothing to shorten it. One dialling
+/// policy, one address memory, both halves.
+pub(crate) fn connect(host: &str, port: u16) -> Result<TcpStream, Error> {
+    // The one that answered last time, patiently: it has already proved it is
+    // the right address, so a slow link deserves the full timeout rather than
+    // being skipped for the one that is wrong.
+    if let Some(addr) = recall(host, port) {
+        match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            Ok(tcp) => return Ok(tcp),
+            // It answered before and does not now. Forget it and look properly;
+            // the alternative is a client that can never recover from a server
+            // moving between stacks.
+            Err(_) => forget(host, port),
+        }
+    }
+
     let addrs: Vec<SocketAddr> = (strip_brackets(host), port)
         .to_socket_addrs()
         .map_err(|e| Error::Connect(format!("{host}: {e}")))?
@@ -199,7 +220,10 @@ fn connect(host: &str, port: u16) -> Result<TcpStream, Error> {
     for timeout in passes(addrs.len()) {
         for addr in &addrs {
             match TcpStream::connect_timeout(addr, timeout) {
-                Ok(tcp) => return Ok(tcp),
+                Ok(tcp) => {
+                    remember(host, port, *addr);
+                    return Ok(tcp);
+                }
                 Err(e) => last = Some(e),
             }
         }
@@ -209,6 +233,39 @@ fn connect(host: &str, port: u16) -> Result<TcpStream, Error> {
         last.map(|e| e.to_string())
             .unwrap_or_else(|| "no address answered".into())
     )))
+}
+
+/// The address that last answered, per host.
+///
+/// **A discovery worth making once.** Without this, every request pays the fast
+/// pass again: on Windows `localhost` puts `::1` first, nothing there answers,
+/// and each file listing and each file read costs a second before it even
+/// starts. A file tree is a request per folder, so "a bit slow" is that second,
+/// once per click.
+///
+/// Self-correcting, and it has to be: a remembered address that stops answering
+/// -- the server rebound, the machine moved -- is forgotten on the first
+/// failure and the full search runs again. What it can cost when wrong is one
+/// connect timeout, which is what the first request would have cost anyway.
+fn known() -> &'static Mutex<HashMap<(String, u16), SocketAddr>> {
+    static KNOWN: OnceLock<Mutex<HashMap<(String, u16), SocketAddr>>> = OnceLock::new();
+    KNOWN.get_or_init(Default::default)
+}
+
+fn recall(host: &str, port: u16) -> Option<SocketAddr> {
+    known().lock().ok()?.get(&(host.to_string(), port)).copied()
+}
+
+fn remember(host: &str, port: u16, addr: SocketAddr) {
+    if let Ok(mut map) = known().lock() {
+        map.insert((host.to_string(), port), addr);
+    }
+}
+
+fn forget(host: &str, port: u16) {
+    if let Ok(mut map) = known().lock() {
+        map.remove(&(host.to_string(), port));
+    }
 }
 
 /// The timeout of each pass over the addresses.
@@ -255,6 +312,26 @@ fn parse(raw: &[u8]) -> Result<Response, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The address that answered is remembered, so the fast pass is a cost paid
+    /// once rather than per request -- which for a file tree is per folder you
+    /// click.
+    #[test]
+    fn the_address_that_answered_is_remembered_and_forgotten_when_it_stops() {
+        let host = "test.invalid";
+        let addr: SocketAddr = "127.0.0.1:17671".parse().unwrap();
+        assert_eq!(recall(host, 1), None, "nothing is known to begin with");
+
+        remember(host, 1, addr);
+        assert_eq!(recall(host, 1), Some(addr));
+        // Keyed by port as well: one host can serve two of these.
+        assert_eq!(recall(host, 2), None);
+
+        // Forgotten on failure, or a server that moves between stacks could
+        // never be reached again.
+        forget(host, 1);
+        assert_eq!(recall(host, 1), None);
+    }
 
     /// The schedule that keeps a window responsive on Windows without turning
     /// "that host is not there" into "that host is slow".
