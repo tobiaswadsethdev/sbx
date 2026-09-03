@@ -27,7 +27,8 @@ use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
-use sbx_proto::{FailureKind, GitOp, Reply, Request};
+use sbx_core::integrations::View as IntegrationsView;
+use sbx_proto::{FailureKind, GitOp, McpOp, Reply, Request};
 use serde::Serialize;
 use tauri::{Emitter as _, Manager as _};
 
@@ -377,6 +378,100 @@ fn create(server: String, session: NewSession) -> Result<String, Failed> {
     expect_reply!(reply, Reply::Created { name } => name, "a created session")
 }
 
+/// What the server holds on a session's behalf: the MCP catalog and what each
+/// managed container is doing, the secret names, and the uploaded skills.
+#[tauri::command]
+fn integrations(server: String) -> Result<IntegrationsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Integrations)
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
+#[tauri::command]
+fn mcp(server: String, name: String, action: McpOp) -> Result<IntegrationsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Mcp { name, action })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
+/// Store a secret on the server, or forget it.
+///
+/// The value goes one way. There is no command here that reads one back and no
+/// reply that carries one, so a token typed into this window is in this
+/// process's memory for the length of one request and in the server's store
+/// afterwards -- and never in the webview at all.
+#[tauri::command]
+fn secret(server: String, name: String, value: Option<String>) -> Result<IntegrationsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Secret { name, value })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
+/// Push this machine's own skills to the server.
+///
+/// **The reading and the packing happen on this side of the bridge**, which is
+/// the whole reason this is a Tauri command and not something the webview does:
+/// `~/.claude/skills` is on *this* machine, a webview cannot read it, and the
+/// packing is `sbx_core::skills::payload` -- the same tar the seeder carries, so
+/// there is one definition of what a packed skill is.
+///
+/// Every skill the agent would load, not a selection: a list to maintain here
+/// would be a list that goes stale the first time you add a skill and forget.
+#[tauri::command]
+fn upload_skills(server: String) -> Result<IntegrationsView, Failed> {
+    let mine = sbx_core::skills::local();
+    if mine.is_empty() {
+        return Err(failed(format!(
+            "no skills in {} to upload",
+            sbx_core::skills::host_skills_dir().display()
+        )));
+    }
+    let mut uploads = Vec::new();
+    let mut problems = Vec::new();
+    for skill in &mine {
+        match sbx_core::skills::payload(&skill.source) {
+            Ok(tar) => uploads.push(sbx_core::skills::Upload {
+                name: skill.name.clone(),
+                origin: skill.source.display().to_string(),
+                tar,
+            }),
+            // One skill that has grown a virtualenv should not stop the rest.
+            Err(e) => problems.push(format!("{}: {e}", skill.name)),
+        }
+    }
+    if uploads.is_empty() {
+        return Err(failed(format!(
+            "none of the skills could be packed: {}",
+            problems.join("; ")
+        )));
+    }
+    let reply = remote(&server)?
+        .call(Request::UploadSkills { skills: uploads })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
+#[tauri::command]
+fn forget_skill(server: String, name: String) -> Result<IntegrationsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::ForgetSkill { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
+/// What this machine has to upload, for a screen that wants to say so before
+/// anything is sent.
+#[tauri::command]
+fn my_skills() -> Vec<String> {
+    sbx_core::skills::local()
+        .into_iter()
+        .map(|s| s.name)
+        .collect()
+}
+
 /// The one streaming connection, and which server it is to.
 ///
 /// One per window rather than one per pane: the protocol multiplexes, so four
@@ -538,6 +633,12 @@ fn main() {
             inspect,
             new_options,
             create,
+            integrations,
+            mcp,
+            secret,
+            upload_skills,
+            forget_skill,
+            my_skills,
             watch,
             unwatch,
             terminal_input,

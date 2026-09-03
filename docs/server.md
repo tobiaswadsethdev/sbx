@@ -192,12 +192,14 @@ qualification, it is the shape of the thing: the point of the server is to start
 sandboxes, and starting sandboxes is a privileged act. Treat a pairing string
 the way you would treat an SSH private key.
 
-It goes one step further than containers. A client may also ask for a *worktree*
-session, which is an agent running as the server's own user with that user's
-files, git credentials and network -- no sandbox, no policy, no decision feed.
-It is labelled as such everywhere it appears and it is never the default, but a
-token is what authorises it. [worktrees.md](worktrees.md) is the whole trade-off;
-`worktree_root` in the config file is where the working copies go.
+It goes one step further than containers, in two ways worth naming. A client may
+ask for a *worktree* session, which is an agent running as the server's own user
+with that user's files, git credentials and network -- no sandbox, no policy, no
+decision feed; see [worktrees.md](worktrees.md). And a client may start, restart
+and stop the **managed MCP containers** this server runs, and store the secrets
+they are given -- names and values in, names only ever out; see
+[mcp.md](mcp.md). Neither is a hole in the token: both are things the token
+authorises, which is why a pairing string is a login.
 
 `sbxd` therefore listens on `127.0.0.1` unless told otherwise, and says so when
 told otherwise:

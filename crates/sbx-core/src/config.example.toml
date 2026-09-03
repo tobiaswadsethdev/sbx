@@ -74,6 +74,21 @@
 # name = "azure-devops"
 # url = "http://mcp-azure-devops:9001/mcp"
 # transport = "http"
+#
+# A table with an `image` instead of a `url` is *managed*: sbxd starts the
+# container, keeps it on the gateway's network, restarts it, and holds its
+# secrets. Its url is derived -- http://sbx-mcp-<name>:<port>/mcp -- which is
+# why there is none to write, and why the two ways a hand-written one goes wrong
+# cannot happen. `secrets` names environment variables whose values live in the
+# server's own store, never here: `printf %s "$TOKEN" | sbxd secret <NAME>`.
+# The integrations screen in the window has the same buttons as `sbxd mcp`.
+# [[mcp]]
+# name = "sentry"
+# image = "ghcr.io/example/mcp-sentry:1.4"
+# port = 9000
+# args = ["--transport", "http"]
+# env = { SENTRY_ORG = "inet" }
+# secrets = ["SENTRY_TOKEN"]
 
 # Skills copied into every new session, by name or by path. A name is one of
 # your own, under ~/.claude/skills; anything with a `/` in it is a path, so a
@@ -83,4 +98,9 @@
 # sandbox, and a bind mount would hand it the rest of your home directory. What
 # this file holds is the pointer, so editing the original changes the next
 # session; a running one keeps what it was created with.
+#
+# These are paths on the machine that runs the sessions. Skills on a *client*
+# machine are pushed to the server's library instead -- from the window, and
+# automatically before every create -- and a session gets both. See
+# docs/skills.md.
 # skills = ["ship-pr", "~/dev/notes/.claude/skills/changelog"]

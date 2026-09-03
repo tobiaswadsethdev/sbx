@@ -77,8 +77,10 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `publish.rs` | push and open a pull request, both from inside the sandbox -- or, for a worktree session, with the server's own git credentials |
 | `image.rs` | the sandbox image, with its whole build context embedded in the binary |
 | `toolchain.rs` | the toolchains, their image variants, and the registry each one opens |
-| `skills.rs` | packing host skills into a session |
-| `mcp.rs` | MCP servers on the host, and the endpoints granted for them |
+| `skills.rs` | packing host skills into a session, and the server-side library a client pushes its own into |
+| `mcp.rs` | MCP servers on the host, and the endpoints granted for them. `mcp/managed.rs` is the half `sbxd` runs itself: an image and a port instead of a url, the container's lifecycle, and what Docker says about it |
+| `secrets.rs` | the values a managed MCP container is given. In one way only: `get` is `pub(crate)`, so no request handler can reach a value |
+| `integrations.rs` | the MCP catalog, the secret names and the skill library as one answer, which every action on that screen returns |
 | `repos.rs` | the git repositories on the machine `sbx` or `sbxd` runs on -- the only module that reads that host's filesystem |
 | `projects.rs` | the repositories someone has said they are working on, which is what worktrees are grouped under. A decision, not a discovery: stored rather than derived from the sessions that exist |
 | `git.rs` | the working copy inside a sandbox as git describes it, and the operations on it. The status parser is pure, because git's output is the part that is easy to get subtly wrong and impossible to notice |

@@ -53,6 +53,38 @@ enum Command {
     Tokens,
     /// Stop accepting a token.
     Revoke { name: String },
+    /// The MCP servers in the config file, and what each managed one is doing.
+    Mcp {
+        /// Start, restart or stop one of them. Omit to list.
+        #[arg(long, value_name = "ACTION")]
+        action: Option<McpAction>,
+        /// Which one. Required with --action.
+        name: Option<String>,
+    },
+    /// The secret names this server holds. Never the values.
+    Secrets,
+    /// Store a secret a managed MCP server needs.
+    ///
+    /// The value is read from stdin, not from an argument: an argument lands in
+    /// the shell history and in `ps` output, and this is a credential that a
+    /// container will hold for months.
+    ///
+    ///   printf %s "$TOKEN" | sbxd secret SENTRY_TOKEN
+    Secret {
+        name: String,
+        /// Forget it instead of storing one.
+        #[arg(long)]
+        forget: bool,
+    },
+    /// The skills a client has uploaded into this server's library.
+    Skills,
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum McpAction {
+    Start,
+    Restart,
+    Stop,
 }
 
 #[derive(clap::Args)]
@@ -82,6 +114,10 @@ fn main() -> ExitCode {
         Some(Command::Pair { name, host, port }) => pair(&name, host, port),
         Some(Command::Tokens) => list_tokens(),
         Some(Command::Revoke { name }) => revoke(&name),
+        Some(Command::Mcp { action, name }) => mcp(action, name),
+        Some(Command::Secrets) => list_secrets(),
+        Some(Command::Secret { name, forget }) => secret(&name, forget),
+        Some(Command::Skills) => list_skills(),
     };
 
     match result {
@@ -94,6 +130,104 @@ fn main() -> ExitCode {
 }
 
 type Fallible = Result<(), Box<dyn std::error::Error>>;
+
+/// The catalog and what Docker says about it, or one action on one entry.
+///
+/// The same [`sbx_core::mcp`] calls the window's integrations screen makes, so a
+/// headless server is not a second-class one -- and so a state this prints
+/// cannot disagree with a state that screen shows.
+fn mcp(action: Option<McpAction>, name: Option<String>) -> Fallible {
+    let cfg = sbx_core::config::Config::load()?;
+    if let Some(action) = action {
+        let name = name.ok_or("which mcp server? give a name with --action")?;
+        let entry = cfg
+            .mcp()
+            .iter()
+            .find(|e| e.name() == name)
+            .ok_or_else(|| format!("no mcp server named `{name}` in {}", cfg.path.display()))?;
+        if !entry.is_managed() {
+            return Err(format!("`{name}` is a url this server does not run").into());
+        }
+        match action {
+            McpAction::Start => {
+                if let Some(e) = sbx_core::mcp::ensure(std::slice::from_ref(entry)).first() {
+                    return Err(e.clone().into());
+                }
+            }
+            McpAction::Restart => sbx_core::mcp::start(entry)?,
+            McpAction::Stop => sbx_core::mcp::stop(entry.name())?,
+        }
+    }
+
+    let live = sbx_core::mcp::statuses(cfg.mcp());
+    if live.is_empty() {
+        println!("no mcp servers in {}", cfg.path.display());
+        return Ok(());
+    }
+    println!("{:<16} {:<10} WHAT", "NAME", "STATE");
+    for s in &live {
+        println!(
+            "{:<16} {:<10} {}",
+            s.name,
+            if s.managed {
+                format!("{:?}", s.state).to_lowercase()
+            } else {
+                "external".into()
+            },
+            s.image.clone().unwrap_or_else(|| s.url.clone()),
+        );
+        if let Some(problem) = &s.problem {
+            println!("{:<16} {problem}", "");
+        }
+    }
+    Ok(())
+}
+
+fn list_secrets() -> Fallible {
+    let names = sbx_core::secrets::names();
+    if names.is_empty() {
+        println!("no secrets. `printf %s \"$TOKEN\" | sbxd secret <NAME>` stores one.");
+        return Ok(());
+    }
+    // Names only, and this is the only thing that ever prints them: there is no
+    // command that reads a value back, on purpose.
+    for name in names {
+        println!("{name}");
+    }
+    Ok(())
+}
+
+fn secret(name: &str, forget: bool) -> Fallible {
+    if forget {
+        sbx_core::secrets::forget(name)?;
+        println!("forgot `{name}`");
+        return Ok(());
+    }
+    use std::io::Read as _;
+    let mut value = String::new();
+    std::io::stdin().read_to_string(&mut value)?;
+    // Trailing newline trimmed and nothing else: a token with a space in it is
+    // not a thing, and `printf` without `\n` is not what anybody types.
+    sbx_core::secrets::set(name, value.trim_end_matches(['\n', '\r']))?;
+    println!("stored `{name}`; restart the servers that use it: sbxd mcp --action restart <name>");
+    Ok(())
+}
+
+fn list_skills() -> Fallible {
+    let library = sbx_core::skills::library();
+    if library.is_empty() {
+        println!(
+            "no uploaded skills in {}. A client pushes its own when it creates a session.",
+            sbx_core::skills::library_dir().display()
+        );
+        return Ok(());
+    }
+    println!("{:<24} FROM", "NAME");
+    for s in &library {
+        println!("{:<24} {}", s.name, s.origin);
+    }
+    Ok(())
+}
 
 fn serve(opts: Serve) -> Fallible {
     let dir = state::dir();
@@ -128,6 +262,29 @@ fn serve(opts: Serve) -> Fallible {
         // Not fatal. The gateway can come back, and a server that refuses to
         // start without it is one you cannot reach to find out why.
         Err(e) => eprintln!("sbxd: the gateway did not answer at startup: {e}"),
+    }
+
+    // The managed MCP containers, brought up with the server that owns them.
+    //
+    // Here rather than left to the first create, because a session is not the
+    // only thing that uses them: an agent already running reconnects to one
+    // that comes back, and a person opening the integrations screen after a
+    // reboot should see them running rather than have to press start. Anything
+    // already running is left exactly alone -- restarting it would drop the
+    // connections of every live session using it.
+    if let Ok(cfg) = sbx_core::config::Config::load() {
+        let managed = cfg.mcp().iter().filter(|e| e.is_managed()).count();
+        if managed > 0 {
+            let warnings = sbx_core::mcp::ensure(cfg.mcp());
+            println!(
+                "{managed} managed mcp server{} ({} could not start)",
+                if managed == 1 { "" } else { "s" },
+                warnings.len()
+            );
+            for warning in &warnings {
+                eprintln!("sbxd: {warning}");
+            }
+        }
     }
 
     let server = Arc::new(serve::Server {

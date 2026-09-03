@@ -1169,7 +1169,7 @@ impl App {
             base: self.cfg.base.clone(),
             policy: self.cfg.policy.clone(),
             providers: self.cfg.providers.clone(),
-            mcp: self.cfg.mcp().to_vec(),
+            mcp: self.cfg.mcp_servers(),
             skills: self.cfg.skills().to_vec(),
         }
     }

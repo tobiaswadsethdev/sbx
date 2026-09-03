@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, messageOf, type Paired, type ServerSummary } from "./api";
 import { ConnectDialog } from "./Connect";
 import { Dock } from "./Dock";
+import { IntegrationsDialog } from "./Integrations";
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
 import { NewProjectDialog } from "./NewProject";
@@ -56,6 +57,7 @@ export default function App() {
   const [creatingProject, setCreatingProject] = useState(false);
   const [creatingIn, setCreatingIn] = useState<Project | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [showingIntegrations, setShowingIntegrations] = useState(false);
 
   /// The shells each worktree has, and which tab is in front of it. Both are
   /// per worktree: switching away and back finds it as you left it, because a
@@ -221,6 +223,13 @@ export default function App() {
         <button className="new" disabled={!server} onClick={() => setCreatingProject(true)}>
           new project
         </button>
+        <button
+          className="new"
+          disabled={!server}
+          onClick={() => setShowingIntegrations(true)}
+        >
+          integrations
+        </button>
         <button className="new" onClick={() => setConnecting(true)}>
           servers
         </button>
@@ -330,6 +339,10 @@ export default function App() {
       )}
 
       {connect}
+
+      {showingIntegrations && server && (
+        <IntegrationsDialog server={server} onClose={() => setShowingIntegrations(false)} />
+      )}
 
       {creatingIn && server && (
         <NewWorktreeDialog

@@ -457,6 +457,68 @@ header .new:disabled { color: var(--dim); cursor: default; }
 .dialog .tick input { width: auto; }
 .dialog .hint { color: var(--dim); }
 
+/* The integrations screen. Wider than the create form because every row is a
+   name, a state, a description and buttons -- and because a container's own log
+   is the one thing here worth reading in full. */
+.dialog.wide { width: 760px; max-height: 82vh; overflow-y: auto; }
+
+.integration { margin-top: 16px; }
+.integration h3 {
+  margin: 0;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--dim);
+}
+.integration > .hint { margin: 2px 0 8px; max-width: 66ch; }
+
+.integration .row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid var(--line);
+}
+.integration .row-name { min-width: 130px; }
+.integration .row .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.integration .row-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+/* Inputs in a row are sized, not stretched: `.dialog input` is 100% wide,
+   which is right for the create form's stacked fields and turns every row here
+   into three lines. */
+.integration .row input { width: 190px; }
+.integration .secret-name { width: 170px; }
+.integration .row.new { border-top: 1px dashed var(--line); }
+.integration .row .yes { color: var(--ok); }
+.integration .row .no { color: var(--bad); }
+
+/* One state per colour, so the list is scannable without reading it -- the same
+   grammar the session list uses. `crashing` is the loud one: it is the state
+   that used to read as `running`, because Docker reports a container it is
+   restarting as up. */
+.mcp-state { font-size: 11px; min-width: 66px; }
+.mcp-state.running { color: var(--ok); }
+.mcp-state.crashing, .mcp-state.detached { color: var(--bad); font-weight: 700; }
+.mcp-state.stopped, .mcp-state.absent { color: var(--accent); }
+.mcp-state.unknown, .mcp-state.external { color: var(--dim); }
+
+.integration .problem { flex-basis: 100%; margin: 2px 0 0; color: var(--bad); max-width: 72ch; }
+.integration .log {
+  flex-basis: 100%;
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  max-height: 9em;
+  overflow: auto;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+.integration .actions { align-items: center; gap: 12px; }
+.integration .actions .hint { margin-right: auto; }
+
 /* The where-it-runs choice: the hint beside each is the part that matters, so
    it wraps under the label rather than being clipped on one line. */
 .dialog .kinds .tick { align-items: baseline; flex-wrap: wrap; }

@@ -312,13 +312,17 @@ const MCP_CONNECT_TIMEOUT: Duration = Duration::from_millis(500);
 /// that as "needs authentication", which sends anyone looking in the wrong
 /// direction entirely.
 ///
-/// Two shapes, checked differently because they fail differently. A container
-/// name is asked about through Docker, since the host cannot reach it by name at
-/// all -- only sandboxes on that network can. A published port is connected to,
-/// on the bridge gateway address the sandbox will use rather than on `localhost`,
-/// because a container published to `127.0.0.1` only is exactly the mistake that
-/// looks fine from the host and is unreachable from a sandbox.
-fn check_mcp(servers: &[mcp::Server]) -> Check {
+/// Three shapes, checked differently because they fail differently. A
+/// **managed** entry is asked of [`mcp::statuses`], which is the same answer the
+/// window's integrations screen shows -- one implementation, so a check that
+/// passes here cannot disagree with a screen that says something is wrong. An
+/// external **container name** is asked about through Docker, since the host
+/// cannot reach it by name at all -- only sandboxes on that network can. An
+/// external **published port** is connected to, on the bridge gateway address
+/// the sandbox will use rather than on `localhost`, because a container
+/// published to `127.0.0.1` only is exactly the mistake that looks fine from the
+/// host and is unreachable from a sandbox.
+fn check_mcp(entries: &[mcp::Entry]) -> Check {
     // Also the answer to "is Docker there at all": without the network there is
     // no address to connect to and no point asking about containers, and the
     // docker check above has already said why. Saying it a second time here
@@ -330,9 +334,13 @@ fn check_mcp(servers: &[mcp::Server]) -> Check {
         );
     };
     let mut problems: Vec<String> = Vec::new();
+    let live = mcp::statuses(entries);
 
-    for s in servers {
-        let problem = if s.via_host() {
+    for (entry, status) in entries.iter().zip(&live) {
+        let s = &entry.server;
+        let problem = if entry.is_managed() {
+            status.problem.clone()
+        } else if s.via_host() {
             (!port_open(&bridge, port_of(s))).then(|| {
                 format!(
                     "nothing is listening on {bridge}:{}, which is where `{}` points from inside a sandbox",
@@ -348,9 +356,9 @@ fn check_mcp(servers: &[mcp::Server]) -> Check {
         }
     }
 
-    let named = servers
+    let named = entries
         .iter()
-        .map(|s| s.name.as_str())
+        .map(|e| e.name())
         .collect::<Vec<_>>()
         .join(", ");
     if problems.is_empty() {
@@ -360,8 +368,10 @@ fn check_mcp(servers: &[mcp::Server]) -> Check {
         "mcp",
         problems.join("; "),
         format!(
-            "start it, or attach it with `docker network connect {} <container>`; \
-             or fix its url in the config file",
+            "a managed one starts from the window's integrations screen; \
+             one of your own can be attached with \
+             `docker network connect {} <container>`, or its url fixed in the \
+             config file",
             mcp::NETWORK
         ),
     )

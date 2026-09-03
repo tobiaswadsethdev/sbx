@@ -15,8 +15,10 @@ use openshell_client::CliClient;
 use sbx_core::backend::{Backend, Backends, Isolation};
 use sbx_core::session::Session;
 use sbx_core::store::Store;
-use sbx_core::{comments, config, endpoints, files, git, image, ops, policy, projects, repos};
-use sbx_proto::{Failure, GitOp, Outcome, Reply, Request};
+use sbx_core::{
+    comments, config, endpoints, files, git, image, ops, policy, projects, repos, secrets, skills,
+};
+use sbx_proto::{Failure, GitOp, McpOp, Outcome, Reply, Request};
 
 /// Answer one request.
 ///
@@ -140,7 +142,102 @@ pub fn dispatch(backends: &Backends, request: Request) -> Outcome {
             Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
         },
         Request::Create(new) => create(new),
+
+        // The integrations screen. Every one of these answers with the whole
+        // view rather than an acknowledgement, for the reason the git view does
+        // the same: they explain each other, and a client adjusting the list it
+        // had would be inventing an answer.
+        Request::Integrations => integrations(),
+        Request::Mcp { name, action } => match mcp_action(&name, action) {
+            Ok(()) => integrations(),
+            Err(e) => Failure::failed(e).into(),
+        },
+        Request::Secret { name, value } => {
+            let done = match value {
+                Some(v) => secrets::set(&name, &v),
+                None => secrets::forget(&name),
+            };
+            match done {
+                Ok(()) => integrations(),
+                Err(e) => Failure::failed(e).into(),
+            }
+        }
+        Request::UploadSkills { skills } => upload_skills(skills),
+        Request::ForgetSkill { name } => match skills::forget(&skills::library_dir(), &name) {
+            Ok(()) => integrations(),
+            Err(e) => Failure::failed(e).into(),
+        },
     }
+}
+
+/// The MCP catalog, the secret names and the skill library, as the server sees
+/// them now.
+fn integrations() -> Outcome {
+    match config::Config::load() {
+        Ok(cfg) => Reply::Integrations(sbx_core::integrations::view(&cfg)).into(),
+        Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
+    }
+}
+
+/// Start, restart or stop one managed server.
+///
+/// The catalog is the config file's, so a name a client sends is looked up
+/// rather than trusted: `stop` takes a container name, and one derived from an
+/// arbitrary string would let a client stop any container on the host whose name
+/// begins with the prefix.
+fn mcp_action(name: &str, action: McpOp) -> Result<(), String> {
+    let cfg = config::Config::load().map_err(|e| format!("could not read the config file: {e}"))?;
+    let entry = cfg
+        .mcp()
+        .iter()
+        .find(|e| e.name() == name)
+        .ok_or_else(|| format!("no mcp server named `{name}` in the config file"))?;
+    if !entry.is_managed() {
+        return Err(format!(
+            "`{name}` is a url this server does not run, so there is nothing here to {}",
+            match action {
+                McpOp::Stop => "stop",
+                _ => "start",
+            }
+        ));
+    }
+    match action {
+        McpOp::Start => sbx_core::mcp::ensure(std::slice::from_ref(entry))
+            .into_iter()
+            .next()
+            .map_or(Ok(()), Err),
+        McpOp::Restart => sbx_core::mcp::start(entry),
+        McpOp::Stop => sbx_core::mcp::stop(entry.name()),
+    }
+}
+
+/// Take a client's skills into the library.
+///
+/// Every one is attempted: a client uploads its whole `~/.claude/skills` before
+/// a create, and one skill that has grown a virtualenv should not stop the rest
+/// arriving. What went wrong comes back as a failure only when *nothing*
+/// landed, since a screen that re-reads the view can see for itself what is
+/// there.
+fn upload_skills(uploads: Vec<sbx_core::skills::Upload>) -> Outcome {
+    let dir = skills::library_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return Failure::failed(format!("could not make {}: {e}", dir.display())).into();
+    }
+    let mut problems = Vec::new();
+    let mut installed = 0;
+    for upload in &uploads {
+        match skills::install(&dir, upload) {
+            Ok(_) => installed += 1,
+            Err(e) => problems.push(e),
+        }
+    }
+    if installed == 0 && !problems.is_empty() {
+        return Failure::failed(problems.join("; ")).into();
+    }
+    if !problems.is_empty() {
+        eprintln!("sbxd: some skills were not stored: {}", problems.join("; "));
+    }
+    integrations()
 }
 
 fn review(comments: Vec<comments::Comment>) -> Reply {
@@ -249,6 +346,15 @@ fn create(new: sbx_core::ops::NewSession) -> Outcome {
         {
             eprintln!("sbxd: {}: could not build the image: {e}", draft.name);
             return;
+        }
+        // The managed MCP containers, before the seeder registers them with the
+        // agent. Here rather than in `ops::create` for the same reason the image
+        // build is here: it is a side effect on the host with output of its own,
+        // and `ops` is what both front ends share. A server that will not start
+        // is a warning -- the session is still worth having, and the agent will
+        // report the tool as unreachable, which the events pane explains.
+        for warning in sbx_core::mcp::ensure(cfg.mcp()) {
+            eprintln!("sbxd: {}: {warning}", draft.name);
         }
         // Progress is dropped rather than reported: the steps map onto states
         // the record already carries, and a channel per create would be a second

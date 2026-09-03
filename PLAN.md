@@ -2182,8 +2182,95 @@ for free, with nothing persisted client-side.
   the absence and the facts pane naming the directory -- and the same session
   created, diffed, attached and removed from the command line against a
   repository with no remote at all.
-- **33. Managed MCP and skill sync** — the catalog, container lifecycle, the
-  secret store, and the client-to-server skill upload.
+- **33. Managed MCP and skill sync** — DONE. The catalog, the container
+  lifecycle, the secret store, the client-to-server skill upload, and one screen
+  over all three. 567 tests.
+
+  Two documented procedures became two things the server owns. An MCP server was
+  a `docker run` line copied out of `docs/mcp.md` -- with the credential on
+  it -- and re-typed after every reboot; a skill was a path in the server's
+  config file, which cannot reach the `~/.claude/skills` of the machine the
+  window is on.
+
+  **A catalog entry has a url or an image, never both.** A url is a server
+  somebody else operates, exactly as before. An image makes it managed, and its
+  url is *derived* -- `http://sbx-mcp-<name>:<port>/mcp` -- because the thing
+  that names the container is the thing that joins it to the gateway's network.
+  That deletes both ways a hand-written url goes wrong: a name no sandbox can
+  resolve, and a `localhost` that means the sandbox itself. The keys that belong
+  to a managed entry are refused beside a url rather than ignored, and an entry
+  with both is refused outright: it would be a url pointing somewhere other than
+  the container beside it, which nobody notices until an agent reports a dead
+  tool.
+
+  What a session records is unchanged. `Entry` carries the `Server` a session is
+  given plus how to run it; the image, the environment and the secret names are
+  the server's business and stay out of every session record.
+
+  **Secrets go in and never come back out.** The store is
+  `$XDG_STATE_HOME/sbx/secrets.json`, 0600, beside the pairing tokens and the
+  TLS key; `secrets::get` is `pub(crate)`, so there is no path from a request
+  handler to a value and the compiler is what says so rather than everyone
+  remembering. The protocol carries names and whether each is set. `sbxd secret`
+  reads the value from stdin because an argument lands in a shell history and in
+  `ps`, and `start` passes it through the child's *environment* rather than as
+  `--env NAME=value` for the same reason -- verified by inspecting the running
+  container: the value was inside it and the argument list had only the name.
+
+  **The states are the whole of the feature's honesty**, and one of them took
+  measuring. `--restart unless-stopped` means Docker reports a container it is
+  in the middle of restarting as `Running: true`, so an image crash-looping on a
+  bad argument every two seconds read as healthy -- and did, on screen, until
+  the restart count went into the inspect. `crashing` is now its own state with
+  the container's own last output attached, which is the only thing that ever
+  says why an image will not stay up. `detached` is the other: running, and not
+  on `openshell-docker`, which is fine in `docker ps` and unreachable from every
+  sandbox. Also measured: 29.7.2 says `error: no such object` where older
+  versions said `Error response from daemon: No such object`, so matching the
+  capital reported every never-started container as "docker could not be asked",
+  which sends someone to look at their daemon.
+
+  **Skills got a library, at `$XDG_DATA_HOME/sbx/skills`.** The client reads and
+  packs its own `~/.claude/skills` on the Rust side of the bridge -- a webview
+  cannot see a home directory -- with the same `payload` the seeder uses, and
+  pushes them before every create as well as from the screen. That is what keeps
+  the pointer-not-copy property across two machines: editing a skill on the
+  laptop still means the next session gets the edit. Deliberately not the server
+  user's own skills directory, which is theirs.
+
+  The unpacking is where the care is, because a tar arriving from a client is a
+  program's output rather than a promise: it goes into a staging directory and
+  is checked before it is anywhere that matters -- exactly one top-level entry,
+  named what the upload says it is named, with a `SKILL.md` in it -- and the
+  name is refused by shape, since it decides a directory here and inside every
+  sandbox. GNU tar skips `..` members itself, which is a good default and not a
+  guarantee worth inheriting.
+
+  One screen, and **every action on it answers with the whole view**, re-read.
+  The same decision the git view made and for the same reason: these three
+  explain each other, since a container that will not start is usually a secret
+  that is not there. `sbx doctor`'s MCP check asks the same
+  `mcp::statuses` the screen does, so a check that passes cannot disagree with a
+  screen that says something is wrong, and `sbxd mcp`/`secrets`/`skills` give a
+  headless server the same answers.
+
+  **The generated bindings collided again, and silently this time.**
+  `integrations::View` and `policy::View` are one flat directory apart, so the
+  generated `Reply` carried `{ "reply": "integrations" } & View` pointing at the
+  *policy* view -- a shape mismatch a webview would have found at runtime.
+  Increment 31a hit the same thing with `files::Entry` and `git::Entry` and said
+  it only surfaced because the shapes differed. Four renames later
+  (`McpEntry`, `McpState`, `McpStatus`, `Integrations`), `gen-bindings.sh` now
+  counts `ts(export)` attributes against files written and fails when they
+  disagree, which was proved by re-introducing a collision and watching it fail.
+
+  Verified against real Docker and a real window: two managed entries brought up
+  by `sbxd` at startup, one reachable by container name from another container
+  on the gateway's network with its secret in its environment, one crash-looping
+  with its stack trace in the screen; `stop` taking the container away and the
+  row going to `absent`; and this machine's own `ship-pr` pushed into the
+  server's library from the window, listed by `sbxd skills` with the path it
+  came from.
 - **34. Task inbox** — GitHub, Azure DevOps and Jira; open-from-ticket and the
   publish round trip.
 - **35. Ship it** — notifications, usage and rate-limit display, and signing.

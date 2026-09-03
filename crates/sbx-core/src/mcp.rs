@@ -43,6 +43,12 @@ use serde::{Deserialize, Serialize};
 
 use openshell_client::PolicyUpdate;
 
+mod managed;
+
+pub use managed::{
+    CONTAINER_PREFIX, Entry, Managed, State, Status, container_name, ensure, start, statuses, stop,
+};
+
 /// The binaries an MCP endpoint is granted to.
 ///
 /// Both paths, because the two are the same program in different images and an
@@ -289,6 +295,8 @@ fn is_loopback(host: &str) -> bool {
 pub enum Error {
     #[error("has no name")]
     NoName,
+    #[error("is managed but names no image to run")]
+    NoImage,
     #[error("name may only contain letters, digits, dashes and underscores; `{0}` is not allowed")]
     BadName(char),
     #[error("`{0}` is already the name of another mcp server")]

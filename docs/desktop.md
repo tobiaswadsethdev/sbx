@@ -212,6 +212,34 @@ is the reason this is worth building rather than adopting an ADE built on git
 worktrees, and a denial you have to go looking for is one you will not find. It
 costs width the editor would otherwise have; that is the trade.
 
+## Integrations
+
+**integrations** in the header is what the server holds on your sessions'
+behalf: the MCP servers and what each one is doing, the secret names it has, and
+the skills this machine has pushed to it. Three things that used to be three
+procedures in a document -- a `docker run` line to copy, a `-e` argument in a
+shell history, a path in a config file that cannot reach your laptop.
+
+Every button there answers with the whole view, re-read, for the reason the git
+view does the same: they explain each other, and a container that will not start
+is usually a secret that is not there. A managed server has `start`, `restart`
+and `stop`; one of your own says `not ours to start`, because whoever runs it
+started it. A container that keeps exiting shows its own last output, which is
+the only thing that ever says why -- and otherwise a `docker logs` on a machine
+you may not be sitting at.
+
+A secret is stored and forgotten from here and never *shown*: the protocol
+carries names and whether each is set, and nothing in it returns a value. The
+warning about what an MCP server costs you is beside the list rather than only
+in [mcp.md](mcp.md), which is a document nobody re-reads at the moment it
+matters.
+
+The skills section pushes this machine's own `~/.claude/skills` to the server,
+which also happens before every create -- so editing a skill here still means
+the next session gets the edit, across two machines. The reading and packing
+happen on the Rust side of the bridge, because a webview cannot see your home
+directory. See [skills.md](skills.md).
+
 ## Starting work
 
 **new project** opens the picker; picking a checkout makes the project. Then

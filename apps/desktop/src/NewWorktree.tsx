@@ -98,6 +98,18 @@ function Form({
   const [facts, setFacts] = useState<Facts | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The skills on *this* machine, pushed to the server on submit. Read on the
+  // Rust side of the bridge: `~/.claude/skills` is here, and a webview cannot
+  // see it.
+  const [mine, setMine] = useState<string[]>([]);
+
+  useEffect(() => {
+    let live = true;
+    api.mySkills().then((names) => live && setMine(names));
+    return () => {
+      live = false;
+    };
+  }, []);
 
   // The repository has already answered two of these questions, so the form
   // arrives with them answered rather than asking. It costs subprocesses and a
@@ -138,6 +150,20 @@ function Form({
     setBusy(true);
     setError(null);
     try {
+      // **The skills go up before the session is asked for**, and that is what
+      // keeps the pointer-not-copy property across two machines: the server's
+      // library is a copy of a directory on this one, and re-pushing it here
+      // means editing a skill on your laptop still reaches the next session.
+      // Only when there are any -- the command refuses an empty upload rather
+      // than pretending it did something.
+      //
+      // A failure stops the create rather than being swallowed, because the
+      // server already tolerates the per-skill kind: it only fails this when
+      // *nothing* landed, which means the library is unwritable or the server
+      // is unreachable, and a session created on stale skills would be a quiet
+      // wrong answer.
+      if (mine.length > 0) await api.uploadSkills(server);
+
       const created = await api.create(server, {
         backend: kind,
         project: project.name,
@@ -308,6 +334,13 @@ function Form({
         <p className="hint">
           The agent is the server's own, so it reads the server user's own
           skills and MCP servers rather than being given a copy of them.
+        </p>
+      )}
+
+      {sandboxed && mine.length > 0 && (
+        <p className="hint">
+          {mine.length} skill{mine.length === 1 ? "" : "s"} from this machine will be pushed to the
+          server first: {mine.join(", ")}
         </p>
       )}
 

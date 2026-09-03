@@ -9,6 +9,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { Comment } from "./gen/Comment";
 import type { FailureKind } from "./gen/FailureKind";
+import type { Integrations } from "./gen/Integrations";
+import type { McpOp } from "./gen/McpOp";
 import type { Dir } from "./gen/Dir";
 import type { Event } from "./gen/Event";
 import type { Against } from "./gen/Against";
@@ -101,6 +103,22 @@ export const api = {
     invoke<Picked>("inspect", { server, path, branch }),
   newOptions: (server: string) => invoke<NewOptions>("new_options", { server }),
   create: (server: string, session: NewSession) => invoke<string>("create", { server, session }),
+
+  // What the server holds on your sessions' behalf. Every action answers with
+  // the whole view, re-read: a secret is usually what a container was waiting
+  // for, so the rest of the screen changes when one is stored.
+  integrations: (server: string) => invoke<Integrations>("integrations", { server }),
+  mcp: (server: string, name: string, action: McpOp) =>
+    invoke<Integrations>("mcp", { server, name, action }),
+  // The value goes one way: there is no command that reads one back.
+  secret: (server: string, name: string, value: string | null) =>
+    invoke<Integrations>("secret", { server, name, value }),
+  // Read and packed on the Rust side of the bridge, because `~/.claude/skills`
+  // is on *this* machine and a webview cannot see it.
+  uploadSkills: (server: string) => invoke<Integrations>("upload_skills", { server }),
+  forgetSkill: (server: string, name: string) =>
+    invoke<Integrations>("forget_skill", { server, name }),
+  mySkills: () => invoke<string[]>("my_skills"),
 };
 
 /// A rejected command, as the bridge sends it: see `Failed` in main.rs.

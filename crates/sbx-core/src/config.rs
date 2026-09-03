@@ -87,7 +87,7 @@ pub struct Config {
     /// global endpoint lists, this is one decision about what an agent of yours
     /// can reach, made once. A session records the servers it was created with,
     /// so changing the file changes the next session rather than this one.
-    pub mcp: Vec<mcp::Server>,
+    pub mcp: Vec<mcp::Entry>,
 }
 
 impl Config {
@@ -216,24 +216,69 @@ impl Config {
         // finding out about before a sandbox exists, and a loopback URL -- the
         // one mistake everybody makes -- looks perfectly fine until the agent
         // is running.
-        let mut mcp = Vec::new();
+        let mut mcp: Vec<mcp::Entry> = Vec::new();
         for entry in raw.mcp.into_iter().flatten() {
+            let named = |e: String| invalid("mcp", format!("`{}`: {e}", entry.name));
             let transport = match &entry.transport {
-                Some(t) => mcp::Transport::parse(t)
-                    .map_err(|e| invalid("mcp", format!("`{}`: {e}", entry.name)))?,
+                Some(t) => mcp::Transport::parse(t).map_err(|e| named(e.to_string()))?,
                 None => mcp::Transport::default(),
             };
-            let server = mcp::Server::parse(&entry.name, &entry.url, transport)
-                .map_err(|e| invalid("mcp", format!("`{}`: {e}", entry.name)))?;
+            // Two shapes, and exactly one of them per table. A `url` is a
+            // server somebody else runs; an `image` is one this server runs and
+            // whose url it derives -- and an entry with both would be a url
+            // pointing somewhere other than the container beside it, which is
+            // the sort of thing nobody notices until the agent reports a dead
+            // tool.
+            let resolved = match (&entry.url, &entry.image) {
+                (Some(_), Some(_)) => {
+                    return Err(named(
+                        "has both a url and an image; a url is a server you run                          elsewhere, an image is one this server runs"
+                            .into(),
+                    ));
+                }
+                (None, None) => {
+                    return Err(named("has neither a url nor an image".into()));
+                }
+                (Some(url), None) => {
+                    for (key, present) in [
+                        ("port", entry.port.is_some()),
+                        ("args", entry.args.is_some()),
+                        ("env", entry.env.is_some()),
+                        ("secrets", entry.secrets.is_some()),
+                    ] {
+                        if present {
+                            return Err(named(format!(
+                                "has a url, so `{key}` does nothing: this server                                  is not started here"
+                            )));
+                        }
+                    }
+                    mcp::Server::parse(&entry.name, url, transport)
+                        .map(mcp::Entry::external)
+                        .map_err(|e| named(e.to_string()))?
+                }
+                (None, Some(image)) => {
+                    let managed = mcp::Managed {
+                        image: image.clone(),
+                        port: entry.port.ok_or_else(|| {
+                            named("is managed but names no port to reach it on".into())
+                        })?,
+                        args: entry.args.clone().unwrap_or_default(),
+                        env: entry.env.clone().unwrap_or_default(),
+                        secrets: entry.secrets.clone().unwrap_or_default(),
+                    };
+                    mcp::Entry::managed(&entry.name, transport, managed)
+                        .map_err(|e| named(e.to_string()))?
+                }
+            };
             // The agent keys its servers by name, so two entries sharing one
             // means the second silently replaces the first.
-            if mcp.iter().any(|s: &mcp::Server| s.name == server.name) {
+            if mcp.iter().any(|e| e.name() == resolved.name()) {
                 return Err(invalid(
                     "mcp",
-                    mcp::Error::DuplicateName(server.name).to_string(),
+                    mcp::Error::DuplicateName(resolved.name().to_string()).to_string(),
                 ));
             }
-            mcp.push(server);
+            mcp.push(resolved);
         }
 
         Ok(Config {
@@ -265,8 +310,15 @@ impl Config {
     }
 
     /// The MCP servers a new session's agent is given.
-    pub fn mcp(&self) -> &[mcp::Server] {
+    pub fn mcp(&self) -> &[mcp::Entry] {
         &self.mcp
+    }
+
+    /// Just the servers, which is what a session is given and what its record
+    /// keeps. A managed entry's *definition* -- image, environment, the names
+    /// of its secrets -- is the server's business and not a session's.
+    pub fn mcp_servers(&self) -> Vec<mcp::Server> {
+        self.mcp.iter().map(|e| e.server.clone()).collect()
     }
 
     /// The skills copied into a new session.
@@ -303,8 +355,16 @@ struct Raw {
 #[serde(deny_unknown_fields)]
 struct RawMcp {
     name: String,
-    url: String,
+    /// A server somebody else runs. Exclusive with `image`.
+    url: Option<String>,
     transport: Option<String>,
+    /// A server this one runs. The rest of the keys below belong to it, and are
+    /// refused beside a `url` rather than ignored.
+    image: Option<String>,
+    port: Option<u16>,
+    args: Option<Vec<String>>,
+    env: Option<std::collections::BTreeMap<String, String>>,
+    secrets: Option<Vec<String>>,
 }
 
 #[derive(Debug)]
@@ -667,13 +727,85 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.mcp().len(), 2);
-        assert_eq!(c.mcp()[0].endpoint, "mcp-atlassian:9000");
+        assert_eq!(c.mcp()[0].server.endpoint, "mcp-atlassian:9000");
         assert_eq!(
-            c.mcp()[0].transport,
+            c.mcp()[0].server.transport,
             mcp::Transport::Http,
             "http is the transport a server has unless it says otherwise"
         );
-        assert_eq!(c.mcp()[1].transport, mcp::Transport::Sse);
+        assert_eq!(c.mcp()[1].server.transport, mcp::Transport::Sse);
+        assert!(
+            c.mcp().iter().all(|e| !e.is_managed()),
+            "a url is a server somebody else runs"
+        );
+    }
+
+    /// The managed shape: an image instead of a url, and the url derived from
+    /// the container this server will start. Deriving it is what removes the two
+    /// mistakes a hand-written url invites -- a name no sandbox resolves, and a
+    /// `localhost` that means the sandbox itself.
+    #[test]
+    fn a_managed_entry_is_described_rather_than_started_by_hand() {
+        let c = parse(
+            r#"
+            [[mcp]]
+            name = "sentry"
+            image = "ghcr.io/example/mcp-sentry:1.4"
+            port = 9000
+            args = ["--transport", "http"]
+            secrets = ["SENTRY_TOKEN"]
+            env = { SENTRY_ORG = "inet" }
+            "#,
+        )
+        .unwrap();
+        let e = &c.mcp()[0];
+        assert!(e.is_managed());
+        assert_eq!(e.server.url, "http://sbx-mcp-sentry:9000/mcp");
+        assert_eq!(e.server.endpoint, "sbx-mcp-sentry:9000");
+        let m = e.managed.as_ref().unwrap();
+        assert_eq!(m.image, "ghcr.io/example/mcp-sentry:1.4");
+        assert_eq!(m.secrets, ["SENTRY_TOKEN"]);
+        assert_eq!(m.env.get("SENTRY_ORG").unwrap(), "inet");
+        // What a session records is the server, not the recipe: the image and
+        // the secret names are the server's business.
+        assert_eq!(c.mcp_servers()[0].name, "sentry");
+    }
+
+    /// Each of these is a table that would half-work: a key that does nothing,
+    /// or a url pointing somewhere other than the container beside it.
+    #[test]
+    fn an_mcp_table_names_one_shape_or_the_other() {
+        let cases = [
+            (
+                r#"[[mcp]]
+                   name = "x"
+                   url = "http://a:9000/mcp"
+                   image = "an/image""#,
+                "both a url and an image",
+            ),
+            (
+                r#"[[mcp]]
+                   name = "x""#,
+                "neither a url nor an image",
+            ),
+            (
+                r#"[[mcp]]
+                   name = "x"
+                   image = "an/image""#,
+                "names no port",
+            ),
+            (
+                r#"[[mcp]]
+                   name = "x"
+                   url = "http://a:9000/mcp"
+                   secrets = ["TOKEN"]"#,
+                "`secrets` does nothing",
+            ),
+        ];
+        for (text, expected) in cases {
+            let err = parse(text).expect_err(text).to_string();
+            assert!(err.contains(expected), "expected `{expected}` in: {err}");
+        }
     }
 
     #[test]

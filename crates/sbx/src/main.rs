@@ -16,8 +16,8 @@ use openshell_client::CliClient;
 use sbx_client as remote;
 use sbx_core::backend::Backends;
 use sbx_core::{
-    config, doctor, endpoints, events, forge, image, ops, pane, policy, publish, repos, session,
-    store, toolchain, update,
+    config, doctor, endpoints, events, forge, image, mcp, ops, pane, policy, publish, repos,
+    session, store, toolchain, update,
 };
 
 use config::Config;
@@ -662,7 +662,7 @@ fn cmd_new(backends: &Backends, args: NewArgs, cfg: &Config) -> Fallible {
         // No flag to override this: an MCP server is a tool the agent has, set
         // up once in the config file next to the container that serves it, and
         // a URL typed on a command line would be a policy hole opened by hand.
-        mcp: cfg.mcp().to_vec(),
+        mcp: cfg.mcp_servers(),
         skills: cfg.skills().to_vec(),
         // Resolved before anything is created, so an unknown name fails here
         // rather than as a docker tag nothing has ever built.
@@ -678,6 +678,13 @@ fn cmd_new(backends: &Backends, args: NewArgs, cfg: &Config) -> Fallible {
     // toolchains, which is both its point and its limitation.
     if draft.backend == session::Kind::Sandbox {
         image::ensure_for(&draft.toolchains)?;
+    }
+    // The managed MCP containers, before the seeder points the agent at them.
+    // Here rather than in `ops::create` for the reason the image build is here:
+    // it is a side effect on this machine, with output of its own, and `ops` is
+    // what both front ends share.
+    for warning in mcp::ensure(cfg.mcp()) {
+        eprintln!("sbx: warning: {warning}");
     }
 
     let repo = draft.repo.clone();
@@ -860,7 +867,15 @@ fn cmd_config(cfg: &Config, init: bool, path_only: bool) -> Fallible {
         } else {
             cfg.mcp()
                 .iter()
-                .map(|m| format!("{} -> {}", m.name, m.url))
+                .map(|e| {
+                    // A managed entry's url is derived from the container this
+                    // server starts, so what is worth printing is the image it
+                    // runs; an external one is a url somebody else operates.
+                    match &e.managed {
+                        Some(m) => format!("{} -> {} (managed)", e.name(), m.image),
+                        None => format!("{} -> {}", e.name(), e.server.url),
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         },

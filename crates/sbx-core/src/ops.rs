@@ -345,7 +345,7 @@ pub fn new_options(backends: &Backends, cfg: &crate::config::Config) -> NewOptio
         default_providers: cfg.providers().to_vec(),
         default_base: cfg.base.clone(),
         skills: cfg.skills().iter().map(|s| s.name.clone()).collect(),
-        mcp: cfg.mcp().iter().map(|m| m.name.clone()).collect(),
+        mcp: cfg.mcp().iter().map(|e| e.name().to_string()).collect(),
     }
 }
 
@@ -494,12 +494,34 @@ impl NewSession {
             base: self.base.or_else(|| cfg.base.clone()),
             policy: self.policy,
             providers: self.providers,
-            mcp: cfg.mcp().to_vec(),
-            skills: cfg.skills().to_vec(),
+            mcp: cfg.mcp_servers(),
+            // The server's configured paths, then whatever a client has
+            // uploaded into the library that those do not already name. Config
+            // first because it is the explicit local decision: a path in the
+            // file names a specific directory on this machine, and an upload
+            // that happens to share its name is the same skill from further
+            // away.
+            skills: with_library(cfg.skills()),
             toolchains: toolchain::resolve(&self.toolchains).map_err(|e| e.to_string())?,
             start: self.start,
         })
     }
+}
+
+/// The configured skills, plus the uploaded ones they do not already name.
+///
+/// Both are global, for the reason the configured ones always were: this is what
+/// an agent of yours knows how to do, not a per-session choice. Which means a
+/// client uploading a skill changes what the *next* session gets and nothing
+/// about the ones already running, whose records say what they were handed.
+fn with_library(configured: &[skills::Skill]) -> Vec<skills::Skill> {
+    let mut out = configured.to_vec();
+    for skill in skills::library_skills() {
+        if !out.iter().any(|s| s.name == skill.name) {
+            out.push(skill);
+        }
+    }
+    out
 }
 
 /// Everything needed to start a session, however it was asked for.
@@ -1719,12 +1741,12 @@ mod tests {
     #[test]
     fn skills_and_mcp_come_from_the_config_and_not_from_the_request() {
         let cfg = crate::config::Config {
-            mcp: vec![mcp::Server {
+            mcp: vec![mcp::Entry::external(mcp::Server {
                 name: "jira".into(),
                 url: "http://mcp:9000/mcp".into(),
                 transport: mcp::Transport::default(),
                 endpoint: "mcp:9000".into(),
-            }],
+            })],
             ..Default::default()
         };
         let draft = NewSession {

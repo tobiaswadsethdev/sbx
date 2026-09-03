@@ -18,7 +18,13 @@ skills     = ["ship-pr"]                               # copied into every sessi
 
 [[mcp]]                                               # one table per MCP server
 name = "jira"                                         # see docs/mcp.md
-url  = "http://mcp-atlassian:9000/mcp"
+url  = "http://mcp-atlassian:9000/mcp"                # ... a server you run
+
+[[mcp]]
+name    = "sentry"                                    # ... or one sbxd runs
+image   = "ghcr.io/example/mcp-sentry:1.4"
+port    = 9000
+secrets = ["SENTRY_TOKEN"]                            # names; values live on the server
 ```
 
 Everything in it is a *default*: a flag on the command line wins, and so does an
@@ -67,6 +73,14 @@ specific answer wins:
 sessions, which with a server is not the machine with the window on it: a
 worktree is added to a checkout, and both the checkout and the worktree are the
 server's. See [worktrees.md](worktrees.md).
+
+Two things are deliberately *not* in this file. **Secrets** are named here and
+stored in `$XDG_STATE_HOME/sbx/secrets.json`, because a config file is the kind
+of thing people copy between machines and paste into an issue. And **uploaded
+skills** are not listed at all: what a client has pushed into the server's
+library is a directory listing rather than a decision, and a second list to keep
+in step with it would only ever be wrong. See [mcp.md](mcp.md) and
+[skills.md](skills.md).
 
 
 ---

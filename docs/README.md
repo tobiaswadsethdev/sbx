@@ -10,8 +10,8 @@
 | [worktrees.md](worktrees.md) | sessions with no sandbox: what they buy, and everything they give up |
 | [git-hosts.md](git-hosts.md) | GitHub and Azure DevOps, and how publishing keeps the token off your host |
 | [toolchains.md](toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
-| [skills.md](skills.md) | carrying your own skills into a sandbox |
-| [mcp.md](mcp.md) | MCP servers on the host, and what an MCP server costs you |
+| [skills.md](skills.md) | carrying your own skills into a sandbox, from either machine |
+| [mcp.md](mcp.md) | MCP servers the server runs or you do, their secrets, and what an MCP server costs you |
 | [server.md](server.md) | running `sbxd`, pairing a client on another machine, and what a token is worth |
 | [sandbox-image.md](sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode |
 | [architecture.md](architecture.md) | the crates, the modules, and three rules worth knowing before changing them |

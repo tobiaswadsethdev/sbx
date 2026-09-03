@@ -76,8 +76,11 @@ on the right.
   on an image variant carrying the SDK, and opens nuget for the SDK's binary and
   nothing else. The create form ticks it from what the repository contains.
 - **The parts of your setup that matter, carried in.** Skills are copied into
-  each sandbox; MCP servers run on the host, holding their own credentials, and
-  are granted per-binary like everything else.
+  each sandbox -- pushed from the machine you are sitting at, so editing one
+  reaches the next session even when the sessions are somewhere else. MCP
+  servers run on the host, holding their own credentials, and are granted
+  per-binary like everything else; `sbxd` can own their containers and their
+  secrets, with a screen that says what each one is doing.
 - **Publish from inside.** `sbx publish` pushes the branch and opens a pull
   request on GitHub or Azure DevOps without the token ever reaching your host.
 - **Two front ends over one server.** The same sessions from a terminal or from
@@ -163,6 +166,9 @@ sbx                                           # the TUI: n starts a session, no 
 
 sbxd serve                                    # serve this machine's sessions over one TLS port
 sbxd pair <client>                            # a string that pairs a client with this machine
+sbxd mcp                                      # the MCP catalog, and what each managed one is doing
+printf %s "$TOKEN" | sbxd secret <NAME>       # store a secret a managed MCP server needs
+sbxd skills                                   # the skills a client has uploaded here
 sbx connect <string>                          # pair with a server
 sbx --server=<name> ls                        # ... and ask it instead of the local gateway
 sbx watch <name> --server=<name>              # follow a session's events and state as they happen
@@ -195,7 +201,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 | [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |
 | [Toolchains](docs/toolchains.md)           | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [Skills](docs/skills.md)                   | carrying your own skills into a sandbox                               |
-| [MCP servers](docs/mcp.md)                 | servers on the host, and what an MCP server costs you                 |
+| [MCP servers](docs/mcp.md)                 | servers sbxd runs or you do, their secrets, and what one costs you    |
 | [The sandbox image](docs/sandbox-image.md) | what the image bakes in, and why the agent runs in auto mode          |
 | [Architecture](docs/architecture.md)       | how the pieces fit, for anyone reading the code                       |
 | [The manual loop](docs/manual-loop.md)     | the verified setup, run by hand                                       |

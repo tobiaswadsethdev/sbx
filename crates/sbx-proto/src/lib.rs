@@ -28,11 +28,13 @@ use sbx_core::comments::{Comment, NewComment};
 use sbx_core::events::Event;
 use sbx_core::files::{Dir, FileText};
 use sbx_core::git::{Against, FileDiff, Status as GitStatus};
+use sbx_core::integrations::View as IntegrationsView;
 use sbx_core::ops::{NewOptions, NewSession, Picked, Poll, Refreshed};
 use sbx_core::policy::View as PolicyView;
 use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
+use sbx_core::skills::Upload as SkillUpload;
 
 /// The protocol this build speaks.
 ///
@@ -194,6 +196,47 @@ pub enum Request {
     /// polled. A request that waited would hold a connection open for a minute
     /// to tell a client something the list was about to tell it anyway.
     Create(NewSession),
+
+    /// What the server holds on a session's behalf: the MCP catalog and what
+    /// each managed container is doing, the secret *names* it has, and the
+    /// skills a client has uploaded.
+    ///
+    /// One request for all three, because they explain each other: a container
+    /// that will not start is usually a secret that is not there.
+    Integrations,
+    /// Start, restart or stop one managed MCP server. Answers with
+    /// [`Reply::Integrations`], re-read.
+    Mcp { name: String, action: McpOp },
+    /// Store a secret under a name, or forget it.
+    ///
+    /// `value` is `None` to forget. There is no request that *reads* one back:
+    /// see [`sbx_core::secrets`].
+    Secret { name: String, value: Option<String> },
+    /// Push skills from a client's own `~/.claude/skills` into the server's
+    /// library.
+    ///
+    /// Sent before a create as well as from the integrations screen, which is
+    /// what keeps the pointer-not-copy property across two machines: editing a
+    /// skill on the client still means the next session gets the edit.
+    UploadSkills { skills: Vec<SkillUpload> },
+    /// Drop one uploaded skill. The client's own copy is untouched -- the
+    /// library is a cache of a directory on another machine.
+    ForgetSkill { name: String },
+}
+
+/// What to do to a managed MCP container.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum McpOp {
+    /// Start it if it is not running. Leaves a running one alone, because
+    /// restarting it would drop the agent connections of every live session
+    /// using it.
+    Start,
+    /// Recreate it from the catalog entry, running or not. What to press after
+    /// changing a secret.
+    Restart,
+    Stop,
 }
 
 impl Request {
@@ -207,7 +250,12 @@ impl Request {
             | Request::NewOptions
             | Request::Projects
             | Request::NewProject(_)
-            | Request::ForgetProject { .. } => None,
+            | Request::ForgetProject { .. }
+            | Request::Integrations
+            | Request::Mcp { .. }
+            | Request::Secret { .. }
+            | Request::UploadSkills { .. }
+            | Request::ForgetSkill { .. } => None,
             Request::Poll { name }
             | Request::Diff { name }
             | Request::Policy { name }
@@ -321,6 +369,10 @@ pub enum Reply {
     Created {
         name: String,
     },
+    /// The whole integrations view, which is what every action on it answers
+    /// with rather than an acknowledgement: starting a container or storing a
+    /// secret changes what the rest of the screen says.
+    Integrations(IntegrationsView),
 }
 
 impl From<Refreshed> for Reply {
@@ -484,10 +536,56 @@ mod tests {
             (Request::Diff { name: "a".into() }, "diff"),
             (Request::Policy { name: "a".into() }, "policy"),
             (Request::Events { name: "a".into() }, "events"),
+            (Request::Integrations, "integrations"),
+            (
+                Request::Mcp {
+                    name: "jira".into(),
+                    action: McpOp::Restart,
+                },
+                "mcp",
+            ),
+            (
+                Request::UploadSkills { skills: Vec::new() },
+                "upload-skills",
+            ),
         ] {
             let v: serde_json::Value = serde_json::to_value(&req).unwrap();
             assert_eq!(v["op"], op, "{req:?}");
         }
+    }
+
+    /// **A secret goes one way.** There is no request that reads one back and
+    /// no reply that carries a value, and this is the test that says so: the
+    /// integrations view is the whole of what a client learns about them, and it
+    /// carries names and whether each is set.
+    #[test]
+    fn nothing_on_the_wire_carries_a_secret_value_back() {
+        let set = Request::Secret {
+            name: "SENTRY_TOKEN".into(),
+            value: Some("sntrys_abc".into()),
+        };
+        let json = serde_json::to_string(&set).unwrap();
+        assert!(json.contains("sntrys_abc"), "it goes in: {json}");
+
+        // And the reply to it is the view, whose secret rows are a name and a
+        // boolean. Asserted on the type's own shape rather than on a string, so
+        // a field added to `secrets::Named` has to come past this test.
+        let view = IntegrationsView {
+            mcp: Vec::new(),
+            secrets: vec![sbx_core::secrets::Named {
+                name: "SENTRY_TOKEN".into(),
+                set: true,
+                used_by: vec!["sentry".into()],
+            }],
+            skills: Vec::new(),
+            configured_skills: Vec::new(),
+        };
+        let json = serde_json::to_string(&Reply::Integrations(view)).unwrap();
+        assert!(json.contains("SENTRY_TOKEN"), "{json}");
+        assert!(
+            !json.contains("sntrys"),
+            "a value must never be in a reply: {json}"
+        );
     }
 
     #[test]

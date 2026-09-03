@@ -35,6 +35,42 @@ know.
 [ warn ] skills       ship-pr: /home/you/.claude/skills/ship-pr has no SKILL.md, so the agent would not load it
 ```
 
+## When the sessions are on another machine
+
+"The host" means one machine until there is a server, and then it means two: the
+sessions run where `sbxd` is, and your skills are on the machine with the window
+on it. A path in the server's config file cannot reach them.
+
+So the server keeps a **library** at `$XDG_DATA_HOME/sbx/skills`, and the window
+pushes this machine's own `~/.claude/skills` into it. A session is given both --
+the paths in the server's config file, and everything in the library those do not
+already name.
+
+The push happens from the **integrations** screen, and again automatically before
+every create, which is what keeps the pointer-not-copy property across the extra
+hop: editing a skill on your laptop still means the next session gets the edit.
+Every skill the agent would load goes, not a selection -- a list to maintain in
+the window would go stale the first time you add a skill and forget.
+
+The reading and the packing happen on the *client's* side of the bridge, because
+that is where the directory is; the server unpacks each one into a staging
+directory and checks it before it lands, since a tar arriving from another
+machine is a program's output rather than a promise. An archive that unpacks as
+two things, as something other than its own name, or without a `SKILL.md` is
+refused and nothing is left behind.
+
+From the server, to see what has arrived:
+
+```sh
+sbxd skills          # what the library holds, and where each came from
+```
+
+The library is a cache of a directory on another machine, so removing an entry
+from the screen removes the server's copy and nothing of yours. Uploaded skills
+are global, like the configured ones, and for the same reason: this is what an
+agent of yours knows how to do, not a per-session choice. A running session keeps
+what it was handed.
+
 
 ---
 
