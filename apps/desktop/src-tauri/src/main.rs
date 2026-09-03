@@ -11,6 +11,24 @@
 //! warning is how a self-signed server becomes an unauthenticated one. So the
 //! webview never speaks to `sbxd` at all: it calls these, and `sbx-client` --
 //! the same client the CLI uses -- makes the connection.
+//!
+//! ## Every command is `(async)`, and it has to be
+//!
+//! **Tauri runs a synchronous command on the main thread** -- the one pumping
+//! the window's messages -- and every command in this file is blocking I/O: a
+//! TLS round trip to `sbxd`, which may itself shell out to the gateway CLI. The
+//! session list is re-read every three seconds and each read is an
+//! `openshell sandbox list` on the other end, so the window spent a large part
+//! of every second not pumping anything.
+//!
+//! Windows says so out loud: the title bar gains *(not responding)* and the
+//! window stops repainting. WebKitGTK on Linux has no such watchdog, which is
+//! the only reason this survived being built and run there for six increments.
+//!
+//! `#[tauri::command(async)]` on a synchronous function is Tauri's way of
+//! saying "run this on a worker thread": nothing here touches the window
+//! handle, and the frontend contract is unchanged -- `invoke` returns a promise
+//! either way.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -80,7 +98,7 @@ struct ServerSummary {
     address: String,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn servers() -> Result<Vec<ServerSummary>, Failed> {
     let remotes = Remotes::load().map_err(failed)?;
     Ok(remotes
@@ -114,7 +132,7 @@ struct Paired {
 /// server it refuses is refused for the same stated reason. This command exists
 /// because the alternative on Windows is installing a CLI whose other half
 /// cannot run there at all.
-#[tauri::command]
+#[tauri::command(async)]
 fn connect(pairing: String, name: Option<String>) -> Result<Paired, Failed> {
     let (remote, hello) = sbx_client::pair(&pairing, name.as_deref()).map_err(failed)?;
     Ok(Paired {
@@ -132,7 +150,7 @@ fn connect(pairing: String, name: Option<String>) -> Result<Paired, Failed> {
 /// It drops a token this machine holds and nothing on the server: the server
 /// stops accepting one when `sbxd revoke` says so, which is the half that
 /// matters if the token has been somewhere it should not.
-#[tauri::command]
+#[tauri::command(async)]
 fn forget(name: String) -> Result<Vec<ServerSummary>, Failed> {
     let mut remotes = Remotes::load().map_err(failed)?;
     if !remotes.remove(&name) {
@@ -164,13 +182,13 @@ macro_rules! expect_reply {
     };
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn sessions(server: String) -> Result<Vec<Session>, Failed> {
     let reply = remote(&server)?.call(Request::Ls).map_err(to_message)?;
     expect_reply!(reply, Reply::Ls { sessions, .. } => sessions, "a session list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn poll(server: String, name: String) -> Result<Poll, Failed> {
     let reply = remote(&server)?
         .call(Request::Poll { name })
@@ -178,7 +196,7 @@ fn poll(server: String, name: String) -> Result<Poll, Failed> {
     expect_reply!(reply, Reply::Poll(poll) => poll, "a poll")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn policy(server: String, name: String) -> Result<PolicyView, Failed> {
     let reply = remote(&server)?
         .call(Request::Policy { name })
@@ -186,7 +204,7 @@ fn policy(server: String, name: String) -> Result<PolicyView, Failed> {
     expect_reply!(reply, Reply::Policy(view) => view, "a policy")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn events(server: String, name: String) -> Result<Vec<Event>, Failed> {
     let reply = remote(&server)?
         .call(Request::Events { name })
@@ -194,7 +212,7 @@ fn events(server: String, name: String) -> Result<Vec<Event>, Failed> {
     expect_reply!(reply, Reply::Events { events } => events, "an event feed")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn diff(server: String, name: String) -> Result<String, Failed> {
     let reply = remote(&server)?
         .call(Request::Diff { name })
@@ -210,7 +228,7 @@ struct GitAnswer {
     status: GitStatus,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_status(server: String, name: String) -> Result<GitAnswer, Failed> {
     let reply = remote(&server)?
         .call(Request::GitStatus { name })
@@ -218,7 +236,7 @@ fn git_status(server: String, name: String) -> Result<GitAnswer, Failed> {
     expect_reply!(reply, Reply::Git { said, status } => GitAnswer { said, status }, "a git status")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git(server: String, name: String, action: GitOp) -> Result<GitAnswer, Failed> {
     let reply = remote(&server)?
         .call(Request::Git { name, action })
@@ -226,7 +244,7 @@ fn git(server: String, name: String, action: GitOp) -> Result<GitAnswer, Failed>
     expect_reply!(reply, Reply::Git { said, status } => GitAnswer { said, status }, "a git status")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn git_diff(
     server: String,
     name: String,
@@ -244,7 +262,7 @@ fn git_diff(
 }
 
 /// One directory of a worktree's working copy.
-#[tauri::command]
+#[tauri::command(async)]
 fn files(server: String, name: String, path: String) -> Result<Dir, Failed> {
     let reply = remote(&server)?
         .call(Request::Files { name, path })
@@ -252,7 +270,7 @@ fn files(server: String, name: String, path: String) -> Result<Dir, Failed> {
     expect_reply!(reply, Reply::Files(dir) => dir, "a directory")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn file(server: String, name: String, path: String) -> Result<FileText, Failed> {
     let reply = remote(&server)?
         .call(Request::File { name, path })
@@ -261,7 +279,7 @@ fn file(server: String, name: String, path: String) -> Result<FileText, Failed> 
 }
 
 /// The shells open beside a worktree's agent.
-#[tauri::command]
+#[tauri::command(async)]
 fn shells(server: String, name: String) -> Result<Vec<String>, Failed> {
     let reply = remote(&server)?
         .call(Request::Shells { name })
@@ -269,7 +287,7 @@ fn shells(server: String, name: String) -> Result<Vec<String>, Failed> {
     expect_reply!(reply, Reply::Shells { shells } => shells, "a shell list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn new_shell(server: String, name: String) -> Result<Vec<String>, Failed> {
     let reply = remote(&server)?
         .call(Request::NewShell { name })
@@ -277,7 +295,7 @@ fn new_shell(server: String, name: String) -> Result<Vec<String>, Failed> {
     expect_reply!(reply, Reply::Shells { shells } => shells, "a shell list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn kill_shell(server: String, name: String, tmux: String) -> Result<Vec<String>, Failed> {
     let reply = remote(&server)?
         .call(Request::KillShell { name, tmux })
@@ -285,7 +303,7 @@ fn kill_shell(server: String, name: String, tmux: String) -> Result<Vec<String>,
     expect_reply!(reply, Reply::Shells { shells } => shells, "a shell list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn comments(server: String, name: String) -> Result<Vec<Comment>, Failed> {
     let reply = remote(&server)?
         .call(Request::Comments { name })
@@ -293,7 +311,7 @@ fn comments(server: String, name: String) -> Result<Vec<Comment>, Failed> {
     expect_reply!(reply, Reply::Comments { comments } => comments, "a review")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn comment(server: String, name: String, comment: NewComment) -> Result<Vec<Comment>, Failed> {
     let reply = remote(&server)?
         .call(Request::Comment { name, comment })
@@ -301,7 +319,7 @@ fn comment(server: String, name: String, comment: NewComment) -> Result<Vec<Comm
     expect_reply!(reply, Reply::Comments { comments } => comments, "a review")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn uncomment(server: String, name: String, id: u64) -> Result<Vec<Comment>, Failed> {
     let reply = remote(&server)?
         .call(Request::Uncomment { name, id })
@@ -310,7 +328,7 @@ fn uncomment(server: String, name: String, id: u64) -> Result<Vec<Comment>, Fail
 }
 
 /// Send the review to the agent. Answers with the message it sent.
-#[tauri::command]
+#[tauri::command(async)]
 fn send_comments(server: String, name: String) -> Result<String, Failed> {
     let reply = remote(&server)?
         .call(Request::SendComments { name })
@@ -319,13 +337,13 @@ fn send_comments(server: String, name: String) -> Result<String, Failed> {
 }
 
 /// The projects on the server: what the tree is grouped under.
-#[tauri::command]
+#[tauri::command(async)]
 fn projects(server: String) -> Result<Vec<Project>, Failed> {
     let reply = remote(&server)?.call(Request::Projects).map_err(to_message)?;
     expect_reply!(reply, Reply::Projects { projects } => projects, "a project list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn new_project(server: String, project: NewProject) -> Result<Vec<Project>, Failed> {
     let reply = remote(&server)?
         .call(Request::NewProject(project))
@@ -333,7 +351,7 @@ fn new_project(server: String, project: NewProject) -> Result<Vec<Project>, Fail
     expect_reply!(reply, Reply::Projects { projects } => projects, "a project list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn forget_project(server: String, name: String) -> Result<Vec<Project>, Failed> {
     let reply = remote(&server)?
         .call(Request::ForgetProject { name })
@@ -346,13 +364,13 @@ fn forget_project(server: String, name: String) -> Result<Vec<Project>, Failed> 
 /// The server's and not this machine's: a checkout is only a way of naming a
 /// remote, but which checkouts exist is a fact about the machine that will do
 /// the cloning, and `repo_roots` is configured there.
-#[tauri::command]
+#[tauri::command(async)]
 fn repos(server: String) -> Result<Listing, Failed> {
     let reply = remote(&server)?.call(Request::Repos).map_err(to_message)?;
     expect_reply!(reply, Reply::Repos(listing) => listing, "a repository list")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn inspect(server: String, path: String, branch: Option<String>) -> Result<Picked, Failed> {
     let reply = remote(&server)?
         .call(Request::Inspect { path, branch })
@@ -360,7 +378,7 @@ fn inspect(server: String, path: String, branch: Option<String>) -> Result<Picke
     expect_reply!(reply, Reply::Inspect(picked) => picked, "repository facts")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn new_options(server: String) -> Result<NewOptions, Failed> {
     let reply = remote(&server)?
         .call(Request::NewOptions)
@@ -371,7 +389,7 @@ fn new_options(server: String) -> Result<NewOptions, Failed> {
 /// Ask for a session. Answers as soon as the server has accepted the request,
 /// which is before the session exists: it appears in the list a moment later,
 /// in `creating`.
-#[tauri::command]
+#[tauri::command(async)]
 fn create(server: String, session: NewSession) -> Result<String, Failed> {
     let reply = remote(&server)?
         .call(Request::Create(Box::new(session)))
@@ -381,7 +399,7 @@ fn create(server: String, session: NewSession) -> Result<String, Failed> {
 
 /// What the server holds on a session's behalf: the MCP catalog and what each
 /// managed container is doing, the secret names, and the uploaded skills.
-#[tauri::command]
+#[tauri::command(async)]
 fn integrations(server: String) -> Result<IntegrationsView, Failed> {
     let reply = remote(&server)?
         .call(Request::Integrations)
@@ -389,7 +407,7 @@ fn integrations(server: String) -> Result<IntegrationsView, Failed> {
     expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn mcp(server: String, name: String, action: McpOp) -> Result<IntegrationsView, Failed> {
     let reply = remote(&server)?
         .call(Request::Mcp { name, action })
@@ -403,7 +421,7 @@ fn mcp(server: String, name: String, action: McpOp) -> Result<IntegrationsView, 
 /// reply that carries one, so a token typed into this window is in this
 /// process's memory for the length of one request and in the server's store
 /// afterwards -- and never in the webview at all.
-#[tauri::command]
+#[tauri::command(async)]
 fn secret(server: String, name: String, value: Option<String>) -> Result<IntegrationsView, Failed> {
     let reply = remote(&server)?
         .call(Request::Secret { name, value })
@@ -421,7 +439,7 @@ fn secret(server: String, name: String, value: Option<String>) -> Result<Integra
 ///
 /// Every skill the agent would load, not a selection: a list to maintain here
 /// would be a list that goes stale the first time you add a skill and forget.
-#[tauri::command]
+#[tauri::command(async)]
 fn upload_skills(server: String) -> Result<IntegrationsView, Failed> {
     let mine = sbx_core::skills::local();
     if mine.is_empty() {
@@ -455,7 +473,7 @@ fn upload_skills(server: String) -> Result<IntegrationsView, Failed> {
     expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn forget_skill(server: String, name: String) -> Result<IntegrationsView, Failed> {
     let reply = remote(&server)?
         .call(Request::ForgetSkill { name })
@@ -465,7 +483,7 @@ fn forget_skill(server: String, name: String) -> Result<IntegrationsView, Failed
 
 /// What this machine has to upload, for a screen that wants to say so before
 /// anything is sent.
-#[tauri::command]
+#[tauri::command(async)]
 fn my_skills() -> Vec<String> {
     sbx_core::skills::local()
         .into_iter()
@@ -478,7 +496,7 @@ fn my_skills() -> Vec<String> {
 /// Read on the server, with the credentials in its store, so this window shows
 /// a list and never holds a token. Whatever could not be read comes back beside
 /// what could -- see `sbx_core::tracker`.
-#[tauri::command]
+#[tauri::command(async)]
 fn tasks(server: String) -> Result<Inbox, Failed> {
     let reply = remote(&server)?.call(Request::Tasks).map_err(to_message)?;
     expect_reply!(reply, Reply::Tasks(inbox) => inbox, "a task inbox")
@@ -568,7 +586,7 @@ fn send(app: &tauri::AppHandle, frame: ClientFrame) -> Result<(), Failed> {
         .ok_or_else(|| failed("the connection has ended"))
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn watch(
     app: tauri::AppHandle,
     server: String,
@@ -579,17 +597,17 @@ fn watch(
     send(&app, ClientFrame::Open { id, channel })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn unwatch(app: tauri::AppHandle, id: ChannelId) -> Result<(), Failed> {
     send(&app, ClientFrame::Close { id })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn terminal_input(app: tauri::AppHandle, id: ChannelId, data: String) -> Result<(), Failed> {
     send(&app, ClientFrame::Input { id, data })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn terminal_resize(
     app: tauri::AppHandle,
     id: ChannelId,

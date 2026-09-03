@@ -40,6 +40,22 @@ const TIMEOUT: Duration = Duration::from_secs(30);
 /// a socket that is already connected, which this one never becomes.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long to give one address when there is another to try.
+///
+/// **A hostname with several addresses must not cost the full timeout for each
+/// of them.** `localhost` on Windows resolves to `::1` before `127.0.0.1`, and
+/// `sbxd` binds one address -- so every request pays for the wrong one first.
+/// When the wrong one refuses, that is microseconds; when something drops the
+/// packets instead, which is what a mirrored-networking WSL loopback appears to
+/// do, it is the whole ten seconds. Every three seconds. The window stops
+/// repainting and Windows writes *(not responding)* in the title bar.
+///
+/// So the addresses get a fast pass first and the patient one only after all of
+/// them have refused quickly. A slow link whose first address is simply far
+/// away still connects: it is skipped in the fast pass and picked up in the
+/// second.
+const FIRST_PASS: Duration = Duration::from_secs(1);
+
 pub struct Response {
     pub status: u16,
     pub body: String,
@@ -177,11 +193,15 @@ fn connect(host: &str, port: u16) -> Result<TcpStream, Error> {
         return Err(Error::Connect(format!("{host} resolves to no address")));
     }
 
+    // Two passes: every address quickly, then every address patiently. One
+    // address is one pass -- there is nothing to be quick for.
     let mut last = None;
-    for addr in &addrs {
-        match TcpStream::connect_timeout(addr, CONNECT_TIMEOUT) {
-            Ok(tcp) => return Ok(tcp),
-            Err(e) => last = Some(e),
+    for timeout in passes(addrs.len()) {
+        for addr in &addrs {
+            match TcpStream::connect_timeout(addr, timeout) {
+                Ok(tcp) => return Ok(tcp),
+                Err(e) => last = Some(e),
+            }
         }
     }
     Err(Error::Connect(format!(
@@ -189,6 +209,20 @@ fn connect(host: &str, port: u16) -> Result<TcpStream, Error> {
         last.map(|e| e.to_string())
             .unwrap_or_else(|| "no address answered".into())
     )))
+}
+
+/// The timeout of each pass over the addresses.
+///
+/// Pure so the schedule can be asserted on: what matters is that a single
+/// address is still given the full timeout -- a wrong address in a pairing
+/// string is common, and failing it in a second would turn "that host is not
+/// there" into "that host is slow".
+fn passes(addresses: usize) -> Vec<Duration> {
+    if addresses <= 1 {
+        vec![CONNECT_TIMEOUT]
+    } else {
+        vec![FIRST_PASS, CONNECT_TIMEOUT]
+    }
 }
 
 fn strip_brackets(host: &str) -> &str {
@@ -221,6 +255,21 @@ fn parse(raw: &[u8]) -> Result<Response, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The schedule that keeps a window responsive on Windows without turning
+    /// "that host is not there" into "that host is slow".
+    #[test]
+    fn one_address_is_patient_and_several_are_tried_quickly_first() {
+        assert_eq!(passes(1), [CONNECT_TIMEOUT], "nothing else to try");
+        assert_eq!(passes(0), [CONNECT_TIMEOUT]);
+        // `localhost` on Windows: `::1` then `127.0.0.1`, and only one of them
+        // is listening.
+        assert_eq!(passes(2), [FIRST_PASS, CONNECT_TIMEOUT]);
+        assert!(FIRST_PASS < CONNECT_TIMEOUT);
+        // The worst case is still bounded by what a single address costs, plus
+        // the fast pass -- not by the number of addresses times ten seconds.
+        assert!(passes(4).iter().sum::<Duration>() < CONNECT_TIMEOUT * 2);
+    }
 
     #[test]
     fn a_response_splits_into_a_status_and_a_body() {
