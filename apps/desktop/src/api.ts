@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 import type { Comment } from "./gen/Comment";
 import type { FailureKind } from "./gen/FailureKind";
+import type { Inbox } from "./gen/Inbox";
 import type { Integrations } from "./gen/Integrations";
 import type { McpOp } from "./gen/McpOp";
 import type { Dir } from "./gen/Dir";
@@ -119,6 +120,10 @@ export const api = {
   forgetSkill: (server: string, name: string) =>
     invoke<Integrations>("forget_skill", { server, name }),
   mySkills: () => invoke<string[]>("my_skills"),
+
+  // The task inbox, read on the server with the credentials in its store: this
+  // window shows a list and never holds a token.
+  tasks: (server: string) => invoke<Inbox>("tasks", { server }),
 };
 
 /// A rejected command, as the bridge sends it: see `Failed` in main.rs.

@@ -8,6 +8,7 @@
 | [configuration.md](configuration.md) | `~/.config/sbx/config.toml`, and which default wins |
 | [policy.md](policy.md) | the rules being enforced, the audit feed, and acting on a denial |
 | [worktrees.md](worktrees.md) | sessions with no sandbox: what they buy, and everything they give up |
+| [inbox.md](inbox.md) | the task inbox: tickets in, sessions out, and the publish that writes back |
 | [git-hosts.md](git-hosts.md) | GitHub and Azure DevOps, and how publishing keeps the token off your host |
 | [toolchains.md](toolchains.md) | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [skills.md](skills.md) | carrying your own skills into a sandbox, from either machine |

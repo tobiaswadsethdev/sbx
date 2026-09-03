@@ -46,4 +46,5 @@ pub mod state;
 pub mod status;
 pub mod store;
 pub mod toolchain;
+pub mod tracker;
 pub mod update;

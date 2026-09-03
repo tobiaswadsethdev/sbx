@@ -424,6 +424,10 @@ pub struct Defaults {
     pub mcp: Vec<sbx_core::mcp::Server>,
     /// Skills copied into the sandbox. Carried, not chosen, like `mcp`.
     pub skills: Vec<sbx_core::skills::Skill>,
+    /// What a work branch is named under. Carried for the same reason as `mcp`:
+    /// so the terminal and the window and `sbx new` cannot name branches
+    /// differently on one machine.
+    pub branch_prefix: String,
 }
 
 /// One entry of the form's policy chooser.
@@ -500,6 +504,8 @@ pub struct Form {
     configured_providers: Option<Vec<String>>,
     mcp: Vec<sbx_core::mcp::Server>,
     skills: Vec<sbx_core::skills::Skill>,
+    /// What a work branch is named under; see [`Defaults::branch_prefix`].
+    branch_prefix: String,
     /// Why the provider list is empty, when the gateway could not be asked.
     providers_error: Option<String>,
     field: Field,
@@ -566,6 +572,7 @@ impl Form {
             configured_providers: defaults.providers.clone(),
             mcp: defaults.mcp.clone(),
             skills: defaults.skills.clone(),
+            branch_prefix: defaults.branch_prefix.clone(),
             providers_error,
             history,
             field: Field::Task,
@@ -706,6 +713,10 @@ impl Form {
             // backend is offered in the window, which is where a form can say
             // out loud what picking it gives up; see `docs/desktop.md`.
             backend: session::Kind::Sandbox,
+            // The convention, from the config file. No inbox here, so nothing
+            // is started from a ticket and nothing needs a branch of its own.
+            branch: Some(format!("{}/{name}", self.branch_prefix)),
+            ticket: None,
             // The terminal has no projects; see `Session::project`.
             project: None,
             name,

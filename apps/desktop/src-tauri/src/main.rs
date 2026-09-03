@@ -28,6 +28,7 @@ use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
 use sbx_core::integrations::View as IntegrationsView;
+use sbx_core::tracker::Inbox;
 use sbx_proto::{FailureKind, GitOp, McpOp, Reply, Request};
 use serde::Serialize;
 use tauri::{Emitter as _, Manager as _};
@@ -373,7 +374,7 @@ fn new_options(server: String) -> Result<NewOptions, Failed> {
 #[tauri::command]
 fn create(server: String, session: NewSession) -> Result<String, Failed> {
     let reply = remote(&server)?
-        .call(Request::Create(session))
+        .call(Request::Create(Box::new(session)))
         .map_err(to_message)?;
     expect_reply!(reply, Reply::Created { name } => name, "a created session")
 }
@@ -470,6 +471,17 @@ fn my_skills() -> Vec<String> {
         .into_iter()
         .map(|s| s.name)
         .collect()
+}
+
+/// The task inbox: what the server's trackers say is assigned to you.
+///
+/// Read on the server, with the credentials in its store, so this window shows
+/// a list and never holds a token. Whatever could not be read comes back beside
+/// what could -- see `sbx_core::tracker`.
+#[tauri::command]
+fn tasks(server: String) -> Result<Inbox, Failed> {
+    let reply = remote(&server)?.call(Request::Tasks).map_err(to_message)?;
+    expect_reply!(reply, Reply::Tasks(inbox) => inbox, "a task inbox")
 }
 
 /// The one streaming connection, and which server it is to.
@@ -639,6 +651,7 @@ fn main() {
             upload_skills,
             forget_skill,
             my_skills,
+            tasks,
             watch,
             unwatch,
             terminal_input,

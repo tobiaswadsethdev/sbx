@@ -20,15 +20,22 @@ import type { Kind } from "./gen/Kind";
 import type { NewOptions } from "./gen/NewOptions";
 import type { Picked } from "./gen/Picked";
 import type { Project } from "./gen/Project";
+import type { Task } from "./gen/Task";
 
 export function NewWorktreeDialog({
   server,
   project,
+  from,
   onClose,
   onCreated,
 }: {
   server: string;
   project: Project;
+  // The ticket this is being started from, when it came from the inbox. What it
+  // fills in -- the task, the name, the branch -- is the server's answer,
+  // derived in `sbx_core::tracker`, so the terminal and the window would agree
+  // if the terminal had an inbox.
+  from?: Task | null;
   onClose: () => void;
   onCreated: (name: string) => void;
 }) {
@@ -61,6 +68,7 @@ export function NewWorktreeDialog({
           <Form
             server={server}
             project={project}
+            from={from ?? null}
             options={options}
             onClose={onClose}
             onCreated={onCreated}
@@ -75,18 +83,28 @@ export function NewWorktreeDialog({
 function Form({
   server,
   project,
+  from,
   options,
   onClose,
   onCreated,
 }: {
   server: string;
   project: Project;
+  from: Task | null;
   options: NewOptions;
   onClose: () => void;
   onCreated: (name: string) => void;
 }) {
-  const [task, setTask] = useState("");
-  const [name, setName] = useState("");
+  // A ticket fills three fields and leaves the rest alone. The prompt carries
+  // the key and the link as well as the title: the agent's first instruction is
+  // the whole of what it knows about why it exists, and `PROJ-123` in it is
+  // what makes its commits and its pull request say so too.
+  const [task, setTask] = useState(from ? `${from.key}: ${from.title}\n\n${from.url}` : "");
+  const [name, setName] = useState(from?.session_name ?? "");
+  // Only sent when it came from a ticket. Left empty, the server names the
+  // branch by the convention in its own config file -- which is the one place
+  // that decides it.
+  const [branch] = useState(from?.branch ?? "");
   // The sandbox is the default here for the same reason it is the default
   // everywhere: it is the point of the tool, and the other one gives up the
   // guarantee it exists to make.
@@ -167,6 +185,10 @@ function Form({
       const created = await api.create(server, {
         backend: kind,
         project: project.name,
+        branch: branch || null,
+        // What makes the round trip possible: the session records the ticket,
+        // and publishing comments the pull request back onto it.
+        ticket: from ? ticketOf(from) : null,
         // Blank means "derive it", which is what `sbx new` without `--name`
         // does. The rule lives on the server so there is one of it.
         name: name.trim() || null,
@@ -199,6 +221,16 @@ function Form({
       </header>
 
       <p className="origin">{project.repo}</p>
+      {from && (
+        <p className="hint">
+          From{" "}
+          <a href={from.url} target="_blank" rel="noreferrer">
+            {from.key}
+          </a>{" "}
+          in {from.tracker} — the branch will be <code>{from.branch}</code>, and publishing will
+          comment the pull request back onto it.
+        </p>
+      )}
       {facts && <Drift facts={facts} sandboxed={sandboxed} />}
 
       {/* The first question, because it decides which of the others mean
@@ -329,6 +361,16 @@ function Form({
             <dt>mcp</dt>
             <dd>{options.mcp.join(", ") || <span className="hint">none</span>}</dd>
           </dl>
+          {options.mcp.length > 0 && (
+            // The cost of an MCP server, said where a session is about to be
+            // given one rather than only in a document. Everything that server
+            // can do is now something this agent can do with your credentials,
+            // and the gateway sees every call as the same `POST /mcp`.
+            <p className="hint">
+              Each of those is something the agent can do with the server's credentials — see{" "}
+              <b>integrations</b>.
+            </p>
+          )}
         </>
       ) : (
         <p className="hint">
@@ -353,6 +395,22 @@ function Form({
       </div>
     </>
   );
+}
+
+/// The ticket, as the session records it.
+///
+/// Hand-built from the task rather than sent whole: a `Task` carries the row's
+/// presentation -- its status, its suggested name -- and a session needs only
+/// what a write-back is addressed with.
+function ticketOf(task: Task) {
+  return {
+    tracker: task.tracker,
+    kind: task.kind,
+    id: task.id,
+    key: task.key,
+    url: task.url,
+    repo: task.repo,
+  };
 }
 
 /// What stays behind on the server's checkout.

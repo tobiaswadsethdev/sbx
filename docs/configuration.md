@@ -12,6 +12,7 @@ policy     = "feature-work"                           # a template, or a path to
 providers  = ["claude-oauth", "azure-pat"]            # credentials for a new session
 repo_roots = ["~/dev", "~/work"]                      # where the picker looks
 worktree_root = "~/.local/share/sbx/worktrees"        # where worktree sessions go
+branch_prefix = "tobias"                              # <prefix>/<name> for a work branch
 refresh    = "1s"                                     # how often the TUI reads the sandboxes
 
 skills     = ["ship-pr"]                               # copied into every session
@@ -25,6 +26,12 @@ name    = "sentry"                                    # ... or one sbxd runs
 image   = "ghcr.io/example/mcp-sentry:1.4"
 port    = 9000
 secrets = ["SENTRY_TOKEN"]                            # names; values live on the server
+
+[[tracker]]                                           # the task inbox
+kind    = "jira"                                      # see docs/inbox.md
+site    = "https://your-org.atlassian.net"
+email   = "you@example.com"
+secret  = "JIRA_API_TOKEN"
 ```
 
 Everything in it is a *default*: a flag on the command line wins, and so does an

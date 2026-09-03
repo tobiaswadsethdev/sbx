@@ -14,9 +14,11 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, messageOf, type Paired, type ServerSummary } from "./api";
 import { ConnectDialog } from "./Connect";
 import { Dock } from "./Dock";
+import { InboxDialog } from "./Inbox";
 import { IntegrationsDialog } from "./Integrations";
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
+import type { Task } from "./gen/Task";
 import { NewProjectDialog } from "./NewProject";
 import { NewWorktreeDialog } from "./NewWorktree";
 import type { Against } from "./gen/Against";
@@ -58,6 +60,9 @@ export default function App() {
   const [creatingIn, setCreatingIn] = useState<Project | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [showingIntegrations, setShowingIntegrations] = useState(false);
+  const [showingInbox, setShowingInbox] = useState(false);
+  /// The ticket a create was started from, carried from the inbox to the form.
+  const [fromTask, setFromTask] = useState<Task | null>(null);
 
   /// The shells each worktree has, and which tab is in front of it. Both are
   /// per worktree: switching away and back finds it as you left it, because a
@@ -220,6 +225,9 @@ export default function App() {
           {sessions.length} worktree{sessions.length === 1 ? "" : "s"} in {projects.length} project
           {projects.length === 1 ? "" : "s"}
         </span>
+        <button className="new" disabled={!server} onClick={() => setShowingInbox(true)}>
+          inbox
+        </button>
         <button className="new" disabled={!server} onClick={() => setCreatingProject(true)}>
           new project
         </button>
@@ -344,13 +352,34 @@ export default function App() {
         <IntegrationsDialog server={server} onClose={() => setShowingIntegrations(false)} />
       )}
 
+      {showingInbox && server && (
+        <InboxDialog
+          server={server}
+          projects={projects}
+          currentProject={sessions.find((s) => s.name === selected)?.project ?? null}
+          onClose={() => setShowingInbox(false)}
+          onStart={(project, task) => {
+            // Straight into the create form, pre-filled: the inbox's whole
+            // point is that starting work on a ticket is one step.
+            setShowingInbox(false);
+            setFromTask(task);
+            setCreatingIn(project);
+          }}
+        />
+      )}
+
       {creatingIn && server && (
         <NewWorktreeDialog
           server={server}
           project={creatingIn}
-          onClose={() => setCreatingIn(null)}
+          from={fromTask}
+          onClose={() => {
+            setCreatingIn(null);
+            setFromTask(null);
+          }}
           onCreated={(name) => {
             setCreatingIn(null);
+            setFromTask(null);
             // Selected before it exists, on purpose: the record is written a
             // second or two in, and the next poll finds it.
             setSelected(name);

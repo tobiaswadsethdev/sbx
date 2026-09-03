@@ -17,6 +17,7 @@ use sbx_core::session::Session;
 use sbx_core::store::Store;
 use sbx_core::{
     comments, config, endpoints, files, git, image, ops, policy, projects, repos, secrets, skills,
+    tracker,
 };
 use sbx_proto::{Failure, GitOp, McpOp, Outcome, Reply, Request};
 
@@ -141,7 +142,7 @@ pub fn dispatch(backends: &Backends, request: Request) -> Outcome {
             Ok(cfg) => Reply::NewOptions(ops::new_options(backends, &cfg)).into(),
             Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
         },
-        Request::Create(new) => create(new),
+        Request::Create(new) => create(*new),
 
         // The integrations screen. Every one of these answers with the whole
         // view rather than an acknowledgement, for the reason the git view does
@@ -166,6 +167,15 @@ pub fn dispatch(backends: &Backends, request: Request) -> Outcome {
         Request::ForgetSkill { name } => match skills::forget(&skills::library_dir(), &name) {
             Ok(()) => integrations(),
             Err(e) => Failure::failed(e).into(),
+        },
+
+        // The inbox. A tracker that could not be read is a warning inside the
+        // reply rather than a failed request: one tracker being down should not
+        // empty the list of the others, and an inbox silently missing rows is
+        // the failure worth avoiding here.
+        Request::Tasks => match config::Config::load() {
+            Ok(cfg) => Reply::Tasks(tracker::inbox(cfg.trackers(), cfg.branch_prefix())).into(),
+            Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
         },
     }
 }

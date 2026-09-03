@@ -461,12 +461,28 @@ pub struct NewSession {
     pub repo: String,
     pub task: String,
     pub base: Option<String>,
+    /// The work branch. `None` means `<branch_prefix>/<name>`, which is what
+    /// every session had before the inbox existed.
+    ///
+    /// Sent rather than derived because a session started from a ticket wants
+    /// the branch its tracker's hooks and its reviewers look for; validated on
+    /// the server, since it reaches a shell inside the sandbox and a remote.
+    #[serde(default)]
+    pub branch: Option<String>,
     pub policy: String,
     pub providers: Vec<String>,
     /// Toolchain names. Resolved against the server's own list, so an unknown
     /// one fails here rather than as a docker tag nothing has ever built.
     pub toolchains: Vec<String>,
     pub start: bool,
+    /// The ticket this is being started from, if it came from the inbox.
+    ///
+    /// Trusted from the client, unlike the skills and the MCP servers next to
+    /// it, and the difference is what each *is*: those are grants, and this is
+    /// a note about where the work came from. What it can cost is a comment
+    /// posted on the wrong ticket in a tracker the config file already names.
+    #[serde(default)]
+    pub ticket: Option<crate::tracker::Ticket>,
 }
 
 impl NewSession {
@@ -485,6 +501,19 @@ impl NewSession {
                 .ok_or("could not work out a name for this session; give it one")?,
         };
         session::validate_name(&name).map_err(|e| e.to_string())?;
+        let branch = match self
+            .branch
+            .map(|b| b.trim().to_string())
+            .filter(|b| !b.is_empty())
+        {
+            Some(b) => b,
+            // The configured prefix, applied here so it applies to every
+            // session rather than only to the ones started from a ticket --
+            // and so `Session::new`'s own default stays what it has always
+            // been for anything constructing one directly.
+            None => format!("{}/{name}", cfg.branch_prefix()),
+        };
+        session::validate_branch(&branch).map_err(|e| e.to_string())?;
         Ok(Draft {
             name,
             backend: self.backend,
@@ -492,6 +521,8 @@ impl NewSession {
             repo: self.repo,
             task: self.task,
             base: self.base.or_else(|| cfg.base.clone()),
+            branch: Some(branch),
+            ticket: self.ticket,
             policy: self.policy,
             providers: self.providers,
             mcp: cfg.mcp_servers(),
@@ -535,6 +566,11 @@ pub struct Draft {
     /// Which backend runs it. See [`session::Kind`]; the sandbox is the default
     /// everywhere, including for a `Draft` built by hand in a test.
     pub backend: session::Kind,
+    /// The work branch, already validated. `None` means the convention.
+    pub branch: Option<String>,
+    /// The ticket this session is for, if any. Recorded on the session so a
+    /// publish can write back to it.
+    pub ticket: Option<crate::tracker::Ticket>,
     /// The project this worktree is being started in, if it was started from
     /// one. See [`Session::project`].
     pub project: Option<String>,
@@ -684,6 +720,10 @@ pub fn create(
     let mut s = Session::new(draft.name.clone(), draft.repo.clone(), draft.task.clone());
     s.backend = draft.backend;
     s.base_branch = draft.base.clone();
+    s.ticket = draft.ticket.clone();
+    if let Some(branch) = &draft.branch {
+        s.work_branch = branch.clone();
+    }
     s.project = draft.project.clone();
     s.providers = draft.providers.clone();
     s.toolchains = toolchain::labels(&draft.toolchains);
@@ -1094,7 +1134,25 @@ pub fn publish(
     session: &Session,
     opts: &publish::Options,
 ) -> Result<publish::Outcome, String> {
-    let outcome = publish::publish(backend, session, opts).map_err(|e| e.to_string())?;
+    let mut outcome = publish::publish(backend, session, opts).map_err(|e| e.to_string())?;
+
+    // The round trip, and it is the *last* thing: the branch is pushed and the
+    // pull request is open by now, so a tracker that cannot be written to costs
+    // a comment rather than the publish. Each failure comes back as a warning
+    // beside whatever the push itself had to say.
+    //
+    // Only with a pull request to point at. A `--no-pr` publish, or one whose
+    // pull request could not be opened, has nothing to comment -- and a comment
+    // saying "the branch was pushed" is not what a ticket wants.
+    if let Some(ticket) = &session.ticket
+        && let Some(pr) = &outcome.pull_request
+    {
+        let cfg = crate::config::Config::load().unwrap_or_default();
+        outcome
+            .warnings
+            .extend(crate::tracker::on_publish(cfg.trackers(), ticket, pr));
+    }
+
     if outcome.pushed {
         // Published is a fact about the branch, not the sandbox, so it is
         // recorded even when the pull request could not be opened: the work has
@@ -1808,6 +1866,64 @@ mod tests {
             script.contains(r"'\''"),
             "the apostrophe was not escaped: {script}"
         );
+    }
+
+    /// The branch a session works on is the config file's convention, and a
+    /// ticket's is its own. Both go through here, and a name git would refuse
+    /// is refused against the request that sent it rather than against a push.
+    #[test]
+    fn a_branch_is_the_convention_unless_the_request_names_one() {
+        let cfg = crate::config::Config {
+            branch_prefix: Some("tobias".into()),
+            ..Default::default()
+        };
+        let plain = NewSession {
+            name: Some("readme-fix".into()),
+            repo: "https://github.com/o/thing.git".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap();
+        assert_eq!(plain.branch.as_deref(), Some("tobias/readme-fix"));
+
+        let ticket = crate::tracker::Ticket {
+            tracker: "inet-jira".into(),
+            kind: crate::tracker::Kind::Jira,
+            id: "PROJ-123".into(),
+            key: "PROJ-123".into(),
+            url: "https://example.atlassian.net/browse/PROJ-123".into(),
+            repo: None,
+        };
+        let from_ticket = NewSession {
+            name: Some("proj-123-add-a-changelog".into()),
+            branch: Some("  tobias/PROJ-123-add-a-changelog  ".into()),
+            ticket: Some(ticket.clone()),
+            repo: "https://github.com/o/thing.git".into(),
+            ..Default::default()
+        }
+        .into_draft(&cfg)
+        .unwrap();
+        assert_eq!(
+            from_ticket.branch.as_deref(),
+            Some("tobias/PROJ-123-add-a-changelog"),
+            "trimmed, and otherwise the client's own"
+        );
+        // Carried through, unlike the skills and the MCP servers beside it: a
+        // ticket is a note about where the work came from rather than a grant,
+        // and it is what makes the publish write back.
+        assert_eq!(from_ticket.ticket, Some(ticket));
+
+        for bad in ["a branch", "-leading", "double//slash", "dots..", "ends/"] {
+            let e = NewSession {
+                name: Some("x".into()),
+                branch: Some(bad.into()),
+                repo: "https://github.com/o/thing.git".into(),
+                ..Default::default()
+            }
+            .into_draft(&cfg)
+            .expect_err(bad);
+            assert!(!e.is_empty(), "{bad}");
+        }
     }
 
     /// A worktree records the project it was started in, so the tree can group

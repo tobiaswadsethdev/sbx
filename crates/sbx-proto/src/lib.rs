@@ -35,6 +35,7 @@ use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_core::skills::Upload as SkillUpload;
+use sbx_core::tracker::Inbox;
 
 /// The protocol this build speaks.
 ///
@@ -195,7 +196,12 @@ pub enum Request {
     /// `creating`, `seeding`, `ready` -- are already on the session and already
     /// polled. A request that waited would hold a connection open for a minute
     /// to tell a client something the list was about to tell it anyway.
-    Create(NewSession),
+    ///
+    /// Boxed, and only this one: a `NewSession` is three times the size of
+    /// every other request put together -- eight fields of `String` and an
+    /// optional ticket -- and an unboxed variant would make every `Request`
+    /// that big, including the `Poll` that goes out every second.
+    Create(Box<NewSession>),
 
     /// What the server holds on a session's behalf: the MCP catalog and what
     /// each managed container is doing, the secret *names* it has, and the
@@ -222,6 +228,14 @@ pub enum Request {
     /// Drop one uploaded skill. The client's own copy is untouched -- the
     /// library is a cache of a directory on another machine.
     ForgetSkill { name: String },
+
+    /// The task inbox: what the configured trackers say is assigned to you.
+    ///
+    /// Read server-side, with the credentials in the server's store, so a
+    /// client shows a list rather than holding a token. Whatever could not be
+    /// read comes back beside what could -- an inbox missing a tracker's rows
+    /// is invisible otherwise.
+    Tasks,
 }
 
 /// What to do to a managed MCP container.
@@ -255,7 +269,8 @@ impl Request {
             | Request::Mcp { .. }
             | Request::Secret { .. }
             | Request::UploadSkills { .. }
-            | Request::ForgetSkill { .. } => None,
+            | Request::ForgetSkill { .. }
+            | Request::Tasks => None,
             Request::Poll { name }
             | Request::Diff { name }
             | Request::Policy { name }
@@ -373,6 +388,8 @@ pub enum Reply {
     /// with rather than an acknowledgement: starting a container or storing a
     /// secret changes what the rest of the screen says.
     Integrations(IntegrationsView),
+    /// The inbox, and whatever could not be read.
+    Tasks(Inbox),
 }
 
 impl From<Refreshed> for Reply {
@@ -548,6 +565,7 @@ mod tests {
                 Request::UploadSkills { skills: Vec::new() },
                 "upload-skills",
             ),
+            (Request::Tasks, "tasks"),
         ] {
             let v: serde_json::Value = serde_json::to_value(&req).unwrap();
             assert_eq!(v["op"], op, "{req:?}");

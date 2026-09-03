@@ -3,6 +3,7 @@ import type { Kind } from "./Kind";
 import type { Server } from "./Server";
 import type { Skill } from "./Skill";
 import type { State } from "./State";
+import type { Ticket } from "./Ticket";
 
 export type Session = { name: string, 
 /**
@@ -48,7 +49,15 @@ project: string | null,
 /**
  * Branch cloned from; `None` means the remote's default.
  */
-base_branch: string | null, work_branch: string, task: string, policy: string | null, providers: Array<string>, 
+base_branch: string | null, work_branch: string, task: string, 
+/**
+ * The ticket this session was started from, if it was started from one.
+ *
+ * On the record rather than looked up, because the round trip happens at
+ * publish time -- minutes or days later, from a possibly different client,
+ * after the inbox has moved on. See [`crate::tracker::Ticket`].
+ */
+ticket: Ticket | null, policy: string | null, providers: Array<string>, 
 /**
  * Skills copied into this session when it was created, and where each came
  * from on the host. A copy, not a link -- see [`crate::skills`] -- so this

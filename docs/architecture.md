@@ -74,6 +74,7 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `endpoints.rs` | the global allow and block lists applied to every new session |
 | `events.rs` | the allow/deny feed, merged and kept on disk per session |
 | `forge.rs` | which git host a session works against, derived from the repo URL |
+| `tracker.rs` | the task inbox: GitHub, Azure DevOps and Jira over REST, and the comment and transition a publish writes back. The parsers are pure and tested against captured answers, because reading somebody else's JSON is the part that is easy to get wrong quietly |
 | `publish.rs` | push and open a pull request, both from inside the sandbox -- or, for a worktree session, with the server's own git credentials |
 | `image.rs` | the sandbox image, with its whole build context embedded in the binary |
 | `toolchain.rs` | the toolchains, their image variants, and the registry each one opens |

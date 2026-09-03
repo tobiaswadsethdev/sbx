@@ -83,6 +83,10 @@ on the right.
   secrets, with a screen that says what each one is doing.
 - **Publish from inside.** `sbx publish` pushes the branch and opens a pull
   request on GitHub or Azure DevOps without the token ever reaching your host.
+- **An inbox, and the loop back to it.** What GitHub, Azure DevOps and Jira say
+  is assigned to you, read by the server; one button turns a ticket into a
+  session with the task, the name and the branch already right, and publishing
+  comments the pull request back onto the ticket and moves it.
 - **Two front ends over one server.** The same sessions from a terminal or from
   a window, and the window can be on a different machine from the sandboxes --
   see [docs/server.md](docs/server.md).
@@ -155,6 +159,7 @@ sbx attach <name>                             # attach to the agent; Ctrl-b d to
 sbx diff <name>                               # what the agent has changed so far
 sbx policy <name>                             # the policy the gateway is enforcing
 sbx events <name>                             # recent allow/deny decisions
+sbx tasks                                     # the task inbox: what is assigned to you
 sbx policies                                  # the policy templates shipped in the binary
 sbx toolchains                                # the toolchains a sandbox image can be built with
 sbx config                                    # the defaults in force, and where they came from
@@ -198,6 +203,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 | [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |
 | [Policy and events](docs/policy.md)        | what is enforced, the audit feed, and acting on a denial              |
 | [Worktree sessions](docs/worktrees.md)     | sessions with no sandbox: what they buy, and everything they give up  |
+| [The task inbox](docs/inbox.md)            | tickets in, sessions out, and the publish that writes back            |
 | [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |
 | [Toolchains](docs/toolchains.md)           | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [Skills](docs/skills.md)                   | carrying your own skills into a sandbox                               |

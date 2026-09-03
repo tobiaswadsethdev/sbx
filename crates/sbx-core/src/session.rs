@@ -42,6 +42,14 @@ pub const SEED_SCRIPT_PATH: &str = "/sandbox/.sbx/seed.sh";
 /// losing its connection, and so its output can be scraped with capture-pane
 /// without depending on anything host-side.
 pub const TMUX_SESSION: &str = "agent";
+/// What a work branch is named under unless the config file says otherwise.
+///
+/// Every session's branch has been `sbx/<name>` until now, and this keeps that
+/// the default. The reason it is configurable at all is the task inbox: a
+/// session started from a ticket wants the branch its tracker's commit hooks
+/// and its reviewers already look for, which is `<you>/PROJ-123-description`.
+pub const DEFAULT_BRANCH_PREFIX: &str = "sbx";
+
 /// Container image sbx runs sandboxes from: the community base plus tmux.
 pub const IMAGE: &str = "sbx-base:latest";
 /// The repository half of [`IMAGE`], which the toolchain variants share.
@@ -317,6 +325,60 @@ impl std::fmt::Display for Kind {
     }
 }
 
+/// Whether a string is usable as a git branch name.
+///
+/// A subset of what `git check-ref-format` allows, and deliberately: the branch
+/// arrives from a client, is interpolated into shell scripts inside the sandbox
+/// and is pushed to a remote, so what it may contain is decided by shape rather
+/// than by escaping. `#` is in the set because Azure DevOps work item keys are
+/// `AB#1234` and git is perfectly happy with one.
+pub fn validate_branch(branch: &str) -> Result<(), BranchError> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Err(BranchError::Empty);
+    }
+    if branch.len() > MAX_BRANCH {
+        return Err(BranchError::TooLong);
+    }
+    if let Some(bad) = branch
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | '#')))
+    {
+        return Err(BranchError::BadChar(bad));
+    }
+    // Each of these is a name git itself refuses, and refusing them here means
+    // the failure lands on the request rather than on a push three minutes
+    // later.
+    if branch.contains("..")
+        || branch.contains("//")
+        || branch.starts_with(['/', '-', '.'])
+        || branch.ends_with(['/', '.'])
+        || branch.ends_with(".lock")
+    {
+        return Err(BranchError::BadShape);
+    }
+    Ok(())
+}
+
+/// Long enough for `name/PROJ-1234-a-description-of-some-length`, short enough
+/// that it is still a branch name rather than a paragraph.
+const MAX_BRANCH: usize = 120;
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum BranchError {
+    #[error("branch name is empty")]
+    Empty,
+    #[error("branch name is longer than {MAX_BRANCH} characters")]
+    TooLong,
+    #[error("branch names may hold letters, digits and `._/-#`; `{0}` is not allowed")]
+    BadChar(char),
+    #[error(
+        "that is not a branch name git would accept: no `..` or `//`, and it may not start with \
+         `/`, `-` or `.` or end with `/`, `.` or `.lock`"
+    )]
+    BadShape,
+}
+
 /// Lifecycle state.
 ///
 /// The agent-derived states (`Running`, `Waiting`, `Idle`) are not set yet;
@@ -402,6 +464,13 @@ pub struct Session {
     pub work_branch: String,
     #[serde(default)]
     pub task: String,
+    /// The ticket this session was started from, if it was started from one.
+    ///
+    /// On the record rather than looked up, because the round trip happens at
+    /// publish time -- minutes or days later, from a possibly different client,
+    /// after the inbox has moved on. See [`crate::tracker::Ticket`].
+    #[serde(default)]
+    pub ticket: Option<crate::tracker::Ticket>,
     #[serde(default)]
     pub policy: Option<String>,
     #[serde(default)]
@@ -471,12 +540,13 @@ impl Session {
             sandbox: sandbox_name(&name),
             workdir: None,
             tmux: TMUX_SESSION.to_string(),
-            work_branch: format!("sbx/{name}"),
+            work_branch: format!("{DEFAULT_BRANCH_PREFIX}/{name}"),
             name,
             repo,
             project: None,
             base_branch: None,
             task,
+            ticket: None,
             policy: None,
             providers: Vec::new(),
             skills: Vec::new(),

@@ -17,7 +17,7 @@ use sbx_client as remote;
 use sbx_core::backend::Backends;
 use sbx_core::{
     config, doctor, endpoints, events, forge, image, mcp, ops, pane, policy, publish, repos,
-    session, store, toolchain, update,
+    session, store, toolchain, tracker, update,
 };
 
 use config::Config;
@@ -88,6 +88,8 @@ enum Command {
         name: String,
     },
 
+    /// The task inbox: what the configured trackers say is assigned to you
+    Tasks,
     /// Print a session's recent allow/deny decisions, newest first.
     Events {
         /// Session name.
@@ -337,6 +339,14 @@ fn main() -> ExitCode {
         Some(Command::Events { name }) => match server(chosen.as_deref()) {
             Ok(Some(r)) => remote_events(&r, &name),
             Ok(None) => cmd_events(&backends, &name),
+            Err(e) => Err(e),
+        },
+        Some(Command::Tasks) => match server(chosen.as_deref()) {
+            Ok(Some(r)) => remote_tasks(&r),
+            // Locally, the trackers are read the same way `sbxd` reads
+            // them -- one function, so a headless machine sees what the window
+            // would.
+            Ok(None) => cmd_tasks(&cfg),
             Err(e) => Err(e),
         },
         Some(Command::Watch { name }) => match server(chosen.as_deref()) {
@@ -604,6 +614,62 @@ fn remote_events(remote: &remote::Remote, name: &str) -> Fallible {
     Ok(())
 }
 
+fn remote_tasks(remote: &remote::Remote) -> Fallible {
+    let sbx_proto::Reply::Tasks(inbox) = remote.call(sbx_proto::Request::Tasks)? else {
+        return Err("the server answered something other than a task inbox".into());
+    };
+    print_tasks(&inbox);
+    Ok(())
+}
+
+fn cmd_tasks(cfg: &Config) -> Fallible {
+    if cfg.trackers().is_empty() {
+        return Err(format!(
+            "no trackers configured; add a `[[tracker]]` table to {} (see docs/inbox.md)",
+            cfg.path.display()
+        )
+        .into());
+    }
+    print_tasks(&tracker::inbox(cfg.trackers(), cfg.branch_prefix()));
+    Ok(())
+}
+
+/// The inbox, for whichever client fetched it.
+///
+/// Shared for the reason the session table is: two clients printing the same
+/// thing differently is the drift the protocol exists to prevent.
+fn print_tasks(inbox: &tracker::Inbox) {
+    for warning in &inbox.warnings {
+        eprintln!("sbx: {warning}");
+    }
+    if inbox.tasks.is_empty() {
+        println!("nothing assigned to you");
+        return;
+    }
+    println!(
+        "{:<12} {:<12} {:<14} {:<40} BRANCH",
+        "KEY", "TRACKER", "STATE", "TITLE"
+    );
+    for t in &inbox.tasks {
+        println!(
+            "{:<12} {:<12} {:<14} {:<40} {}",
+            t.key,
+            t.tracker,
+            truncate(&t.status, 14),
+            truncate(&t.title, 40),
+            t.branch,
+        );
+    }
+}
+
+/// Cut to a column width, so one long title does not fold the whole table.
+fn truncate(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    s.chars().take(width.saturating_sub(1)).collect::<String>() + "…"
+}
+
 fn cmd_new(backends: &Backends, args: NewArgs, cfg: &Config) -> Fallible {
     // Refused rather than ignored: each of these is an instruction to a gateway
     // that will not be involved, and a session created with a policy flag that
@@ -644,6 +710,14 @@ fn cmd_new(backends: &Backends, args: NewArgs, cfg: &Config) -> Fallible {
         } else {
             session::Kind::Sandbox
         },
+        // The convention, from the config file, because this builds a `Draft`
+        // directly rather than going through `NewSession::into_draft` -- which
+        // is the server's one place for this and is where the window's answer
+        // comes from. Left `None` it would be `sbx/<name>` whatever the file
+        // says, which is two answers on one machine.
+        branch: Some(format!("{}/{name}", cfg.branch_prefix())),
+        // No inbox here: a session started from a ticket is the window's.
+        ticket: None,
         // The terminal has no projects; see `Session::project`.
         project: None,
         name,

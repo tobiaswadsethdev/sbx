@@ -212,6 +212,24 @@ is the reason this is worth building rather than adopting an ADE built on git
 worktrees, and a denial you have to go looking for is one you will not find. It
 costs width the editor would otherwise have; that is the trade.
 
+## The inbox
+
+**inbox** in the header is what your trackers say is assigned to you, read on
+the server with the credentials in its store — so this window shows a list and
+never holds a token. A row is a ticket; `start` turns it into a session with the
+task, the name and the branch already right, and the session remembers which
+ticket it came from, so publishing comments the pull request back onto it.
+
+A row carries a project chooser, because **a ticket does not know which
+repository it is about**: a Jira issue names a project and a work item names an
+area path, and neither is a clone URL. The tracker says what to do and you say
+where. It opens on the project of whatever is selected in the tree, which is the
+most likely answer.
+
+A tracker that could not be read says so at the top of the list rather than
+leaving its rows quietly missing — an inbox short of a tracker looks exactly
+like having nothing assigned. [inbox.md](inbox.md) is the whole of it.
+
 ## Integrations
 
 **integrations** in the header is what the server holds on your sessions'

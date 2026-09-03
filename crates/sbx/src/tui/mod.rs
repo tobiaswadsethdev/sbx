@@ -1170,6 +1170,7 @@ impl App {
             policy: self.cfg.policy.clone(),
             providers: self.cfg.providers.clone(),
             mcp: self.cfg.mcp_servers(),
+            branch_prefix: self.cfg.branch_prefix().to_string(),
             skills: self.cfg.skills().to_vec(),
         }
     }

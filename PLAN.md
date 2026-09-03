@@ -2271,8 +2271,78 @@ for free, with nothing persisted client-side.
   row going to `absent`; and this machine's own `ship-pr` pushed into the
   server's library from the window, listed by `sbxd skills` with the path it
   came from.
-- **34. Task inbox** — GitHub, Azure DevOps and Jira; open-from-ticket and the
-  publish round trip.
+- **34. Task inbox** — DONE. GitHub, Azure DevOps and Jira read server-side,
+  open-from-ticket, and the publish round trip. 580 tests.
+
+  **REST for what the interface shows, MCP for what the agent gets**, and the
+  split is the point rather than a duplication. A list on a timer rendered as
+  rows, and a tool the agent calls when it decides to, are different consumers
+  with different failure modes: a list that cannot be fetched is a pane with a
+  message in it, a tool that cannot be reached is a session whose agent gives up
+  on a step. One mechanism serving both would serve both badly.
+
+  Read with `curl`, which is already on any machine that runs this and already
+  how `publish.rs` talks to Azure DevOps from inside a sandbox; the alternative
+  is an HTTP client, a TLS root store and a redirect policy pulled in for six
+  requests. **The credential goes in on stdin**: `curl -K -` reads the url and
+  the `Authorization` header from standard input, so a token is never in `ps`
+  output or in the text of a failed spawn -- the same care the secret store took
+  in 33, and every value interpolated into that config is quoted, because an
+  unescaped quote there can start a line that names a file to write.
+
+  Three trackers, one `Task`. Nine renderings or one shape, and the id is the
+  tracker's own -- a work item id, an issue number, a Jira key -- because that
+  is what a comment is addressed to. A GitHub task also carries its repository,
+  since `/issues` spans several and a comment has to go to the right one. Each
+  reader is split in two so the parsing is testable against captured answers,
+  which is the only way to have any confidence in a reader of somebody else's
+  JSON: a pull request coming back from the issues endpoint, a WIQL answer of
+  ids with no second request to make, a Jira status nobody may rename for us.
+
+  **A ticket names its session and its branch**, and both are decided on the
+  server so the two front ends could not disagree. The key keeps its case in the
+  branch, because a tracker's commit hooks and a reviewer both look for
+  `PROJ-123`, and loses it in the session name, which has to satisfy
+  `validate_name`. That needed `branch_prefix` in the config file and a
+  `branch` on the request -- the first work branch that is not `sbx/<name>`
+  since increment 1 -- so `session::validate_branch` refuses what git would
+  before it reaches a shell in a sandbox and a remote.
+
+  **A ticket does not know which repository it is about.** A Jira issue names a
+  project and a work item names an area path; neither is a clone URL, and
+  guessing from a name would be wrong exactly where it matters. So the row
+  carries a project chooser, opening on the project of whatever is selected in
+  the tree: the tracker says what to do and you say where.
+
+  The round trip is the last thing a publish does, and both halves are
+  best-effort: by then the branch is pushed and the pull request is open, so a
+  tracker that cannot be written to costs a comment and not the publish. Jira is
+  moved by *transition*, matched by name against what that issue can actually do
+  from where it is -- a workflow only offers some of them -- and a name that is
+  not among them comes back saying which are, because Jira's own answer names
+  neither. Azure DevOps is a `System.State` patch with the json-patch content
+  type. GitHub has no status to move to and says so rather than doing nothing.
+
+  **The bug the loopback test existed to find**: curl reads a `-H` string with
+  no colon in it as an instruction to *remove* a header, so building the
+  credential as `Basic <token>` and passing it as a header sent the request with
+  no `Authorization` at all. Every tracker would have answered 401 and every
+  message would have blamed the token. Nothing in the unit tests could see it --
+  the fix is one `format!` -- so there is now a test that sends a real request
+  to a listener on `127.0.0.1` and reads the headers off the wire, which also
+  covers the Atlassian Document Format a Jira comment has to be and the
+  transition lookup.
+
+  `sbx doctor` grew a check, because a tracker whose credential is not in the
+  store produces an inbox **silently missing its rows**, which looks exactly
+  like having nothing assigned to you. `sbx tasks` prints the same inbox the
+  window shows, locally or through a server.
+
+  Verified end to end against a tracker on loopback: three tickets read over the
+  protocol, one started from the window, and the session's record carrying
+  `tobias/INET-4821-order-backfill-throws-on-an-empty-batch` and the ticket it
+  came from. Against a real Jira, Azure DevOps or GitHub it is unverified: that
+  needs credentials in the server's store, which are the owner's to put there.
 - **35. Ship it** — notifications, usage and rate-limit display, and signing.
   Windows packaging and the install story for a server that is not local landed
   early, in increment 31c.

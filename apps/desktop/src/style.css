@@ -492,6 +492,24 @@ header .new:disabled { color: var(--dim); cursor: default; }
 .integration .row .yes { color: var(--ok); }
 .integration .row .no { color: var(--bad); }
 
+/* An inbox row: the key, the title, what kind and what state, and where to
+   start it. The title takes the slack because it is the part you read. */
+.integration .row.task .row-name a { color: var(--accent); text-decoration: none; }
+.integration .row.task .row-name a:hover { text-decoration: underline; }
+.integration .task-title {
+  flex: 1;
+  min-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The type and the state are two facts, not one phrase: without the gap
+   `Bug In Progress` reads as a single string. */
+.integration .task-type, .integration .task-status { color: var(--dim); font-size: 11px; }
+.integration .task-type { margin-right: 4px; }
+.integration .task-status { min-width: 10ch; }
+.integration .row.task select { width: auto; max-width: 160px; }
+
 /* One state per colour, so the list is scannable without reading it -- the same
    grammar the session list uses. `crashing` is the loud one: it is the state
    that used to read as `running`, because Docker reports a container it is

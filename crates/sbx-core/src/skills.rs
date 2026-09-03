@@ -237,7 +237,12 @@ pub fn payload(source: &Path) -> Result<String, Error> {
 
 /// Standard base64, padded. Written out rather than pulled in: it is fifteen
 /// lines, and the alternative is a dependency for one call.
-fn base64(bytes: &[u8]) -> String {
+///
+/// Public because it has a second caller now -- [`crate::tracker`] builds Basic
+/// credentials with it -- and the alternative was a second copy of the padding
+/// logic, which is the part that is easy to get wrong. Its decoder lives in
+/// [`crate::files::decode_base64`], beside the reader that needed one first.
+pub fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {

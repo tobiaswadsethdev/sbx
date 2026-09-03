@@ -11,7 +11,9 @@ use openshell_client::OpenShell;
 
 use crate::config::{self, Config};
 use crate::mcp;
+use crate::secrets;
 use crate::skills;
+use crate::tracker;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Level {
@@ -463,6 +465,49 @@ fn check_skills(configured: &[skills::Skill]) -> Check {
     )
 }
 
+/// Whether the trackers the inbox reads can be read.
+///
+/// A tracker whose credential is not in the store produces an inbox that is
+/// silently *missing rows* -- which looks exactly like having nothing assigned
+/// to you, and is the same class of quiet failure as a stale provider name or
+/// an MCP container that is not running.
+///
+/// Checked against the store rather than by making a request: a name with no
+/// value is the failure worth catching, and asking three trackers over the
+/// network would make `doctor` take seconds and fail on a train.
+fn check_trackers(sources: &[tracker::Source]) -> Check {
+    let stored = secrets::names();
+    let problems: Vec<String> = sources
+        .iter()
+        .filter_map(|s| {
+            if let Some(problem) = s.problem() {
+                return Some(problem);
+            }
+            (!stored.iter().any(|n| n == &s.secret)).then(|| {
+                format!(
+                    "{}: no value stored for `{}`, so its tasks will not appear",
+                    s.name, s.secret
+                )
+            })
+        })
+        .collect();
+    let named = sources
+        .iter()
+        .map(|s| s.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if problems.is_empty() {
+        return Check::ok("trackers", named);
+    }
+    Check::warn(
+        "trackers",
+        problems.join("; "),
+        "store it with `printf %s \"$TOKEN\" | sbxd secret <NAME>`, or from the \
+         window's integrations screen"
+            .to_string(),
+    )
+}
+
 /// `config` is the load result rather than a [`Config`], because a file that
 /// cannot be read is exactly the kind of thing this command exists to say out
 /// loud -- every other command refuses to run until it is fixed, so this is the
@@ -615,6 +660,11 @@ pub fn run(client: &dyn OpenShell, config: &Result<Config, config::Error>) -> Ve
         && !cfg.skills().is_empty()
     {
         checks.push(check_skills(cfg.skills()));
+    }
+    if let Ok(cfg) = config
+        && !cfg.trackers().is_empty()
+    {
+        checks.push(check_trackers(cfg.trackers()));
     }
     checks
 }
