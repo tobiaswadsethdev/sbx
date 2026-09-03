@@ -54,10 +54,17 @@ jobs:
       # The desktop application is not a workspace member -- building it needs a
       # GUI toolkit -- so what CI checks is the half that does not: the types it
       # is generated from, and that its own TypeScript agrees with them.
+      #
+      # `working-directory` and not `--prefix`: npm's prefix says where the
+      # package is, not where the command runs, so `tsc` started at the
+      # repository root, found no `tsconfig.json` there, and printed its own
+      # help -- which is a failure that looks nothing like a type error. This is
+      # now the same two commands run by hand in `apps/desktop`.
       - name: Desktop types
+        working-directory: apps/desktop
         run: |
-          npm --prefix apps/desktop ci
-          npm --prefix apps/desktop exec -- tsc --noEmit
+          npm ci
+          npm exec -- tsc --noEmit
 
       - name: Build
         run: cargo build --workspace --release
