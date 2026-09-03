@@ -10,7 +10,7 @@ description = "The wire between an sbx client and sbxd"
 [dependencies]
 sbx-core = { path = "../sbx-core" }
 serde.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 ts-rs = { version = "12", optional = true }
 
 [features]
