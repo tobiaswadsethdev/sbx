@@ -24,19 +24,22 @@ has the decisions and the increments that got here; this is the map.
                 |  ops, sessions, policy, events,     |
                 |  seed, publish, git, files, projects|
                 +-----------------+-------------------+
-                            |
-        +-------------------+--------------------+
-        |                   |                    |
-   SessionStore        openshell-client       tmux
-   (~/.config/sbx/     (CLI subprocess,      (inside each sandbox,
-    sessions.json)      one trait)            capture-pane, attach)
-                            |
+                                  |
+                    +-------------+-------------+
+                    |     Backend (a trait)     |   where a session runs
+                    +------+-------------+------+
+                           |             |
+                   Sandboxed          Worktree
+                           |             |
+   SessionStore     openshell-client   git worktree + tmux
+   (~/.config/sbx/  (CLI subprocess)   (on the server itself,
+    sessions.json)         |            no isolation)
                     openshell gateway (docker driver)
-                            |
-        +-------------------+--------------------+
-        |                   |                    |
-    sandbox A           sandbox B            sandbox C
-   clone+agent         clone+agent          clone+agent
+                           |
+        +------------------+-------------------+
+        |                  |                   |
+    sandbox A          sandbox B           sandbox C
+   clone+agent        clone+agent         clone+agent
 ```
 
 Five crates, and an application:
@@ -61,7 +64,8 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | Module | What it owns |
 | --- | --- |
 | `main.rs` | *(sbx)* the clap CLI, and dispatch into `ops` |
-| `ops.rs` | the operations both the CLI and the TUI need, so neither reimplements the other |
+| `ops.rs` | the operations both the CLI and the TUI need, so neither reimplements the other. Everything here takes a `Backend` rather than a gateway client |
+| `backend.rs` | *where* a session runs, as a trait: the sandboxed one and the worktree one. `backend/sandboxed.rs` is what `ops` used to do directly; `backend/worktree.rs` is a `git worktree` on the server with no isolation at all, and says so. See [worktrees.md](worktrees.md) |
 | `session.rs` | what a session *is*: identity, the derived branch and sandbox names, and the metadata record written inside the sandbox |
 | `store.rs` | the local cache and its reconciliation against the gateway; every write is locked |
 | `seed.rs` | the detached script that clones, cuts the branch, writes the record and starts the agent |
@@ -70,7 +74,7 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `endpoints.rs` | the global allow and block lists applied to every new session |
 | `events.rs` | the allow/deny feed, merged and kept on disk per session |
 | `forge.rs` | which git host a session works against, derived from the repo URL |
-| `publish.rs` | push and open a pull request, both from inside the sandbox |
+| `publish.rs` | push and open a pull request, both from inside the sandbox -- or, for a worktree session, with the server's own git credentials |
 | `image.rs` | the sandbox image, with its whole build context embedded in the binary |
 | `toolchain.rs` | the toolchains, their image variants, and the registry each one opens |
 | `skills.rs` | packing host skills into a session |
@@ -127,7 +131,9 @@ something adds a request and an update, not a call in the key handler.
 
 **The sandbox is the source of truth.** Seeding writes
 `/sandbox/.sbx/meta.json`, so a session describes itself and survives losing the
-local cache. Labels carry identity only -- the gateway restricts label values to
+local cache. (A worktree session has nowhere equivalent and keeps its record in
+the server's state directory instead -- the one place this rule bends, and
+[worktrees.md](worktrees.md) says why.) Labels carry identity only -- the gateway restricts label values to
 Kubernetes rules, at most 63 characters of `[A-Za-z0-9._-]`, which cannot hold a
 repo URL or a branch name with a `/` in it.
 

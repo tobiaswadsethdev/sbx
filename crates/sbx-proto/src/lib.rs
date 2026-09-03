@@ -45,7 +45,7 @@ use sbx_core::session::Session;
 /// variant does not need a bump: an older server answers an unknown request
 /// with [`Failure::unsupported`], which is a better error than a version check
 /// would have produced anyway.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The port `sbxd` listens on unless told otherwise.
 ///
@@ -365,6 +365,15 @@ pub enum FailureKind {
     /// A request this server does not have, which is what an older server says
     /// to a newer client rather than failing to parse it.
     Unsupported,
+    /// The session has no isolation, so the thing asked for does not exist for
+    /// it: a worktree session has no policy and no decision feed.
+    ///
+    /// Its own kind rather than a [`Self::Failed`], because it is not a failure
+    /// and a client must not draw it as one. The `message` is the server's
+    /// explanation and the client shows it where the pane would have been --
+    /// which is the difference between a stated absence and a pane that looks
+    /// like it could not load.
+    NoIsolation,
     /// Anything else the server could not do.
     Failed,
 }
@@ -388,6 +397,13 @@ impl Failure {
         Self {
             kind: FailureKind::Unsupported,
             message: format!("this sbxd does not support `{op}`; it speaks protocol {VERSION}"),
+        }
+    }
+
+    pub fn no_isolation(message: impl Into<String>) -> Self {
+        Self {
+            kind: FailureKind::NoIsolation,
+            message: message.into(),
         }
     }
 

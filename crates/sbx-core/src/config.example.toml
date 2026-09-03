@@ -36,6 +36,16 @@
 # them. `SBX_REPO_ROOTS` still wins over this.
 # repo_roots = ["~/dev", "~/work"]
 
+# Where worktree sessions put their working copies, one directory per session.
+# Defaults to ~/.local/share/sbx/worktrees.
+#
+# A worktree session is *not* sandboxed: it is a `git worktree` added to a
+# checkout on this machine, and the agent in it runs as this user, with this
+# user's git credentials and whatever the network allows. It is labelled as such
+# everywhere it appears, and it has no policy pane and no events feed because
+# there is nothing deciding anything. The sandbox stays the default.
+# worktree_root = "~/.local/share/sbx/worktrees"
+
 # How often the TUI reads the sandboxes. One number, because the intervals
 # underneath it are measured and related to each other: this scales all of them,
 # so 2s polls half as often as the 1s default and 500ms twice as often. The cost

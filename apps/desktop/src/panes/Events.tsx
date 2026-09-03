@@ -7,10 +7,15 @@
 import { useFetch } from "../useFetch";
 import { api } from "../api";
 import type { Event } from "../gen/Event";
+import { Unisolated } from "./Policy";
 
 export function EventsPane({ server, name }: { server: string; name: string }) {
-  const { data, error } = useFetch(() => api.events(server, name), [server, name]);
+  const { data, error, kind } = useFetch(() => api.events(server, name), [server, name]);
 
+  // Nothing is deciding anything, so there is nothing to feed. Same words as
+  // the policy pane, from the same place: the absence is one fact about the
+  // session, not two.
+  if (kind === "no-isolation") return <Unisolated said={error} />;
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="loading">reading the feed…</p>;
   if (data.length === 0) return <p className="loading">no policy decisions in the recent log</p>;

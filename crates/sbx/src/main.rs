@@ -12,8 +12,9 @@ mod tui;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use openshell_client::{CliClient, OpenShell};
+use openshell_client::CliClient;
 use sbx_client as remote;
+use sbx_core::backend::Backends;
 use sbx_core::{
     config, doctor, endpoints, events, forge, image, ops, pane, policy, publish, repos, session,
     store, toolchain, update,
@@ -238,6 +239,22 @@ struct NewArgs {
     /// Create the sandbox and clone, but do not start the agent.
     #[arg(long)]
     no_start: bool,
+
+    /// Run the session in a `git worktree` on this machine instead of in a
+    /// sandbox.
+    ///
+    /// **There is no isolation.** The agent runs as you, with your files, your
+    /// git credentials and whatever the network allows; there is no policy to
+    /// apply and nothing to allow or deny, so `sbx policy` and `sbx events`
+    /// have nothing to show for it. What it buys is a session in seconds
+    /// sharing an existing checkout's object store, which is the case a clone
+    /// into a fresh sandbox is slowest at.
+    ///
+    /// `--repo` must be a checkout on this machine, since a worktree is added
+    /// to one. `--policy`, `--provider` and `--toolchain` do not apply and are
+    /// refused rather than ignored.
+    #[arg(long)]
+    worktree: bool,
 }
 
 #[derive(Subcommand)]
@@ -276,6 +293,10 @@ fn main() -> ExitCode {
     if let Some(g) = cli.gateway.clone().or_else(|| cfg.gateway.clone()) {
         client = client.with_gateway(g);
     }
+    // Both backends. Every command that works on a session goes through this
+    // rather than the client, because which one a session belongs to is a fact
+    // about the session and not about the command.
+    let backends = Backends::from_config(Box::new(client.clone()), &cfg);
 
     // Read out before the match, which moves `cli.command`.
     let chosen = cli.server.clone();
@@ -296,26 +317,26 @@ fn main() -> ExitCode {
             };
         }
         Some(Command::Config { init, path }) => cmd_config(&cfg, init, path),
-        Some(Command::New(args)) => cmd_new(&client, args, &cfg),
+        Some(Command::New(args)) => cmd_new(&backends, args, &cfg),
         Some(Command::Ls) => match server(chosen.as_deref()) {
             Ok(Some(r)) => remote_ls(&r),
-            Ok(None) => cmd_ls(&client),
+            Ok(None) => cmd_ls(&backends),
             Err(e) => Err(e),
         },
-        Some(Command::Attach { name }) => cmd_attach(&client, &name),
+        Some(Command::Attach { name }) => cmd_attach(&backends, &name),
         Some(Command::Diff { name }) => match server(chosen.as_deref()) {
             Ok(Some(r)) => remote_diff(&r, &name),
-            Ok(None) => cmd_diff(&client, &name),
+            Ok(None) => cmd_diff(&backends, &name),
             Err(e) => Err(e),
         },
         Some(Command::Policy { name }) => match server(chosen.as_deref()) {
             Ok(Some(r)) => remote_policy(&r, &name),
-            Ok(None) => cmd_policy(&client, &name),
+            Ok(None) => cmd_policy(&backends, &name),
             Err(e) => Err(e),
         },
         Some(Command::Events { name }) => match server(chosen.as_deref()) {
             Ok(Some(r)) => remote_events(&r, &name),
-            Ok(None) => cmd_events(&client, &name),
+            Ok(None) => cmd_events(&backends, &name),
             Err(e) => Err(e),
         },
         Some(Command::Watch { name }) => match server(chosen.as_deref()) {
@@ -341,7 +362,7 @@ fn main() -> ExitCode {
             no_pr,
             draft,
         }) => cmd_publish(
-            &client,
+            &backends,
             &name,
             publish::Options {
                 title,
@@ -358,7 +379,7 @@ fn main() -> ExitCode {
             },
         },
         Some(Command::Update { check, tag, force }) => cmd_update(check, tag.as_deref(), force),
-        Some(Command::Rm { names }) => cmd_rm(&client, names),
+        Some(Command::Rm { names }) => cmd_rm(&backends, names),
     };
 
     match result {
@@ -583,7 +604,26 @@ fn remote_events(remote: &remote::Remote, name: &str) -> Fallible {
     Ok(())
 }
 
-fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
+fn cmd_new(backends: &Backends, args: NewArgs, cfg: &Config) -> Fallible {
+    // Refused rather than ignored: each of these is an instruction to a gateway
+    // that will not be involved, and a session created with a policy flag that
+    // did nothing would be one whose owner believes it is isolated.
+    if args.worktree {
+        for (flag, given) in [
+            ("--policy", args.policy.is_some()),
+            ("--provider", !args.providers.is_empty()),
+            ("--toolchain", !args.toolchains.is_empty()),
+        ] {
+            if given {
+                return Err(format!(
+                    "{flag} does not apply to --worktree: there is no sandbox and no policy. \
+                     See `sbx new --help`."
+                )
+                .into());
+            }
+        }
+    }
+
     let repo = args.repo.or_else(|| cfg.repo.clone()).ok_or_else(|| {
         format!(
             "no repository: pass --repo, or set `repo` in {}",
@@ -599,6 +639,11 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
     };
 
     let draft = ops::Draft {
+        backend: if args.worktree {
+            session::Kind::Worktree
+        } else {
+            session::Kind::Sandbox
+        },
         // The terminal has no projects; see `Session::project`.
         project: None,
         name,
@@ -629,14 +674,19 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
     // build streams docker's output to the terminal, which only a command-line
     // caller can afford. The first session wanting a toolchain pays for the
     // variant; every one after it starts as fast as any other.
-    image::ensure_for(&draft.toolchains)?;
+    // Only a sandbox has an image; a worktree session uses this machine's
+    // toolchains, which is both its point and its limitation.
+    if draft.backend == session::Kind::Sandbox {
+        image::ensure_for(&draft.toolchains)?;
+    }
 
     let repo = draft.repo.clone();
-    let created = ops::create(client, &draft, &mut |step| match step {
+    let kind = draft.backend;
+    let created = ops::create(backends, &draft, &mut |step| match (step, kind) {
         // The URL is worth naming, since this is the slow step and the one that
         // fails when a credential or a policy is wrong.
-        ops::Step::Clone => println!("cloning {repo} ..."),
-        other => println!("{} ...", other.label()),
+        (ops::Step::Clone, session::Kind::Sandbox) => println!("cloning {repo} ..."),
+        (other, kind) => println!("{} ...", other.label(kind)),
     })?;
 
     for warning in &created.warnings {
@@ -652,13 +702,27 @@ fn cmd_new(client: &dyn OpenShell, args: NewArgs, cfg: &Config) -> Fallible {
 
     println!();
     println!("session  {}", s.name);
-    println!("sandbox  {}", s.sandbox);
-    println!("policy   {}", s.policy.as_deref().unwrap_or("-"));
+    let backend = backends.for_session(&s);
+    match s.backend {
+        session::Kind::Sandbox => {
+            println!("sandbox  {}", s.sandbox);
+            println!("policy   {}", s.policy.as_deref().unwrap_or("-"));
+        }
+        // What a sandboxed session says here is the isolation it got. This one
+        // has none, and the line that would have named a policy says so
+        // instead of being left blank.
+        session::Kind::Worktree => {
+            println!("isolation {}", backend.isolation().label());
+            println!("         {}", backend.isolation().explain());
+        }
+    }
     if !s.toolchains.is_empty() {
         println!("tools    {}", s.toolchains.join(", "));
     }
     println!("branch   {}", s.work_branch);
-    println!("workdir  {}", session::REPO_PATH);
+    // The backend's, not a constant: `/sandbox/repo` is where a sandboxed
+    // session's working copy is and a worktree's is wherever it was put.
+    println!("workdir  {}", backend.paths(&s).repo);
     Ok(())
 }
 
@@ -806,8 +870,8 @@ fn cmd_config(cfg: &Config, init: bool, path_only: bool) -> Fallible {
     Ok(())
 }
 
-fn cmd_ls(client: &dyn OpenShell) -> Fallible {
-    let refreshed = ops::refresh_with(client, true)?;
+fn cmd_ls(backends: &Backends) -> Fallible {
+    let refreshed = ops::refresh_with(backends, true)?;
 
     for name in &refreshed.adopted {
         println!("adopted `{name}`");
@@ -824,7 +888,7 @@ fn cmd_ls(client: &dyn OpenShell) -> Fallible {
             // exits, unlike the TUI, which has to keep this bounded as sessions
             // are added.
             let state = match s.state {
-                State::Ready => ops::poll(client, &s)
+                State::Ready => ops::poll(backends.for_session(&s), &s)
                     .status
                     .map_or(s.state, |report| report.state),
                 // Anything else is a fact about the sandbox, which outranks
@@ -851,14 +915,18 @@ fn print_sessions(rows: &[(Session, State)]) {
     }
 
     let now = session::now_epoch();
+    // The kind is a column rather than a suffix on the state, because it is not
+    // a state: it says what the session *is*, and a product whose pitch is
+    // isolation cannot have a mode where the isolation is invisible in the list.
     println!(
-        "{:<20} {:<10} {:>5}  {:<24} REPO",
-        "NAME", "STATE", "AGE", "BRANCH"
+        "{:<20} {:<9} {:<10} {:>5}  {:<24} REPO",
+        "NAME", "KIND", "STATE", "AGE", "BRANCH"
     );
     for (s, state) in rows {
         println!(
-            "{:<20} {:<10} {:>5}  {:<24} {}",
+            "{:<20} {:<9} {:<10} {:>5}  {:<24} {}",
             s.name,
+            s.backend.to_string(),
             state.to_string(),
             session::humanize_age(s.created_at, now),
             s.work_branch,
@@ -867,11 +935,11 @@ fn print_sessions(rows: &[(Session, State)]) {
     }
 }
 
-fn cmd_diff(client: &dyn OpenShell, name: &str) -> Fallible {
+fn cmd_diff(backends: &Backends, name: &str) -> Fallible {
     let session = require_session(name)?;
     print_diff(
-        ops::poll(client, &session).stat,
-        &ops::repo_diff(client, &session),
+        ops::poll(backends.for_session(&session), &session).stat,
+        &ops::repo_diff(backends.for_session(&session), &session),
     );
     Ok(())
 }
@@ -894,9 +962,9 @@ fn require_session(name: &str) -> Result<Session, Box<dyn std::error::Error>> {
         .ok_or_else(|| format!("no session `{name}`; see sbx ls").into())
 }
 
-fn cmd_policy(client: &dyn OpenShell, name: &str) -> Fallible {
+fn cmd_policy(backends: &Backends, name: &str) -> Fallible {
     let session = require_session(name)?;
-    let rev = ops::policy(client, &session)?;
+    let rev = ops::policy(backends.for_session(&session), &session)?;
     // Empty on a read failure rather than fatal: the reason to run this command
     // is the sandbox's own rules, and losing them to an unreadable convenience
     // file would be the wrong trade. The section is omitted when the lists are
@@ -911,9 +979,9 @@ fn print_policy(view: &policy::View) {
     print!("{}", pane::to_plain(&policy::render(view)));
 }
 
-fn cmd_events(client: &dyn OpenShell, name: &str) -> Fallible {
+fn cmd_events(backends: &Backends, name: &str) -> Fallible {
     let session = require_session(name)?;
-    print_events(&ops::events(client, &session)?);
+    print_events(&ops::events(backends.for_session(&session), &session)?);
     Ok(())
 }
 
@@ -945,7 +1013,7 @@ fn print_events(events: &[events::Event]) {
     }
 }
 
-fn cmd_publish(client: &dyn OpenShell, name: &str, opts: publish::Options) -> Fallible {
+fn cmd_publish(backends: &Backends, name: &str, opts: publish::Options) -> Fallible {
     let session = require_session(name)?;
     let remote = forge::Remote::parse(&session.repo)?;
     println!(
@@ -957,7 +1025,7 @@ fn cmd_publish(client: &dyn OpenShell, name: &str, opts: publish::Options) -> Fa
     // ops::publish, not publish::publish: the state change belongs with the
     // action, so the CLI and the TUI cannot disagree about whether a session
     // has been published.
-    let outcome = ops::publish(client, &session, &opts)?;
+    let outcome = ops::publish(backends.for_session(&session), &session, &opts)?;
     for w in &outcome.warnings {
         eprintln!("sbx: {w}");
     }
@@ -973,26 +1041,26 @@ fn cmd_publish(client: &dyn OpenShell, name: &str, opts: publish::Options) -> Fa
     Ok(())
 }
 
-fn cmd_attach(client: &CliClient, name: &str) -> Fallible {
+fn cmd_attach(backends: &Backends, name: &str) -> Fallible {
     let session = require_session(name)?;
 
     println!("attaching to {name} - detach with Ctrl-b d");
 
-    let status = attach::interactively(client, &session)?;
+    let status = attach::interactively(backends, &session)?;
     if !status.success() {
         return Err(format!("attach exited with {status}").into());
     }
     Ok(())
 }
 
-fn cmd_rm(client: &dyn OpenShell, names: Vec<String>) -> Fallible {
+fn cmd_rm(backends: &Backends, names: Vec<String>) -> Fallible {
     let mut failures = 0;
 
     for name in names {
         // One name at a time, each persisting as it goes: `sbx rm a b` that
         // fails on `b` must still have forgotten `a`, or a retry would try to
         // delete a sandbox that is already gone and call that the failure.
-        match ops::destroy(client, &name) {
+        match ops::destroy(backends, &name) {
             Ok(ops::Destroyed::Sandbox) => println!("deleted {name}"),
             Ok(ops::Destroyed::RecordOnly) => println!("{name} was already gone"),
             Err(e) => {

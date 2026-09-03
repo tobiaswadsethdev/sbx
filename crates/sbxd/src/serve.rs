@@ -18,7 +18,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use openshell_client::CliClient;
 use sbx_proto::{Failure, Hello, Outcome, Request};
 
 use crate::auth::Tokens;
@@ -85,12 +84,9 @@ async fn rpc_route(
         Err(_) => return Err(StatusCode::BAD_REQUEST),
     };
 
-    let outcome = tokio::task::spawn_blocking(move || {
-        let client = CliClient::default();
-        rpc::dispatch(&client, request)
-    })
-    .await
-    .unwrap_or_else(|e| Failure::failed(format!("the server dropped the request: {e}")).into());
+    let outcome = tokio::task::spawn_blocking(move || rpc::dispatch(&rpc::backends(), request))
+        .await
+        .unwrap_or_else(|e| Failure::failed(format!("the server dropped the request: {e}")).into());
 
     Ok(Json(outcome))
 }

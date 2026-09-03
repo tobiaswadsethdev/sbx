@@ -14,6 +14,8 @@ use openshell_client::{CliClient, PolicyRevision, PolicyUpdate, Provider};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 
+use sbx_core::backend::Backends;
+
 use crate::tui::attach::attach;
 use create::{Create, Form, Picker};
 use sbx_core::config::Config;
@@ -1565,7 +1567,13 @@ impl App {
                     row.state = step.state();
                     self.set_pending(row);
                 }
-                self.note(format!("{session}: {}", step.label()));
+                // The terminal only ever creates sandboxed sessions; the
+                // worktree backend is the window's, which is where the choice
+                // is offered. See `docs/desktop.md`.
+                self.note(format!(
+                    "{session}: {}",
+                    step.label(sbx_core::session::Kind::Sandbox)
+                ));
             }
             Update::Created { session, result } => {
                 match *result {
@@ -1649,19 +1657,19 @@ impl App {
 }
 
 pub fn run(client: CliClient, cfg: Config) -> Result<(), Box<dyn std::error::Error>> {
-    // The worker owns its client; attaching needs a second handle because it
+    // The worker owns its client; attaching needs its own handle because it
     // runs on this thread with the terminal handed over.
-    let attach_client = client.clone();
+    let attach_backends = sbx_core::backend::Backends::from_config(Box::new(client.clone()), &cfg);
     // Resolved once, on this thread: the roots depend on the working directory,
     // which is fixed for the life of the process, and the worker should not be
     // reading config files between requests.
-    let worker = Worker::spawn(client, repos::roots(cfg.repo_roots.as_deref()));
+    let worker = Worker::spawn(client, cfg.clone(), repos::roots(cfg.repo_roots.as_deref()));
     let mut app = App::new(cfg);
 
     // Installs a panic hook that restores the terminal, so a crash cannot
     // leave the user in raw mode with no echo.
     let mut terminal = ratatui::init();
-    let result = event_loop(&mut terminal, &mut app, &worker, &attach_client);
+    let result = event_loop(&mut terminal, &mut app, &worker, &attach_backends);
     ratatui::restore();
     result
 }
@@ -1670,7 +1678,7 @@ fn event_loop(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     worker: &Worker,
-    attach_client: &CliClient,
+    attach_backends: &Backends,
 ) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         terminal.draw(|frame| ui::draw(frame, app))?;
@@ -1720,7 +1728,7 @@ fn event_loop(
         }
 
         if let Some(session) = app.attach_request.take() {
-            match attach(terminal, attach_client, &session) {
+            match attach(terminal, attach_backends, &session) {
                 Ok(()) => {
                     // The repository almost certainly moved while attached.
                     app.invalidate(&session.name);

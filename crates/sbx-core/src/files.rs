@@ -16,11 +16,11 @@
 //! rather than this code, a file browser that will fetch anything on the
 //! filesystem is not what this claims to be.
 
-use openshell_client::OpenShell;
 use serde::{Deserialize, Serialize};
 
+use crate::backend::Backend;
 use crate::seed::sh_quote;
-use crate::session::{REPO_PATH, Session};
+use crate::session::Session;
 
 /// How much of a file is read. A viewer showing half a megabyte is already
 /// showing more than anyone reads; the rest is a scroll bar lying about how
@@ -80,25 +80,31 @@ pub fn clean(path: &str) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-fn absolute(rel: &str) -> String {
+/// A cleaned relative path, under the working copy of *this* session.
+///
+/// The root is the backend's: `/sandbox/repo` for a sandboxed session and the
+/// worktree's own directory for the other. The path was already checked
+/// component by component by [`clean`], which is what makes joining it safe.
+fn absolute(root: &str, rel: &str) -> String {
     if rel.is_empty() {
-        REPO_PATH.to_string()
+        root.to_string()
     } else {
-        format!("{REPO_PATH}/{rel}")
+        format!("{root}/{rel}")
     }
 }
 
 /// List one directory.
-pub fn list(client: &dyn OpenShell, session: &Session, path: &str) -> Result<Dir, String> {
+pub fn list(backend: &dyn Backend, session: &Session, path: &str) -> Result<Dir, String> {
     let rel = clean(path)?;
+    let root = backend.paths(session).repo;
     // `-p` marks directories with a trailing slash, `-A` includes dotfiles but
     // not `.` and `..`. A filename with a newline in it would split into two
     // entries; git will not track one, and the cost of handling it is a format
     // busybox's `ls` does not have.
-    let script = format!("ls -Ap -- {dir}", dir = sh_quote(&absolute(&rel)));
-    let out = client
-        .exec(&session.sandbox, &["sh", "-c", &script])
-        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    let script = format!("ls -Ap -- {dir}", dir = sh_quote(&absolute(&root, &rel)));
+    let out = backend
+        .exec(session, &["sh", "-c", &script])
+        .map_err(|e| e.to_string())?;
     if !out.ok() {
         return Err(format!(
             "could not read that directory: {}",
@@ -128,8 +134,9 @@ pub fn list(client: &dyn OpenShell, session: &Session, path: &str) -> Result<Dir
 }
 
 /// Read one file.
-pub fn read(client: &dyn OpenShell, session: &Session, path: &str) -> Result<FileText, String> {
+pub fn read(backend: &dyn Backend, session: &Session, path: &str) -> Result<FileText, String> {
     let rel = clean(path)?;
+    let root = backend.paths(session).repo;
     if rel.is_empty() {
         return Err("that is the repository, not a file".into());
     }
@@ -138,11 +145,11 @@ pub fn read(client: &dyn OpenShell, session: &Session, path: &str) -> Result<Fil
     // source file with a stray byte in it would come back altered.
     let script = format!(
         "p={path}; [ -f \"$p\" ] || {{ echo missing; exit 3; }}; wc -c < \"$p\"; head -c {CAP} \"$p\" | base64 | tr -d '\\n'",
-        path = sh_quote(&absolute(&rel)),
+        path = sh_quote(&absolute(&root, &rel)),
     );
-    let out = client
-        .exec(&session.sandbox, &["sh", "-c", &script])
-        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    let out = backend
+        .exec(session, &["sh", "-c", &script])
+        .map_err(|e| e.to_string())?;
     if !out.ok() {
         return Err(format!("could not read that file: {}", out.stderr.trim()));
     }
@@ -214,8 +221,11 @@ mod tests {
     /// The root is the repository itself, not a path under it.
     #[test]
     fn the_empty_path_is_the_repository_root() {
-        assert_eq!(absolute(""), REPO_PATH);
-        assert_eq!(absolute("a/b"), format!("{REPO_PATH}/a/b"));
+        let root = crate::session::REPO_PATH;
+        assert_eq!(absolute(root, ""), root);
+        assert_eq!(absolute(root, "a/b"), format!("{root}/a/b"));
+        // And the same rule wherever the working copy is.
+        assert_eq!(absolute("/srv/worktrees/x", "a"), "/srv/worktrees/x/a");
     }
 
     #[test]

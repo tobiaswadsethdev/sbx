@@ -11,6 +11,7 @@ base       = "develop"                                # unset: the remote's defa
 policy     = "feature-work"                           # a template, or a path to a YAML file
 providers  = ["claude-oauth", "azure-pat"]            # credentials for a new session
 repo_roots = ["~/dev", "~/work"]                      # where the picker looks
+worktree_root = "~/.local/share/sbx/worktrees"        # where worktree sessions go
 refresh    = "1s"                                     # how often the TUI reads the sandboxes
 
 skills     = ["ship-pr"]                               # copied into every session
@@ -61,6 +62,11 @@ specific answer wins:
   is still one keystroke away -- and typing drops the preference for good.
 * `repo_roots` **replaces** the conventional places rather than adding to them,
   and `SBX_REPO_ROOTS` still wins over it.
+
+`repo_roots` and `worktree_root` are both about the machine that *runs* the
+sessions, which with a server is not the machine with the window on it: a
+worktree is added to a checkout, and both the checkout and the worktree are the
+server's. See [worktrees.md](worktrees.md).
 
 
 ---

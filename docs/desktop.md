@@ -169,6 +169,14 @@ than hidden. Forgetting a project leaves its worktrees alive and moves them
 there; a sandbox is a real thing with an agent in it, and removing one is
 `sbx rm`'s job, said out loud.
 
+**A worktree with no sandbox around it says so on its row.** The `worktree`
+badge beside the name means the session runs on the server with the server's own
+rights: no policy, no allow/deny feed, and a publish that uses the server's git
+credentials. The policy and events panes say the same thing where their contents
+would be, in the server's own words rather than a wording kept here, and the
+facts pane shows `isolation: none` with the directory instead of a sandbox name.
+[worktrees.md](worktrees.md) is what it buys and what it costs.
+
 **Tabs are per worktree.** A tab is a thing you have open *in* a working copy,
 so switching worktree switches the set and coming back finds it as you left it.
 Every tab stays mounted and is hidden rather than unmounted: a terminal that
@@ -218,6 +226,16 @@ checkouts exist is a fact about the machine that will do the cloning, and
 other, and a window pointed at a server on another continent lists that server's
 repositories rather than a set of paths it cannot reach.
 
+**Where it runs** is the first question, because it decides which of the others
+mean anything. A sandbox is the default and the point; a worktree is seconds
+instead of minutes and gives up every guarantee, so the form spells that out
+beside the choice and again as a notice once it is picked. Picking it hides the
+policy, toolchain and credential fields rather than disabling them: each is an
+instruction to a gateway that will not be involved, and a greyed-out policy
+chooser suggests a choice that has been taken away when the truth is there is
+nothing to apply one to. The command line refuses those flags outright for the
+same reason.
+
 Nothing in the form decides anything `sbx new` decides differently, and that is
 enforced by where the decisions live rather than by care:
 
@@ -244,7 +262,8 @@ enforced by where the decisions live rather than by care:
   what your agents can reach, made in the server's config file, and
   `NewSession::into_draft` reads them from there rather than from the request --
   so a client cannot attach a tool, or the endpoint the policy then opens for
-  it, by asking.
+  it, by asking. A worktree session is given neither and the form says why: its
+  agent is the server's own, reading that user's `~/.claude` already.
 
 `Create` answers as soon as the request is accepted, not when the agent is
 running. Creating takes tens of seconds and the states it passes through --

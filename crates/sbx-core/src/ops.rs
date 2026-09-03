@@ -1,17 +1,26 @@
-//! Operations shared by the CLI and the TUI.
+//! Operations shared by the CLI, the TUI and the server.
+//!
+//! Everything here takes a [`Backend`] -- the place a session runs -- rather
+//! than a gateway client. That is the whole of increment 32 as far as this
+//! module is concerned: the scripts, the ordering and the reasoning are
+//! unchanged, and where they used to name `/sandbox/repo` and the image's tmux
+//! they now ask the session's own backend. A worktree session is not a special
+//! case in any function below; it is a different set of answers to the same
+//! three questions -- where does an exec go, where are the files, is there any
+//! isolation to report.
 
 use std::time::{Duration, Instant};
 
-use openshell_client::{CreateOpts, Error as OsError, OpenShell, PolicyRevision, PolicyUpdate};
+use openshell_client::{PolicyRevision, PolicyUpdate};
 
-use crate::endpoints;
+use crate::backend::{Backend, Backends, Isolation, Torn};
 use crate::events;
 use crate::forge;
 use crate::mcp;
 use crate::policy;
 use crate::publish;
 use crate::seed;
-use crate::session::{self, REPO_PATH, SELECTOR_MANAGED, STATUS_PATH, Session, State};
+use crate::session::{self, Session, State};
 use crate::skills;
 use crate::status;
 use crate::store::{self, Store};
@@ -54,63 +63,112 @@ pub struct Refreshed {
 /// abandoned one, and asking it every second would spend an exec a second on the
 /// difference.
 pub fn refresh_with(
-    client: &dyn OpenShell,
+    backends: &Backends,
     repair: bool,
 ) -> Result<Refreshed, Box<dyn std::error::Error>> {
-    // The gateway call first, outside the lock: it is the slow part, and holding
-    // a lock across it would stall a create in another process for no reason.
-    let live = client.list(Some(SELECTOR_MANAGED))?;
-
+    // Each backend asked before the lock is taken: the gateway call is the slow
+    // part, and holding a lock across it would stall a create in another process
+    // for no reason. The two are asked separately because "still there" means a
+    // different question to each of them, and neither can answer for the other's
+    // sessions -- a worktree has no sandbox to be missing from a gateway list,
+    // and marking it dead for that is what a single list would have done.
+    //
     // Reconciled against what is on disk *now*, not against a snapshot taken
-    // before the call above. A create walking a session through `seeding` to
+    // before those calls. A create walking a session through `seeding` to
     // `ready` in another process finishes inside that window often enough that
     // the difference is a session whose record disagrees with its own sandbox.
-    let rec = store::update(|store| {
-        let rec = store::reconcile(store.list().into_iter().cloned().collect(), &live);
-        store.merge(rec.sessions.clone());
-        rec
+    let cached: Vec<Session> = Store::load()?.list().into_iter().cloned().collect();
+    let mut out = Refreshed::default();
+    let mut recs = Vec::new();
+    let mut failures = Vec::new();
+    for backend in backends.each() {
+        let mine: Vec<Session> = cached
+            .iter()
+            .filter(|s| s.backend == backend.kind())
+            .cloned()
+            .collect();
+        match backend.live(mine.clone()) {
+            Ok(rec) => recs.push((backend, rec)),
+            // **One backend being unreachable is not the other's problem.** A
+            // machine with no gateway -- no `openshell` on the path at all --
+            // still has git, and refusing to list its worktree sessions because
+            // a sandbox could not be asked about would make the second backend
+            // useless exactly where it is most useful. Its sessions pass
+            // through with the state they were last known to have, which is
+            // what "could not ask" means, and never as `dead`.
+            Err(e) => {
+                failures.push(format!(
+                    "{} sessions could not be checked: {e}",
+                    backend.kind()
+                ));
+                recs.push((
+                    backend,
+                    store::Reconciliation {
+                        sessions: mine,
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
+    }
+    // Unless every one of them failed, which is not a degraded list -- it is no
+    // information at all, and the caller should say so rather than draw a table
+    // of stale rows as though it were current.
+    if failures.len() == backends.each().len() {
+        return Err(failures.join("; ").into());
+    }
+    out.warnings.extend(failures);
+
+    for (_, rec) in &recs {
+        out.dead.extend(rec.dead.clone());
+    }
+    let merged: Vec<Session> = recs
+        .iter()
+        .flat_map(|(_, rec)| rec.sessions.clone())
+        .collect();
+    out.sessions = store::update(|store| {
+        store.merge(merged.clone());
+        merged
     })?;
 
-    let mut out = Refreshed {
-        sessions: rec.sessions,
-        dead: rec.dead,
-        ..Default::default()
-    };
-
-    for orphan in &rec.orphans {
-        let sandbox = session::sandbox_name(orphan);
-        // An exec, so also outside the lock; the adopted record is written on its
-        // own once it is known.
-        match seed::read_meta(client, &sandbox) {
-            Ok(s) => {
-                out.adopted.push(s.name.clone());
-                let record = s.clone();
-                store::update(|store| store.upsert(record))?;
-                out.sessions.push(s);
+    for (backend, rec) in &recs {
+        for orphan in &rec.orphans {
+            // Outside the lock, because reading a record is an exec for one
+            // backend and a file read for the other; the adopted record is
+            // written on its own once it is known.
+            match backend.read_meta(orphan) {
+                Ok(s) => {
+                    out.adopted.push(s.name.clone());
+                    let record = s.clone();
+                    store::update(|store| store.upsert(record))?;
+                    out.sessions.push(s);
+                }
+                // Phrased as the session's state rather than as a failure of
+                // this code, since the usual cause is a create in flight in
+                // another process and the next refresh adopts it.
+                Err(e) => out.warnings.push(format!("{orphan} {e}")),
             }
-            // Phrased as the sandbox's state rather than as a failure of this
-            // code, since the usual cause is a create in flight in another
-            // process and the next refresh adopts it.
-            Err(e) => out.warnings.push(format!("{sandbox} {e}")),
         }
     }
 
     if repair {
-        // Only where the sandbox is there to be asked: a record whose sandbox has
-        // gone is already `dead`.
+        // Only where there is something there to be asked: a record whose
+        // sandbox or worktree has gone was just marked `dead` above, and asking
+        // it how its seeding went would be one failed exec per refresh.
         let stuck: Vec<Session> = out
             .sessions
             .iter()
             .filter(|s| matches!(s.state, State::Creating | State::Seeding))
-            .filter(|s| live.iter().any(|sb| sb.name == s.sandbox))
+            .filter(|s| s.state != State::Dead && !out.dead.contains(&s.name))
             .cloned()
             .collect();
 
         for s in stuck {
+            let backend = backends.for_session(&s);
             // The seeder's own report, which is the only thing that knows: it runs
             // detached inside the sandbox, so "still cloning" and "gave up" look
             // identical from out here.
-            let (state, note) = match seed::seed_state(client, &s) {
+            let (state, note) = match seed::seed_state(backend, &s) {
                 seed::SeedState::Done => (State::Ready, "seeding finished".to_string()),
                 seed::SeedState::Failed(why) => (State::Failed, format!("seeding failed: {why}")),
                 seed::SeedState::Running { step, alive: false } => {
@@ -122,7 +180,7 @@ pub fn refresh_with(
                 // Nothing to read: a sandbox seeded by an older sbx, before the
                 // seeder reported anything. Fall back to the metadata, which is
                 // written once seeding is done.
-                seed::SeedState::Unknown => match seed::read_meta(client, &s.sandbox) {
+                seed::SeedState::Unknown => match backend.read_meta(&s.name) {
                     Ok(m) if m.state != s.state => (m.state, "sandbox metadata".to_string()),
                     _ => continue,
                 },
@@ -259,9 +317,13 @@ pub fn toolchain_choices() -> Vec<ToolchainChoice> {
 /// The provider list is the only part that can fail, and it fails softly: a
 /// gateway that cannot be reached leaves the field empty with a reason attached,
 /// rather than refusing to open a form whose other five fields are fine.
-pub fn new_options(client: &dyn OpenShell, cfg: &crate::config::Config) -> NewOptions {
+pub fn new_options(backends: &Backends, cfg: &crate::config::Config) -> NewOptions {
     let configured = cfg.policy();
-    let (providers, providers_error) = match client.providers() {
+    // The gateway's, because that is whose providers they are: a credential a
+    // provider holds is one the gateway swaps into a request. A worktree session
+    // is offered none, and the form hides the field rather than showing an empty
+    // list -- see `NewSession::backend`.
+    let (providers, providers_error) = match backends.of_kind(session::Kind::Sandbox).providers() {
         Ok(list) => (
             list.into_iter()
                 .map(|p| ProviderChoice {
@@ -383,6 +445,11 @@ pub fn preselect_providers(
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NewSession {
+    /// Which kind of session to make. Defaults to a sandbox, which is both the
+    /// point of the tool and what a client written before there was a choice
+    /// asks for by saying nothing.
+    #[serde(default)]
+    pub backend: session::Kind,
     /// The project to start it in. `None` from the command line, which has no
     /// projects, and from a client that is not working inside one.
     pub project: Option<String>,
@@ -420,6 +487,7 @@ impl NewSession {
         session::validate_name(&name).map_err(|e| e.to_string())?;
         Ok(Draft {
             name,
+            backend: self.backend,
             project: self.project,
             repo: self.repo,
             task: self.task,
@@ -442,6 +510,9 @@ impl NewSession {
 #[derive(Debug, Clone, Default)]
 pub struct Draft {
     pub name: String,
+    /// Which backend runs it. See [`session::Kind`]; the sandbox is the default
+    /// everywhere, including for a `Draft` built by hand in a test.
+    pub backend: session::Kind,
     /// The project this worktree is being started in, if it was started from
     /// one. See [`Session::project`].
     pub project: Option<String>,
@@ -480,17 +551,25 @@ pub struct Draft {
 /// caller is told what is happening rather than being left with one long wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Step {
-    Sandbox,
+    /// Making the place the session runs: a sandbox, or a worktree.
+    Place,
     Clone,
     Agent,
 }
 
 impl Step {
-    pub fn label(self) -> &'static str {
-        match self {
-            Step::Sandbox => "creating the sandbox",
-            Step::Clone => "cloning the repository",
-            Step::Agent => "starting the agent",
+    /// What to say while this step is happening.
+    ///
+    /// Takes the kind because the first two steps are different things for the
+    /// two backends -- "creating the sandbox" is a lie about a worktree, and a
+    /// progress line that lies is worse than one that is vague.
+    pub fn label(self, kind: session::Kind) -> &'static str {
+        match (self, kind) {
+            (Step::Place, session::Kind::Sandbox) => "creating the sandbox",
+            (Step::Place, session::Kind::Worktree) => "preparing the worktree",
+            (Step::Clone, session::Kind::Sandbox) => "cloning the repository",
+            (Step::Clone, session::Kind::Worktree) => "adding the worktree",
+            (Step::Agent, _) => "starting the agent",
         }
     }
 
@@ -514,7 +593,7 @@ impl Step {
     /// half-created session says the same thing as the progress message.
     pub fn state(self) -> State {
         match self {
-            Step::Sandbox => State::Creating,
+            Step::Place => State::Creating,
             Step::Clone => State::Seeding,
             Step::Agent => State::Ready,
         }
@@ -530,123 +609,19 @@ pub struct Created {
     pub warnings: Vec<String>,
 }
 
-/// Apply the global allow and block lists to a sandbox that has just been made.
-///
-/// A failed *block* fails the create. The two directions are not symmetric and
-/// pretending they are would be the worst kind of bug this tool can have: an
-/// allow that did not land leaves a session that cannot reach something, which
-/// the events pane will say out loud the moment the agent tries; a block that
-/// did not land leaves a session that *can* reach something the user asked to be
-/// unreachable, and nothing will ever mention it again. So the first is a
-/// warning and the second is fatal.
-///
-/// Costs one `policy update --wait` -- about six seconds -- and only when the
-/// lists are not empty, which is the common case for anyone who has never
-/// touched them.
-fn impose_lists(
-    client: &dyn OpenShell,
-    sandbox: &str,
-    warnings: &mut Vec<String>,
-) -> Result<(), String> {
-    let lists = match endpoints::Lists::load() {
-        Ok(l) => l,
-        // An unreadable list is not a reason to refuse to create a session, but
-        // it is a reason to say so: the session will not have the rules its
-        // owner thinks every session has.
-        Err(e) => {
-            warnings.push(format!(
-                "could not read the global endpoint lists, so none were applied: {e}"
-            ));
-            return Ok(());
-        }
-    };
-    let updates = lists.updates();
-    if updates.is_empty() {
-        return Ok(());
-    }
-
-    for update in &updates {
-        let Err(e) = client.policy_update(sandbox, update) else {
-            continue;
-        };
-        if !update.remove_endpoints.is_empty() {
-            return Err(format!(
-                "the global block list could not be applied, so {} would have been reachable: {e}",
-                update.remove_endpoints.join(", ")
-            ));
-        }
-        warnings.push(format!(
-            "the global allow list could not be applied, so {} is not reachable: {e}",
-            update.add_endpoints.join(", ")
-        ));
-    }
-    Ok(())
-}
-
-/// Open the endpoints of the session's MCP servers.
-///
-/// Separate from [`impose_lists`] and after it, because the two answer different
-/// questions -- that one is "what have I decided every session may reach", this
-/// one is "what tools does the agent have" -- and because a failure here means
-/// something different: an MCP server that could not be opened leaves a session
-/// whose agent starts, works, and reports a dead tool. Worth a warning, not
-/// worth refusing to create the session over, which is the same reading as a
-/// failed allow.
-fn impose_mcp(
-    client: &dyn OpenShell,
-    sandbox: &str,
-    servers: &[mcp::Server],
-    warnings: &mut Vec<String>,
-) {
-    let Some(update) = mcp::widen(servers) else {
-        return;
-    };
-    if let Err(e) = client.policy_update(sandbox, &update) {
-        warnings.push(format!(
-            "the mcp endpoints could not be opened, so the agent will report {} unreachable: {e}",
-            servers
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-}
-
-/// Open the package registries the session's toolchains need.
-///
-/// A warning rather than a failure, on the same reading as [`impose_mcp`]: a
-/// registry that could not be opened leaves a session whose agent builds against
-/// what is already vendored and reports a denial the moment it restores. The
-/// events pane says so out loud, which is the test for whether a failure is worth
-/// refusing to create a session over -- a *block* that does not land is silent,
-/// and that is the one that is fatal.
-///
-/// Costs one `policy update --wait` per distinct binary list -- about six seconds
-/// each, and at most one per toolchain. Only for a session that asked for one.
-fn impose_toolchains(
-    client: &dyn OpenShell,
-    sandbox: &str,
-    chains: &[&'static Toolchain],
-    warnings: &mut Vec<String>,
-) {
-    for update in toolchain::updates(chains) {
-        if let Err(e) = client.policy_update(sandbox, &update) {
-            warnings.push(format!(
-                "the toolchain registries could not be opened, so {} is not \
-                 reachable and a restore will be denied: {e}",
-                update.add_endpoints.join(", ")
-            ));
-        }
-    }
-}
-
-/// Create a sandbox, clone the repository, cut the work branch, start the agent.
+/// Make the place the session runs, put the repository in it, cut the work
+/// branch, start the agent.
 ///
 /// The order matters and is the reason this is one function rather than steps a
 /// caller sequences: everything that can be checked without side effects is
 /// checked first, so a bad name or an unknown policy fails while nothing exists
 /// yet, and every failure afterwards leaves a record saying what happened.
+///
+/// One function for both backends, which is what the [`Backend`] trait is for.
+/// The three things it asks of the backend are the three things that differ:
+/// [`Backend::place`] makes the sandbox or the worktree,
+/// [`Backend::configure`] imposes what a gateway can be told to impose, and the
+/// seeder's first step is [`Backend::fetch_script`].
 ///
 /// The sandbox image is deliberately *not* built here. `image::build` streams
 /// docker's output to the terminal, which would tear a TUI apart; the CLI calls
@@ -654,11 +629,12 @@ fn impose_toolchains(
 /// the image the draft's toolchains name is there. See the doc comment on
 /// [`crate::image::ensure`].
 pub fn create(
-    client: &dyn OpenShell,
+    backends: &Backends,
     draft: &Draft,
     progress: &mut dyn FnMut(Step),
 ) -> Result<Created, String> {
     let mut warnings = Vec::new();
+    let backend = backends.of_kind(draft.backend);
 
     session::validate_name(&draft.name).map_err(|e| e.to_string())?;
 
@@ -683,39 +659,25 @@ pub fn create(
         return Err(format!("session `{}` already exists", draft.name));
     }
 
-    // Resolved before anything is created, so a typo in the policy fails before
-    // a sandbox exists rather than after. The guard owns a temp file when the
-    // policy came from a template, so it has to outlive the create call below.
-    let resolved = policy::resolve(&draft.policy).map_err(|e| e.to_string())?;
-
     let mut s = Session::new(draft.name.clone(), draft.repo.clone(), draft.task.clone());
+    s.backend = draft.backend;
     s.base_branch = draft.base.clone();
     s.project = draft.project.clone();
-    s.policy = Some(resolved.label.clone());
     s.providers = draft.providers.clone();
-    s.mcp = draft.mcp.clone();
-    s.skills = draft.skills.clone();
     s.toolchains = toolchain::labels(&draft.toolchains);
+    // Only where they mean something. A worktree session's agent is the
+    // server's own, reading the server user's `~/.claude`; recording skills it
+    // was never given would be a record claiming something untrue about it.
+    if backend.seeds_tooling() {
+        s.mcp = draft.mcp.clone();
+        s.skills = draft.skills.clone();
+    }
 
-    progress(Step::Sandbox);
-    let opts = CreateOpts {
-        name: s.sandbox.clone(),
-        labels: s.labels(),
-        policy: Some(resolved.path().to_path_buf()),
-        providers: draft.providers.clone(),
-        // The base image for a session with no toolchain, and the variant
-        // carrying exactly the ones asked for otherwise. Not built here, for the
-        // reason the base image is not: see the note above about docker's output.
-        from: Some(toolchain::tag(&draft.toolchains)),
-        // Keep the sandbox alive after the create command exits.
-        command: vec!["true".into()],
-        ..Default::default()
-    };
-
+    progress(Step::Place);
     // Each failure is recorded before being returned. A `Failed` record is the
     // only trace of a sandbox that may exist at the gateway but was never
     // seeded, and without it that sandbox is invisible to `sbx rm`.
-    if let Err(e) = client.create(&opts) {
+    if let Err(e) = backend.place(&mut s, draft) {
         s.state = State::Failed;
         save(s, &mut warnings);
         return Err(e.to_string());
@@ -735,20 +697,11 @@ pub fn create(
     // alone until the seeder has something to say.
     save(s.clone(), &mut warnings);
 
-    // The global lists, imposed before anything runs inside the sandbox.
-    //
-    // Here rather than by editing the policy before `sandbox create`, because
-    // `--policy` may be the user's own YAML file and this has to work whatever
-    // shape it is in. The window between the sandbox existing and the rules
-    // landing is real, and it is empty: nothing is launched in it until the
-    // seeder below.
-    if let Err(e) = impose_lists(client, &s.sandbox, &mut warnings) {
+    if let Err(e) = backend.configure(&s, draft, &mut warnings) {
         s.state = State::Failed;
         save(s, &mut warnings);
-        return Err(e);
+        return Err(e.to_string());
     }
-    impose_mcp(client, &s.sandbox, &s.mcp, &mut warnings);
-    impose_toolchains(client, &s.sandbox, &draft.toolchains, &mut warnings);
 
     // The seeder packs the skills itself; this is the same pack, thrown away,
     // for its warnings. A skill that cannot be read is worth saying out loud
@@ -761,7 +714,7 @@ pub fn create(
     save(s.clone(), &mut warnings);
 
     progress(Step::Clone);
-    if let Err(e) = seed::launch(client, &s, draft.start) {
+    if let Err(e) = seed::launch(backend, &s, draft.start) {
         s.state = State::Failed;
         save(s, &mut warnings);
         return Err(e.to_string());
@@ -770,7 +723,7 @@ pub fn create(
     // From here the sandbox is doing the work and this is only watching. Quitting
     // now costs the report, not the session: the seeder finishes on its own and
     // the next `refresh_with(.., true)` catches the record up.
-    match watch_seed(client, &s, progress) {
+    match watch_seed(backend, &s, progress) {
         Watched::Done => {
             s.state = State::Ready;
             save(s.clone(), &mut warnings);
@@ -782,7 +735,7 @@ pub fn create(
         }
         Watched::StillGoing => {
             warnings.push(format!(
-                "{} is still seeding in its sandbox; it will be picked up on the next refresh",
+                "{} is still being prepared; it will be picked up on the next refresh",
                 s.name
             ));
         }
@@ -811,16 +764,12 @@ enum Watched {
 }
 
 /// Follow a detached seeder, reporting each step as it starts.
-fn watch_seed(
-    client: &dyn OpenShell,
-    session: &Session,
-    progress: &mut dyn FnMut(Step),
-) -> Watched {
+fn watch_seed(backend: &dyn Backend, session: &Session, progress: &mut dyn FnMut(Step)) -> Watched {
     let start = Instant::now();
     let mut reported = String::new();
 
     while start.elapsed() < SEED_WATCH_LIMIT {
-        match seed::seed_state(client, session) {
+        match seed::seed_state(backend, session) {
             seed::SeedState::Done => return Watched::Done,
             seed::SeedState::Failed(why) => {
                 return Watched::Failed(format!("seeding failed: {why}"));
@@ -902,23 +851,35 @@ impl DiffStat {
 /// is recoverable even when the session did not pin one. `$base` is left empty
 /// if it cannot be resolved, which callers must handle: a fresh clone of a
 /// repository with an unusual remote layout has no usable base.
+///
+/// The local branch is the last resort, and it is what makes a worktree session
+/// in a repository with no remote diff against anything at all: there is no
+/// `origin/main` to compare with because there is no origin. Tried last rather
+/// than first, because a local branch moves -- the agent commits to it in a
+/// sandboxed session -- and the remote-tracking ref is the one that still
+/// points at where the work started.
 pub(crate) fn resolve_base_script(session: &Session) -> String {
     // A stored base branch names a local branch; the remote-tracking ref is the
     // one that still points at the base after the agent commits.
-    let base = match &session.base_branch {
+    let remote_ref = match &session.base_branch {
         Some(b) => format!("origin/{b}"),
         None => String::new(),
     };
+    let local_ref = session.base_branch.clone().unwrap_or_default();
     format!(
-        r#"base={base}
+        r#"base={remote}
 if [ -z "$base" ]; then
   base=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)
 fi
 if [ -n "$base" ]; then
   git rev-parse --verify --quiet "$base" >/dev/null 2>&1 || base=''
 fi
+if [ -z "$base" ] && [ -n {local} ]; then
+  git rev-parse --verify --quiet {local} >/dev/null 2>&1 && base={local}
+fi
 "#,
-        base = seed::sh_quote(&base),
+        remote = seed::sh_quote(&remote_ref),
+        local = seed::sh_quote(&local_ref),
     )
 }
 
@@ -932,7 +893,7 @@ fi
 /// base branch afterwards never show up as the agent's. `diff HEAD` is staged
 /// and unstaged work together. Untracked files appear in neither, and a new
 /// file is the most common thing an agent produces.
-pub fn repo_diff(client: &dyn OpenShell, session: &Session) -> String {
+pub fn repo_diff(backend: &dyn Backend, session: &Session) -> String {
     let script = format!(
         r#"cd {repo} 2>/dev/null || {{ printf 'no repository at %s\n' {repo}; exit 0; }}
 {resolve_base}
@@ -967,17 +928,17 @@ emit 'untracked' "$untracked"
 
 if [ -z "$any" ]; then printf 'no changes yet\n'; fi
 "#,
-        repo = seed::sh_quote(REPO_PATH),
+        repo = seed::sh_quote(&backend.paths(session).repo),
         resolve_base = resolve_base_script(session),
         section = DIFF_SECTION,
         notice = DIFF_NOTICE,
         cap = DIFF_LINE_CAP,
     );
 
-    match client.exec(&session.sandbox, &["sh", "-c", &script]) {
+    match backend.exec(session, &["sh", "-c", &script]) {
         Ok(out) if out.ok() => out.trimmed().to_string(),
         Ok(out) => format!("(could not read the diff: {})", out.stderr.trim()),
-        Err(e) => format!("(sandbox unreachable: {e})"),
+        Err(e) => format!("({e})"),
     }
 }
 
@@ -994,28 +955,28 @@ if [ -z "$any" ]; then printf 'no changes yet\n'; fi
 ///
 /// `-d` deletes the buffer after pasting, so a review does not sit in the
 /// sandbox's tmux buffer stack after it has been delivered.
-pub fn tell(client: &dyn OpenShell, session: &Session, message: &str) -> Result<(), String> {
+pub fn tell(backend: &dyn Backend, session: &Session, message: &str) -> Result<(), String> {
     if message.trim().is_empty() {
         return Err("nothing to say".into());
     }
-    let script = tell_script(&session.tmux, message);
-    match client.exec(&session.sandbox, &["sh", "-c", &script]) {
+    let script = tell_script(backend.tmux(), &session.tmux, message);
+    match backend.exec(session, &["sh", "-c", &script]) {
         Ok(out) if out.ok() => Ok(()),
         Ok(out) => Err(format!(
             "the agent could not be told: {}",
             out.stderr.trim()
         )),
-        Err(e) => Err(format!("sandbox unreachable: {e}")),
+        Err(e) => Err(e.to_string()),
     }
 }
 
 /// The shell that delivers one message. Separated so its shape can be asserted
 /// without a sandbox: what makes this correct is invisible at the call site.
-fn tell_script(tmux: &str, message: &str) -> String {
+fn tell_script(bin: &str, tmux: &str, message: &str) -> String {
     format!(
-        "printf '%s' {message} | tmux -u load-buffer -b sbx-tell - \
-         && tmux -u paste-buffer -b sbx-tell -t {tmux} -d -p \
-         && tmux -u send-keys -t {tmux} Enter",
+        "printf '%s' {message} | {bin} load-buffer -b sbx-tell - \
+         && {bin} paste-buffer -b sbx-tell -t {tmux} -d -p \
+         && {bin} send-keys -t {tmux} Enter",
         message = seed::sh_quote(message),
         tmux = seed::sh_quote(tmux),
     )
@@ -1026,13 +987,13 @@ fn tell_script(tmux: &str, message: &str) -> String {
 /// Cleared only once the paste has landed: a review that failed to arrive is
 /// still a review, and losing it to a sandbox that was briefly unreachable
 /// would be losing the work rather than the delivery.
-pub fn send_comments(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
+pub fn send_comments(backend: &dyn Backend, session: &Session) -> Result<String, String> {
     let review = crate::comments::list(&session.name);
     if review.is_empty() {
         return Err("there are no comments to send".into());
     }
     let message = crate::comments::message(&review);
-    tell(client, session, &message)?;
+    tell(backend, session, &message)?;
     crate::comments::clear(&session.name)?;
     Ok(message)
 }
@@ -1041,10 +1002,18 @@ pub fn send_comments(client: &dyn OpenShell, session: &Session) -> Result<String
 ///
 /// A gateway call, not an exec, so unlike the diff and the poll this does not
 /// queue behind whatever else is running against the sandbox.
-pub fn policy(client: &dyn OpenShell, session: &Session) -> Result<PolicyRevision, String> {
-    client
-        .policy(&session.sandbox)
-        .map_err(|e| format!("could not read the policy: {e}"))
+///
+/// A session with no isolation has no policy, and the error says which session
+/// and why rather than coming back empty: an empty policy view is
+/// indistinguishable from one that failed to load, and this is the pane whose
+/// whole job is to say what the sandbox will not allow.
+pub fn policy(backend: &dyn Backend, session: &Session) -> Result<PolicyRevision, String> {
+    backend
+        .policy(session)
+        .map_err(|e| match backend.isolation() {
+            Isolation::Sandboxed => format!("could not read the policy: {e}"),
+            Isolation::None => e.to_string(),
+        })
 }
 
 /// How many log lines to ask for. The gateway returns the newest, so this is a
@@ -1060,10 +1029,15 @@ const LOG_LINES: usize = 1500;
 ///
 /// Newest first because the pane is a feed: the event you want is the one that
 /// just happened, and it should be at the top without scrolling.
-pub fn events(client: &dyn OpenShell, session: &Session) -> Result<Vec<events::Event>, String> {
-    let raw = client
-        .logs(&session.sandbox, LOG_LINES)
-        .map_err(|e| format!("could not read the log: {e}"))?;
+pub fn events(backend: &dyn Backend, session: &Session) -> Result<Vec<events::Event>, String> {
+    let raw = backend
+        .logs(session, LOG_LINES)
+        .map_err(|e| match backend.isolation() {
+            Isolation::Sandboxed => format!("could not read the log: {e}"),
+            // Nothing is deciding anything, so there is nothing to report. The
+            // sentence is the answer, not a failure to produce one.
+            Isolation::None => e.to_string(),
+        })?;
     // Merged into what this session has already shown rather than replacing it:
     // the gateway's window is a couple of minutes wide at these poll intervals,
     // and the feed is meant to be a record. Newest first comes back from the
@@ -1074,14 +1048,17 @@ pub fn events(client: &dyn OpenShell, session: &Session) -> Result<Vec<events::E
 /// Apply an incremental policy change and report what the sandbox ended up
 /// with, so the caller never has to assume the change landed.
 pub fn repolicy(
-    client: &dyn OpenShell,
+    backend: &dyn Backend,
     session: &Session,
     update: &PolicyUpdate,
 ) -> Result<PolicyRevision, String> {
-    client
-        .policy_update(&session.sandbox, update)
-        .map_err(|e| format!("policy update failed: {e}"))?;
-    policy(client, session)
+    backend
+        .policy_update(session, update)
+        .map_err(|e| match backend.isolation() {
+            Isolation::Sandboxed => format!("policy update failed: {e}"),
+            Isolation::None => e.to_string(),
+        })?;
+    policy(backend, session)
 }
 
 /// Publish a session and record that it happened.
@@ -1091,11 +1068,11 @@ pub fn repolicy(
 /// refresh, and a publish that updated only one of the two paths would show as
 /// unpublished in whichever was missed.
 pub fn publish(
-    client: &dyn OpenShell,
+    backend: &dyn Backend,
     session: &Session,
     opts: &publish::Options,
 ) -> Result<publish::Outcome, String> {
-    let outcome = publish::publish(client, session, opts).map_err(|e| e.to_string())?;
+    let outcome = publish::publish(backend, session, opts).map_err(|e| e.to_string())?;
     if outcome.pushed {
         // Published is a fact about the branch, not the sandbox, so it is
         // recorded even when the pull request could not be opened: the work has
@@ -1129,41 +1106,57 @@ pub fn publish(
 /// the window as usual; with nothing attached, tmux has no client size to apply
 /// and the wide one stands. Every part of it is best-effort: a session that has
 /// just been created by the fallback above is not worth failing an attach over.
-pub fn attach_script(tmux: &str) -> String {
+pub fn attach_script(backend: &dyn Backend, session: &Session, tmux: &str) -> String {
     let (cols, rows) = session::SCRAPE_SIZE;
+    let bin = backend.tmux();
     format!(
-        "{UTF8_ENV} \
-         tmux -u -f /etc/tmux.conf attach -d -t {tmux} 2>/dev/null \
-         || {UTF8_ENV} tmux -u -f /etc/tmux.conf new-session -s {tmux} -c {repo}; \
-         tmux -u resize-window -t {tmux} -x {cols} -y {rows} 2>/dev/null; \
-         tmux -u set -w -t {tmux} window-size latest 2>/dev/null; \
+        "{bin} attach -d -t {tmux} 2>/dev/null \
+         || {bin} new-session -s {tmux} -c {repo}; \
+         {bin} resize-window -t {tmux} -x {cols} -y {rows} 2>/dev/null; \
+         {bin} set -w -t {tmux} window-size latest 2>/dev/null; \
          true",
         tmux = seed::sh_quote(tmux),
-        repo = seed::sh_quote(REPO_PATH),
+        repo = seed::sh_quote(&backend.paths(session).repo),
     )
 }
 
-/// The prefix every shell's tmux session is named with.
+/// The argv that attaches a terminal to a session, ready to be spawned under a
+/// pty.
 ///
-/// A prefix rather than a list kept somewhere: what shells exist is a fact
-/// about the sandbox, and tmux is already the thing that knows it. Asking tmux
-/// means a shell survives the window closing, the server restarting, and a
-/// second window opening -- none of which a list in a client would.
-const SHELL_PREFIX: &str = "shell-";
+/// One definition for `sbx attach`, the TUI's agent pane and the desktop's
+/// terminal channel. Where the session runs decides what that argv is -- an
+/// `openshell sandbox exec --tty` for one backend, the shell itself for the
+/// other -- and neither caller has to know which it got.
+pub fn attach_argv(
+    backend: &dyn Backend,
+    session: &Session,
+    tmux: &str,
+) -> Result<Vec<String>, String> {
+    let script = attach_script(backend, session, tmux);
+    backend
+        .interactive_argv(session, &["sh", "-c", &script])
+        .map_err(|e| e.to_string())
+}
 
 /// The shells beside the agent, by tmux session name.
 ///
-/// The agent's own is filtered out: it is not a shell you opened and not one
-/// you may close, and every caller would otherwise have to remember that.
-pub fn shells(client: &dyn OpenShell, session: &Session) -> Result<Vec<String>, String> {
-    let out = client
-        .exec(
-            &session.sandbox,
-            &["tmux", "list-sessions", "-F", "#{session_name}"],
-        )
-        .map_err(|e| format!("sandbox unreachable: {e}"))?;
-    // A sandbox with no tmux server at all exits non-zero saying so, which is
-    // "no shells" rather than a failure worth showing.
+/// Asked of tmux rather than kept in a list, because what shells exist is a
+/// fact about where the session runs and tmux is already the thing that knows
+/// it: a shell survives the window closing, the server restarting, and a second
+/// window opening -- none of which a list in a client would.
+///
+/// Filtered by the backend's prefix, and that is load-bearing for a worktree
+/// session: its tmux is the *server's*, shared with every other worktree
+/// session and with whatever the person at that machine is running themselves.
+/// Listing everything would offer someone else's work as this session's shells.
+pub fn shells(backend: &dyn Backend, session: &Session) -> Result<Vec<String>, String> {
+    let prefix = backend.shell_prefix(session);
+    let list = format!("{} list-sessions -F '#{{session_name}}'", backend.tmux());
+    let out = backend
+        .exec(session, &["sh", "-c", &list])
+        .map_err(|e| e.to_string())?;
+    // No tmux server at all exits non-zero saying so, which is "no shells"
+    // rather than a failure worth showing.
     if !out.ok() {
         return Ok(Vec::new());
     }
@@ -1171,7 +1164,7 @@ pub fn shells(client: &dyn OpenShell, session: &Session) -> Result<Vec<String>, 
         .trimmed()
         .lines()
         .map(str::trim)
-        .filter(|n| !n.is_empty() && *n != session.tmux)
+        .filter(|n| n.starts_with(&prefix))
         .map(str::to_string)
         .collect();
     names.sort();
@@ -1187,21 +1180,23 @@ pub fn shells(client: &dyn OpenShell, session: &Session) -> Result<Vec<String>, 
 /// It is the same sandbox under the same policy. A shell is not a way around
 /// the isolation -- it is a second prompt inside it, which is the point: you
 /// can run the tests while the agent is still working.
-pub fn new_shell(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
-    let taken = shells(client, session)?;
+pub fn new_shell(backend: &dyn Backend, session: &Session) -> Result<String, String> {
+    let prefix = backend.shell_prefix(session);
+    let taken = shells(backend, session)?;
     let name = (1..)
-        .map(|n| format!("{SHELL_PREFIX}{n}"))
+        .map(|n| format!("{prefix}{n}"))
         .find(|candidate| !taken.contains(candidate))
         .ok_or("no free shell name")?;
 
     let script = format!(
-        "{UTF8_ENV} tmux -u -f /etc/tmux.conf new-session -d -s {name} -c {repo}",
+        "{bin} new-session -d -s {name} -c {repo}",
+        bin = backend.tmux(),
         name = seed::sh_quote(&name),
-        repo = seed::sh_quote(REPO_PATH),
+        repo = seed::sh_quote(&backend.paths(session).repo),
     );
-    let out = client
-        .exec(&session.sandbox, &["sh", "-c", &script])
-        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    let out = backend
+        .exec(session, &["sh", "-c", &script])
+        .map_err(|e| e.to_string())?;
     if !out.ok() {
         return Err(format!("could not open a shell: {}", out.stderr.trim()));
     }
@@ -1209,32 +1204,27 @@ pub fn new_shell(client: &dyn OpenShell, session: &Session) -> Result<String, St
 }
 
 /// Close one, killing whatever is running in it.
-pub fn kill_shell(client: &dyn OpenShell, session: &Session, tmux: &str) -> Result<(), String> {
+pub fn kill_shell(backend: &dyn Backend, session: &Session, tmux: &str) -> Result<(), String> {
     // The agent's session is not a shell and closing its tab must not stop it.
-    // Checked here rather than trusted from the request, which is a client's.
-    if tmux == session.tmux || !tmux.starts_with(SHELL_PREFIX) {
+    // Checked here rather than trusted from the request, which is a client's --
+    // and against the backend's own prefix, so a worktree session cannot be
+    // asked to kill a tmux session belonging to another one.
+    if tmux == session.tmux || !tmux.starts_with(&backend.shell_prefix(session)) {
         return Err(format!("`{tmux}` is not a shell"));
     }
-    let out = client
-        .exec(&session.sandbox, &["tmux", "kill-session", "-t", tmux])
-        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+    let script = format!(
+        "{bin} kill-session -t {tmux}",
+        bin = backend.tmux(),
+        tmux = seed::sh_quote(tmux),
+    );
+    let out = backend
+        .exec(session, &["sh", "-c", &script])
+        .map_err(|e| e.to_string())?;
     if !out.ok() {
         return Err(format!("could not close it: {}", out.stderr.trim()));
     }
     Ok(())
 }
-
-/// The locale a tmux client needs, and the `-u` that does not depend on it.
-///
-/// The gateway does not pass the image's environment through to an exec, so a
-/// client started this way inherits no locale: tmux then assumes a terminal that
-/// is not UTF-8, draws box rules with the DEC line-drawing set and replaces every
-/// character it cannot map with `_`. That is what turned Claude Code's banner and
-/// its `⏸` and `❯` glyphs into underscores. `-u` says "this terminal is UTF-8"
-/// outright; the locale is exported as well because everything else in the
-/// sandbox reads it -- git for one -- and `COLORTERM` is how the agent decides it
-/// may use 24-bit colour.
-const UTF8_ENV: &str = "LANG=C.UTF-8 LC_ALL=C.UTF-8 COLORTERM=truecolor";
 
 /// What destroying a session did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -1260,24 +1250,31 @@ pub enum Destroyed {
 /// Deletion itself is asynchronous. The sandbox stays listed as `Deleting` for
 /// a while afterwards, which `store::reconcile` already reads as dead, so a
 /// caller that refreshes immediately sees the row go rather than come back.
-pub fn destroy(client: &dyn OpenShell, name: &str) -> Result<Destroyed, String> {
-    let sandbox = Store::load()
+pub fn destroy(backends: &Backends, name: &str) -> Result<Destroyed, String> {
+    let record = Store::load()
         .map_err(|e| format!("could not read the session cache: {e}"))?
         .get(name)
-        .map(|s| s.sandbox.clone())
-        .unwrap_or_else(|| session::sandbox_name(name));
+        .cloned();
+    // A session the cache has lost is still a sandbox, because that is the kind
+    // whose name is a pure function of the session's -- which is what makes it
+    // removable with no record at all. There is no such convention for a
+    // worktree and there cannot be one, so its backend answers `RecordOnly`.
+    let kind = record
+        .as_ref()
+        .map_or(session::Kind::Sandbox, |s| s.backend);
+    let backend = backends.of_kind(kind);
 
-    let outcome = match client.delete(&sandbox) {
-        Ok(()) => Destroyed::Sandbox,
-        Err(OsError::NotFound(_)) => Destroyed::RecordOnly,
-        Err(e) => return Err(format!("could not delete {sandbox}: {e}")),
+    let outcome = match backend.tear_down(name, record.as_ref()) {
+        Ok(Torn::Removed) => Destroyed::Sandbox,
+        Ok(Torn::RecordOnly) => Destroyed::RecordOnly,
+        Err(e) => return Err(format!("could not remove `{name}`: {e}")),
     };
 
-    // Only after the gateway has accepted the deletion: dropping the record
+    // Only after the backend has accepted the deletion: dropping the record
     // first would lose the sandbox name on a failure, leaving a sandbox running
     // that nothing knows how to name.
     store::update(|store| store.remove(name))
-        .map_err(|e| format!("deleted {sandbox}, but could not update the cache: {e}"))?;
+        .map_err(|e| format!("removed `{name}`, but could not update the cache: {e}"))?;
     // The kept events go with it: they are about a sandbox that no longer exists.
     events::forget_kept(name);
     Ok(outcome)
@@ -1308,12 +1305,12 @@ pub struct Poll {
 /// Output is three sections, separated by markers rather than parsed
 /// positionally: a pane capture is arbitrary text and can contain anything,
 /// including something that looks like a stat line.
-pub fn poll(client: &dyn OpenShell, session: &Session) -> Poll {
-    let script = poll_script(session);
+pub fn poll(backend: &dyn Backend, session: &Session) -> Poll {
+    let script = poll_script(backend, session);
 
     // A poll is decoration on a column: an unreachable sandbox or a
     // half-seeded repository leaves it blank rather than shouting.
-    let Ok(out) = client.exec(&session.sandbox, &["sh", "-c", &script]) else {
+    let Ok(out) = backend.exec(session, &["sh", "-c", &script]) else {
         return Poll::default();
     };
     if !out.ok() {
@@ -1327,7 +1324,8 @@ pub fn poll(client: &dyn OpenShell, session: &Session) -> Poll {
 /// The repository work is confined to a subshell: a session whose clone has not
 /// finished, or failed, still has an agent worth asking about, and a bare `cd`
 /// failure would otherwise take the rest of the script with it.
-fn poll_script(session: &Session) -> String {
+fn poll_script(backend: &dyn Backend, session: &Session) -> String {
+    let paths = backend.paths(session);
     format!(
         r#"( cd {repo} 2>/dev/null || exit 0
 {resolve_base}
@@ -1345,12 +1343,13 @@ cat {status_path} 2>/dev/null
 printf '
 %s
 ' {pane_marker}
-tmux -u -f /etc/tmux.conf capture-pane -pe -t {tmux} 2>/dev/null | tail -n {pane_lines}
+{tmux_bin} capture-pane -pe -t {tmux} 2>/dev/null | tail -n {pane_lines}
 "#,
-        repo = seed::sh_quote(REPO_PATH),
+        repo = seed::sh_quote(&paths.repo),
         resolve_base = resolve_base_script(session),
         status_marker = seed::sh_quote(status::STATUS_MARKER),
-        status_path = seed::sh_quote(STATUS_PATH),
+        status_path = seed::sh_quote(&paths.status()),
+        tmux_bin = backend.tmux(),
         pane_marker = seed::sh_quote(status::PANE_MARKER),
         tmux = seed::sh_quote(&session.tmux),
         pane_lines = PANE_LINES,
@@ -1434,7 +1433,8 @@ mod tests {
     /// invisible until it is missing.
     #[test]
     fn the_attach_script_attaches_falls_back_and_puts_the_size_back() {
-        let script = attach_script(&session().tmux);
+        let s = session();
+        let script = attach_script(&crate::backend::testing::sandboxed(), &s, &s.tmux);
         assert!(script.contains("attach -d"), "{script}");
         // Without these the client draws Claude Code's glyphs as underscores.
         assert!(
@@ -1590,10 +1590,10 @@ mod tests {
         let script_has = |needle: &str| {
             let s = Session::new("t".into(), "url".into(), "task".into());
             // Rebuilt here rather than exposed, since only its shape matters.
-            let script = poll_script(&s);
+            let script = poll_script(&crate::backend::testing::sandboxed(), &s);
             assert!(script.contains(needle), "missing {needle} in:\n{script}");
         };
-        script_has(STATUS_PATH);
+        script_has(session::STATUS_PATH);
         // With the escapes, because the pane that shows the screen wants the
         // colour, and `-u` so the capture is UTF-8 rather than mangled into
         // underscores.
@@ -1604,7 +1604,7 @@ mod tests {
         // `cd` failing must not skip the status read, so it is confined to a
         // subshell rather than exiting the script.
         let s = Session::new("t".into(), "url".into(), "task".into());
-        let script = poll_script(&s);
+        let script = poll_script(&crate::backend::testing::sandboxed(), &s);
         let cd_line = script.lines().find(|l| l.contains("cd ")).unwrap();
         assert!(
             cd_line.trim_start().starts_with('('),
@@ -1764,7 +1764,7 @@ mod tests {
     /// while the rest is still arriving; the single `Enter` is the submission.
     #[test]
     fn a_multi_line_message_is_one_bracketed_paste_and_one_enter() {
-        let script = tell_script("agent", "first line\nsecond line");
+        let script = tell_script("tmux -u", "agent", "first line\nsecond line");
         assert!(script.contains("load-buffer -b sbx-tell -"), "{script}");
         assert!(
             script.contains("paste-buffer -b sbx-tell -t 'agent' -d -p"),
@@ -1778,7 +1778,7 @@ mod tests {
     /// agent as text rather than as shell.
     #[test]
     fn a_message_with_quotes_in_it_cannot_break_out_of_the_script() {
-        let script = tell_script("agent", "it's `wrong`; rm -rf / #");
+        let script = tell_script("tmux -u", "agent", "it's `wrong`; rm -rf / #");
         // The dangerous run is inside a quoted literal, not sitting in the
         // command position where the shell would act on it.
         assert!(!script.contains("; rm -rf / #'\n"), "{script}");

@@ -14,8 +14,22 @@ export function Facts({ session }: { session: Session }) {
       <Row label="repo" value={session.repo} />
       <Row label="branch" value={session.work_branch} />
       <Row label="base" value={session.base_branch ?? "(the remote's default)"} />
-      <Row label="sandbox" value={session.sandbox} />
-      <Row label="policy" value={session.policy ?? "(none recorded)"} />
+      {/* The two rows a sandboxed session has here are the two a worktree
+          session does not: it has a directory on the server instead of a
+          sandbox, and no policy at all. Showing them as "(none recorded)"
+          would read as a record that lost them. */}
+      {session.backend === "sandbox" ? (
+        <>
+          <Row label="isolation" value="sandboxed" />
+          <Row label="sandbox" value={session.sandbox} />
+          <Row label="policy" value={session.policy ?? "(none recorded)"} />
+        </>
+      ) : (
+        <>
+          <Row label="isolation" value="none — a worktree on the server" />
+          <Row label="workdir" value={session.workdir ?? "(unknown)"} />
+        </>
+      )}
       <Row label="agent" value={session.agent} />
       <List label="providers" values={session.providers} />
       <List label="toolchains" values={session.toolchains} />

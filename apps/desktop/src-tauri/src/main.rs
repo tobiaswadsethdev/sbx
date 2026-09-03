@@ -27,20 +27,47 @@ use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
-use sbx_proto::{GitOp, Reply, Request};
+use sbx_proto::{FailureKind, GitOp, Reply, Request};
 use serde::Serialize;
 use tauri::{Emitter as _, Manager as _};
 
 /// What a failed command looks like in the webview.
 ///
-/// A string, because every one of these is shown to a person rather than
-/// branched on. The typed `FailureKind` the protocol carries is what a *client*
-/// branches on, and this application does not yet need to -- when it does, this
-/// grows a field rather than the UI parsing English.
-type Failed = String;
+/// It was a bare string, on the grounds that every one of these is shown to a
+/// person rather than branched on, and that when something did need to branch
+/// this would grow a field rather than have the UI parse English. That is what
+/// has happened: a worktree session answers `no-isolation` to a request for its
+/// policy, and the difference between "there is no policy, here is why" and
+/// "the policy could not be read" is the difference between a pane that states
+/// a fact and one that looks broken.
+///
+/// The `message` is still the server's own words. What the kind decides is how
+/// they are drawn.
+#[derive(Debug, Clone, Serialize)]
+struct Failed {
+    kind: FailureKind,
+    message: String,
+}
 
 fn to_message(e: sbx_client::Error) -> Failed {
-    e.to_string()
+    let message = e.to_string();
+    Failed {
+        // A transport error and a reply that was not a reply are both failures
+        // of this request; only the server's own `Failure` carries a kind.
+        kind: match e {
+            sbx_client::Error::Failed(f) => f.kind,
+            _ => FailureKind::Failed,
+        },
+        message,
+    }
+}
+
+/// The same shape for a failure this side produced: no pairing, no such server.
+fn failed(message: impl std::fmt::Display) -> Failed {
+    Failed {
+        kind: FailureKind::Failed,
+        message: message.to_string(),
+    }
 }
 
 /// A paired server, as the picker shows it. No token: it is a credential, and
@@ -53,7 +80,7 @@ struct ServerSummary {
 
 #[tauri::command]
 fn servers() -> Result<Vec<ServerSummary>, Failed> {
-    let remotes = Remotes::load().map_err(|e| e.to_string())?;
+    let remotes = Remotes::load().map_err(failed)?;
     Ok(remotes
         .list()
         .iter()
@@ -87,7 +114,7 @@ struct Paired {
 /// cannot run there at all.
 #[tauri::command]
 fn connect(pairing: String, name: Option<String>) -> Result<Paired, Failed> {
-    let (remote, hello) = sbx_client::pair(&pairing, name.as_deref())?;
+    let (remote, hello) = sbx_client::pair(&pairing, name.as_deref()).map_err(failed)?;
     Ok(Paired {
         server: ServerSummary {
             name: remote.name.clone(),
@@ -105,17 +132,17 @@ fn connect(pairing: String, name: Option<String>) -> Result<Paired, Failed> {
 /// matters if the token has been somewhere it should not.
 #[tauri::command]
 fn forget(name: String) -> Result<Vec<ServerSummary>, Failed> {
-    let mut remotes = Remotes::load().map_err(|e| e.to_string())?;
+    let mut remotes = Remotes::load().map_err(failed)?;
     if !remotes.remove(&name) {
-        return Err(format!("no server named `{name}`"));
+        return Err(failed(format!("no server named `{name}`")));
     }
-    remotes.save().map_err(|e| e.to_string())?;
+    remotes.save().map_err(failed)?;
     servers()
 }
 
 fn remote(name: &str) -> Result<Remote, Failed> {
-    let remotes = Remotes::load().map_err(|e| e.to_string())?;
-    remotes.select(Some(name)).cloned()
+    let remotes = Remotes::load().map_err(failed)?;
+    remotes.select(Some(name)).cloned().map_err(failed)
 }
 
 /// The reply a request was supposed to produce, or a message saying it was not.
@@ -127,7 +154,10 @@ macro_rules! expect_reply {
     ($reply:expr, $pattern:pat => $value:expr, $what:literal) => {
         match $reply {
             $pattern => Ok($value),
-            _ => Err(format!("the server answered something other than {}", $what)),
+            _ => Err(crate::failed(format!(
+                "the server answered something other than {}",
+                $what
+            ))),
         }
     };
 }
@@ -376,7 +406,7 @@ const FRAME: &str = "sbx://frame";
 /// it -- correct, since the channels named sessions on the old one.
 fn connected(app: &tauri::AppHandle, server: &str) -> Result<(), Failed> {
     let state = app.state::<Streaming>();
-    let mut open = state.open.lock().map_err(|e| e.to_string())?;
+    let mut open = state.open.lock().map_err(failed)?;
 
     if open.as_ref().is_some_and(|o| o.server == server) {
         return Ok(());
@@ -421,14 +451,14 @@ const ALL_CHANNELS: ChannelId = ChannelId::MAX;
 
 fn send(app: &tauri::AppHandle, frame: ClientFrame) -> Result<(), Failed> {
     let state = app.state::<Streaming>();
-    let open = state.open.lock().map_err(|e| e.to_string())?;
+    let open = state.open.lock().map_err(failed)?;
     let Some(open) = open.as_ref() else {
-        return Err("not connected".into());
+        return Err(failed("not connected"));
     };
     open.sink
         .send(frame)
         .then_some(())
-        .ok_or_else(|| "the connection has ended".to_string())
+        .ok_or_else(|| failed("the connection has ended"))
 }
 
 #[tauri::command]

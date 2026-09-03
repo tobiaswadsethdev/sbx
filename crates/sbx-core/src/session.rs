@@ -276,6 +276,47 @@ pub fn validate_name(name: &str) -> Result<(), NameError> {
     Ok(())
 }
 
+/// Which kind of place a session runs in.
+///
+/// Stored on the record rather than worked out from what exists, because it
+/// decides how *everything* about the session is done -- where an exec goes,
+/// where its files are, whether there is a policy at all -- and a session whose
+/// kind had to be guessed would be one guessed wrong at the worst moment.
+///
+/// `#[serde(default)]` on the field: every record written before this existed
+/// is a sandbox, which is what the default says.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    /// A kernel-enforced sandbox, with the gateway applying a policy to
+    /// everything that leaves it. The default, and the point of the tool.
+    #[default]
+    Sandbox,
+    /// A `git worktree` on the server, running with the server's own rights.
+    /// Labelled as such everywhere it appears.
+    Worktree,
+}
+
+impl Kind {
+    /// The badge a list shows. Short, because it sits in a column beside a
+    /// state and an age.
+    pub fn badge(self) -> &'static str {
+        match self {
+            Kind::Sandbox => "sandbox",
+            Kind::Worktree => "worktree",
+        }
+    }
+}
+
+impl std::fmt::Display for Kind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `pad` for the same reason [`State`]'s does: a list column sets a
+        // width and a direct write ignores it.
+        f.pad(self.badge())
+    }
+}
+
 /// Lifecycle state.
 ///
 /// The agent-derived states (`Running`, `Waiting`, `Idle`) are not set yet;
@@ -321,7 +362,26 @@ impl std::fmt::Display for State {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Session {
     pub name: String,
+    /// Which kind of place this runs in. See [`Kind`]; absent from every record
+    /// written before there was more than one, which is why it defaults.
+    #[serde(default)]
+    pub backend: Kind,
+    /// The sandbox this session owns, derived from its name.
+    ///
+    /// Still the sandbox name for a worktree session, where nothing uses it:
+    /// dropping it would make the field an `Option` in every record on disk to
+    /// save nineteen characters, and `sandbox_name` is a pure function of the
+    /// name either way.
     pub sandbox: String,
+    /// The worktree's own directory on the server, for a session that is one.
+    ///
+    /// `None` for a sandboxed session, whose working copy is always
+    /// [`REPO_PATH`] inside its own filesystem. Chosen when the worktree is
+    /// added and recorded because there is nowhere else to learn it from
+    /// afterwards -- `git worktree list` would say, but only if the record
+    /// already knew which checkout to ask.
+    #[serde(default)]
+    pub workdir: Option<String>,
     /// Name of the tmux session inside the sandbox. Stored rather than assumed
     /// so an older session keeps working if the default ever changes.
     pub tmux: String,
@@ -407,7 +467,9 @@ pub fn humanize_age(created_at: u64, now: u64) -> String {
 impl Session {
     pub fn new(name: String, repo: String, task: String) -> Self {
         Session {
+            backend: Kind::Sandbox,
             sandbox: sandbox_name(&name),
+            workdir: None,
             tmux: TMUX_SESSION.to_string(),
             work_branch: format!("sbx/{name}"),
             name,
@@ -437,6 +499,28 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every record on disk and inside every running sandbox was written before
+    /// there was more than one kind of session, and none of them carries
+    /// `backend` or `workdir`. Reading one has to mean "a sandbox" -- the kind
+    /// of compatibility that breaks silently, since the alternative is a
+    /// deserialization error that reads as a corrupt cache.
+    #[test]
+    fn a_record_from_before_there_were_two_kinds_is_a_sandbox() {
+        let old = r#"{
+            "name": "readme-fix",
+            "sandbox": "sbx-readme-fix",
+            "tmux": "agent",
+            "repo": "https://github.com/you/sbx.git",
+            "work_branch": "sbx/readme-fix",
+            "created_at": 1788000000,
+            "state": "ready"
+        }"#;
+        let s: Session = serde_json::from_str(old).expect("an older record still reads");
+        assert_eq!(s.backend, Kind::Sandbox);
+        assert_eq!(s.workdir, None);
+        assert_eq!(s.tmux, TMUX_SESSION);
+    }
 
     /// A variant tag is `IMAGE_REPO` plus the toolchains, and the base image is
     /// the same repository with `latest`. If those two drifted apart, every

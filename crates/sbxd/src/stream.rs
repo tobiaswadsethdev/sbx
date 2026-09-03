@@ -15,7 +15,6 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket};
-use openshell_client::CliClient;
 use sbx_core::events::Event;
 use sbx_core::ops;
 use sbx_core::session::Session;
@@ -225,9 +224,12 @@ async fn events(id: ChannelId, session: Session, out: mpsc::Sender<ServerFrame>)
 
     loop {
         let s = session.clone();
-        let fetched = tokio::task::spawn_blocking(move || ops::events(&CliClient::default(), &s))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
+        let fetched = tokio::task::spawn_blocking(move || {
+            let backends = crate::rpc::backends();
+            ops::events(backends.for_session(&s), &s)
+        })
+        .await
+        .unwrap_or_else(|e| Err(e.to_string()));
 
         match fetched {
             Ok(all) => {
@@ -267,8 +269,11 @@ async fn status(id: ChannelId, session: Session, out: mpsc::Sender<ServerFrame>)
 
     loop {
         let s = session.clone();
-        let Ok(poll) =
-            tokio::task::spawn_blocking(move || ops::poll(&CliClient::default(), &s)).await
+        let Ok(poll) = tokio::task::spawn_blocking(move || {
+            let backends = crate::rpc::backends();
+            ops::poll(backends.for_session(&s), &s)
+        })
+        .await
         else {
             return;
         };
@@ -369,9 +374,14 @@ fn pty_worker(
 ) {
     use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 
-    let client = CliClient::default();
-    let script = ops::attach_script(&tmux);
-    let argv = client.interactive_exec_argv(&session.sandbox, &["sh", "-c", &script]);
+    // The backend decides what attaching *is*: an `openshell sandbox exec
+    // --tty` into the sandbox's tmux, or the shell itself for a session that is
+    // a worktree on this machine. Either way it is spawned under the pty below
+    // exactly as a terminal emulator would.
+    let backends = crate::rpc::backends();
+    let Ok(argv) = ops::attach_argv(backends.for_session(&session), &session, &tmux) else {
+        return;
+    };
 
     // A size to start with. The client sends its own as soon as it has one, and
     // until then this is what tmux draws for -- so it is the session's own

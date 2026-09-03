@@ -8,6 +8,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import type { Comment } from "./gen/Comment";
+import type { FailureKind } from "./gen/FailureKind";
 import type { Dir } from "./gen/Dir";
 import type { Event } from "./gen/Event";
 import type { Against } from "./gen/Against";
@@ -102,10 +103,29 @@ export const api = {
   create: (server: string, session: NewSession) => invoke<string>("create", { server, session }),
 };
 
+/// A rejected command, as the bridge sends it: see `Failed` in main.rs.
+///
+/// The message is written for a person and is shown rather than interpreted.
+/// The kind is the one thing worth branching on: `no-isolation` is not a
+/// failure at all -- it is a worktree session saying it has no policy to show --
+/// and drawing it as an error would make every one of them look broken.
+export type Failed = { kind: FailureKind; message: string };
+
+function isFailed(e: unknown): e is Failed {
+  return typeof e === "object" && e !== null && "kind" in e && "message" in e;
+}
+
+/// What kind of failure this was, or `null` for anything that did not come
+/// from the bridge.
+export function kindOf(e: unknown): FailureKind | null {
+  return isFailed(e) ? e.kind : null;
+}
+
 /// A command's rejection is a string written for a person, so it is shown
 /// rather than interpreted. Anything that is not one is a bug in the bridge,
 /// and saying so beats rendering "[object Object]".
 export function messageOf(e: unknown): string {
+  if (isFailed(e)) return e.message;
   if (typeof e === "string") return e;
   if (e instanceof Error) return e.message;
   return `unexpected failure: ${JSON.stringify(e)}`;

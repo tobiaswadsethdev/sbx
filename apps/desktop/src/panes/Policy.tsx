@@ -11,8 +11,14 @@ import type { View } from "../gen/View";
 import type { Endpoint } from "../gen/Endpoint";
 
 export function PolicyPane({ server, name }: { server: string; name: string }) {
-  const { data, error } = useFetch(() => api.policy(server, name), [server, name]);
+  const { data, error, kind } = useFetch(() => api.policy(server, name), [server, name]);
 
+  // A worktree session has no policy, and this is where that has to be said.
+  // Not styled as an error and not left blank: an empty pane is exactly what a
+  // pane that failed to load looks like, and the one thing this pane exists to
+  // do is say what the session may and may not reach. The wording is the
+  // server's -- `Isolation::explain` -- so the terminal says the same thing.
+  if (kind === "no-isolation") return <Unisolated said={error} />;
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p className="loading">reading the policy…</p>;
   return <Policy view={data} />;
@@ -191,4 +197,17 @@ function EndpointRow({ endpoint: e }: { endpoint: Endpoint }) {
 
 function Notice({ children }: { children: React.ReactNode }) {
   return <p className="notice">{children}</p>;
+}
+
+/// What a session with no isolation shows instead of rules.
+///
+/// Exported because the events feed shows the same thing for the same reason,
+/// and two wordings of "this session is not isolated" is one too many.
+export function Unisolated({ said }: { said: string | null }) {
+  return (
+    <div className="unisolated">
+      <h3>not isolated</h3>
+      <p>{said}</p>
+    </div>
+  );
 }

@@ -36,6 +36,12 @@ const ACCENT: Color = Color::LightBlue;
 /// Everything that is present but not the point: labels, separators, second
 /// lines, inactive tabs.
 const DIM: Color = Color::DarkGray;
+/// A session with no isolation.
+///
+/// Yellow, and not `DIM`: a worktree session runs with the server's own rights,
+/// and the one thing the list must never do is let it look like every other
+/// row. It is not an error either, so it is not red.
+const UNISOLATED: Color = Color::Yellow;
 
 /// One colour per state, so the list is scannable without reading it.
 ///
@@ -268,15 +274,31 @@ fn session_item(
     let stat_spans = stat_spans(stat, quiet);
     let stat_w: usize = stat_spans.iter().map(|s| s.content.chars().count()).sum();
     let age_w = age.chars().count() + 1;
-    let branch_room = width.saturating_sub(4 + stat_w + age_w);
+    // A worktree session is labelled on the row itself. The terminal cannot
+    // create one -- the window can -- and a session created there and read here
+    // would otherwise be indistinguishable from a sandboxed one, which is the
+    // one thing this list may not do.
+    let kind = match session.backend {
+        session::Kind::Sandbox => String::new(),
+        session::Kind::Worktree => "worktree ".to_string(),
+    };
+    let branch_room = width.saturating_sub(4 + kind.chars().count() + stat_w + age_w);
     let branch = truncate(&session.work_branch, branch_room.max(4));
-    let pad = width.saturating_sub(4 + branch.chars().count() + stat_w + age_w);
+    let pad =
+        width.saturating_sub(4 + kind.chars().count() + branch.chars().count() + stat_w + age_w);
 
-    let mut spans = vec![
-        Span::raw("    ".to_string()),
-        Span::styled(branch, quiet),
-        Span::raw(" ".repeat(pad)),
-    ];
+    let mut spans = vec![Span::raw("    ".to_string())];
+    if !kind.is_empty() {
+        spans.push(Span::styled(
+            kind,
+            if selected {
+                Style::default().fg(SELECTED_FG)
+            } else {
+                Style::default().fg(UNISOLATED)
+            },
+        ));
+    }
+    spans.extend([Span::styled(branch, quiet), Span::raw(" ".repeat(pad))]);
     spans.extend(stat_spans);
     spans.push(Span::styled(format!(" {age}"), quiet));
 

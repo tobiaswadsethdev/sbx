@@ -111,7 +111,18 @@ export function Tree({
                 className={`worktree${s.name === selected ? " on" : ""}`}
                 onClick={() => onSelect(s.name)}
               >
-                <span className="name">{s.name}</span>
+                <span className="name">
+                  {s.name}
+                  {/* A worktree session runs on the server with the server's
+                      own rights, and the list is the first place that has to
+                      say so: a product whose pitch is isolation cannot have a
+                      kind of session that looks like every other row. */}
+                  {s.backend === "worktree" && (
+                    <span className="badge" title="no sandbox: runs on the server with its rights">
+                      worktree
+                    </span>
+                  )}
+                </span>
                 <span className={`state ${s.state}`}>{s.state}</span>
                 <span className="branch">{s.work_branch}</span>
                 <span className="age">{age(s.created_at)}</span>

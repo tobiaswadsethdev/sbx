@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 
 import { api, messageOf } from "./api";
 import type { Facts } from "./gen/Facts";
+import type { Kind } from "./gen/Kind";
 import type { NewOptions } from "./gen/NewOptions";
 import type { Picked } from "./gen/Picked";
 import type { Project } from "./gen/Project";
@@ -86,6 +87,10 @@ function Form({
 }) {
   const [task, setTask] = useState("");
   const [name, setName] = useState("");
+  // The sandbox is the default here for the same reason it is the default
+  // everywhere: it is the point of the tool, and the other one gives up the
+  // guarantee it exists to make.
+  const [kind, setKind] = useState<Kind>("sandbox");
   const [base, setBase] = useState(options.default_base ?? "");
   const [policy, setPolicy] = useState(options.default_policy);
   const [toolchains, setToolchains] = useState<string[]>([]);
@@ -127,11 +132,14 @@ function Form({
   const toggle = (list: string[], set: (v: string[]) => void, value: string) =>
     set(list.includes(value) ? list.filter((v) => v !== value) : [...list, value]);
 
+  const sandboxed = kind === "sandbox";
+
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
       const created = await api.create(server, {
+        backend: kind,
         project: project.name,
         // Blank means "derive it", which is what `sbx new` without `--name`
         // does. The rule lives on the server so there is one of it.
@@ -139,9 +147,13 @@ function Form({
         repo: project.repo,
         task,
         base: base.trim() || null,
+        // Sent as they stand for a sandbox, and empty for a worktree: there is
+        // no gateway to give a policy to, no credential for it to swap in and
+        // no image to build a toolchain into. The server clears them on the
+        // record too, so a worktree session never claims to have had any.
         policy,
-        providers,
-        toolchains,
+        providers: sandboxed ? providers : [],
+        toolchains: sandboxed ? toolchains : [],
         start: true,
       });
       onCreated(created);
@@ -161,7 +173,46 @@ function Form({
       </header>
 
       <p className="origin">{project.repo}</p>
-      {facts && <Drift facts={facts} />}
+      {facts && <Drift facts={facts} sandboxed={sandboxed} />}
+
+      {/* The first question, because it decides which of the others mean
+          anything. Two radios rather than a select: there are two, and what
+          matters about the second one is the sentence beside it. */}
+      <fieldset className="kinds">
+        <legend>where it runs</legend>
+        <label className="tick">
+          <input
+            type="radio"
+            checked={sandboxed}
+            onChange={() => setKind("sandbox")}
+          />
+          <span>sandbox</span>
+          <span className="hint">
+            a kernel-enforced sandbox, cloned from the remote, with a policy on
+            everything it reaches
+          </span>
+        </label>
+        <label className="tick">
+          <input
+            type="radio"
+            checked={!sandboxed}
+            onChange={() => setKind("worktree")}
+          />
+          <span>worktree</span>
+          <span className="hint">
+            a `git worktree` on the server, in seconds, sharing this checkout's
+            history
+          </span>
+        </label>
+      </fieldset>
+
+      {!sandboxed && (
+        <p className="warn">
+          No isolation: the agent runs on the server as the server's user, with
+          its files, its git credentials and whatever the network allows. There
+          is no policy and no allow/deny feed for this session.
+        </p>
+      )}
 
       <label>
         <span>task</span>
@@ -187,65 +238,78 @@ function Form({
         <span>base</span>
         <input
           value={base}
-          placeholder="the remote's default branch"
+          placeholder={sandboxed ? "the remote's default branch" : "the checkout's branch"}
           onChange={(e) => setBase(e.target.value)}
         />
       </label>
 
-      <label>
-        <span>policy</span>
-        <select value={policy} onChange={(e) => setPolicy(e.target.value)}>
-          {options.policies.map((p) => (
-            <option key={p.spec} value={p.spec}>
-              {p.spec} — {p.summary}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <fieldset>
-        <legend>toolchains</legend>
-        {options.toolchains.map((t) => (
-          <label key={t.name} className="tick">
-            <input
-              type="checkbox"
-              checked={toolchains.includes(t.name)}
-              onChange={() => toggle(toolchains, setToolchains, t.name)}
-            />
-            <span>{t.name}</span>
-            <span className="hint">{t.summary}</span>
+      {/* Everything below is an instruction to a gateway, so a worktree
+          session is not asked any of it. Hidden rather than disabled: a
+          greyed-out policy chooser suggests the choice exists and has been
+          taken away, when the truth is that there is nothing to apply it to. */}
+      {sandboxed ? (
+        <>
+          <label>
+            <span>policy</span>
+            <select value={policy} onChange={(e) => setPolicy(e.target.value)}>
+              {options.policies.map((p) => (
+                <option key={p.spec} value={p.spec}>
+                  {p.spec} — {p.summary}
+                </option>
+              ))}
+            </select>
           </label>
-        ))}
-      </fieldset>
 
-      <fieldset>
-        <legend>providers</legend>
-        {options.providers_error && <p className="error">{options.providers_error}</p>}
-        {options.providers.length === 0 && !options.providers_error && (
-          <p className="hint">the gateway has no credential providers</p>
-        )}
-        {options.providers.map((p) => (
-          <label key={p.name} className="tick">
-            <input
-              type="checkbox"
-              checked={providers.includes(p.name)}
-              onChange={() => toggle(providers, setProviders, p.name)}
-            />
-            <span>{p.name}</span>
-            <span className="hint">{p.kind}</span>
-          </label>
-        ))}
-      </fieldset>
+          <fieldset>
+            <legend>toolchains</legend>
+            {options.toolchains.map((t) => (
+              <label key={t.name} className="tick">
+                <input
+                  type="checkbox"
+                  checked={toolchains.includes(t.name)}
+                  onChange={() => toggle(toolchains, setToolchains, t.name)}
+                />
+                <span>{t.name}</span>
+                <span className="hint">{t.summary}</span>
+              </label>
+            ))}
+          </fieldset>
 
-      {/* Named, not offered: skills and MCP servers are one decision about what
-          your agents can reach, made in the server's config file. Shown so a
-          session's tools are not a surprise. */}
-      <dl className="carried">
-        <dt>skills</dt>
-        <dd>{options.skills.join(", ") || <span className="hint">none</span>}</dd>
-        <dt>mcp</dt>
-        <dd>{options.mcp.join(", ") || <span className="hint">none</span>}</dd>
-      </dl>
+          <fieldset>
+            <legend>providers</legend>
+            {options.providers_error && <p className="error">{options.providers_error}</p>}
+            {options.providers.length === 0 && !options.providers_error && (
+              <p className="hint">the gateway has no credential providers</p>
+            )}
+            {options.providers.map((p) => (
+              <label key={p.name} className="tick">
+                <input
+                  type="checkbox"
+                  checked={providers.includes(p.name)}
+                  onChange={() => toggle(providers, setProviders, p.name)}
+                />
+                <span>{p.name}</span>
+                <span className="hint">{p.kind}</span>
+              </label>
+            ))}
+          </fieldset>
+
+          {/* Named, not offered: skills and MCP servers are one decision about
+              what your agents can reach, made in the server's config file.
+              Shown so a session's tools are not a surprise. */}
+          <dl className="carried">
+            <dt>skills</dt>
+            <dd>{options.skills.join(", ") || <span className="hint">none</span>}</dd>
+            <dt>mcp</dt>
+            <dd>{options.mcp.join(", ") || <span className="hint">none</span>}</dd>
+          </dl>
+        </>
+      ) : (
+        <p className="hint">
+          The agent is the server's own, so it reads the server user's own
+          skills and MCP servers rather than being given a copy of them.
+        </p>
+      )}
 
       {error && <p className="error">{error}</p>}
 
@@ -263,11 +327,25 @@ function Form({
 /// The sandbox clones `origin`, so uncommitted work and unpushed commits are
 /// not coming with it. Worth saying before the session starts rather than after
 /// the agent has failed to find them.
-function Drift({ facts }: { facts: Facts }) {
+///
+/// A worktree is a different answer to the same question and gets a different
+/// sentence: it shares the object store, so unpushed commits *are* there and a
+/// base branch that has never been pushed is a perfectly good base -- but the
+/// working copy is its own, so uncommitted changes stay where they are.
+function Drift({ facts, sandboxed }: { facts: Facts; sandboxed: boolean }) {
   const bits: string[] = [];
   if (facts.uncommitted > 0) bits.push(`${facts.uncommitted} uncommitted`);
-  if (facts.unpushed) bits.push(`${facts.unpushed} unpushed`);
-  if (!facts.base_on_remote) bits.push("this branch is not on the remote");
+  if (sandboxed) {
+    if (facts.unpushed) bits.push(`${facts.unpushed} unpushed`);
+    if (!facts.base_on_remote) bits.push("this branch is not on the remote");
+  }
   if (bits.length === 0) return null;
-  return <p className="notice">{bits.join(", ")} — the sandbox clones the remote</p>;
+  return (
+    <p className="notice">
+      {bits.join(", ")} —{" "}
+      {sandboxed
+        ? "the sandbox clones the remote"
+        : "a worktree shares this checkout's history, not its working copy"}
+    </p>
+  );
 }

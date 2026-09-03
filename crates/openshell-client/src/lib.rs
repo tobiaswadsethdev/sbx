@@ -381,6 +381,13 @@ pub trait OpenShell {
     /// Providers defined at the gateway, for offering a choice of
     /// credentials rather than requiring their names to be known.
     fn providers(&self) -> Result<Vec<Provider>>;
+    /// The invocation that attaches a terminal to a sandbox, as an argv.
+    ///
+    /// On the trait rather than only on [`CliClient`] because the thing that
+    /// spawns it asks a *backend* for it now, and a backend holds one of these
+    /// as a trait object. An argv rather than a `Command` because it is spawned
+    /// under a pty, which needs the program and its arguments apart.
+    fn interactive_argv(&self, name: &str, argv: &[&str]) -> Vec<String>;
 }
 
 /// [`OpenShell`] backed by the `openshell` CLI.
@@ -503,6 +510,9 @@ impl CliClient {
     /// the program and its arguments separately. Kept as the one definition of
     /// what an interactive exec *is*, so the embedded terminal and `sbx attach`
     /// cannot end up talking to the gateway differently.
+    ///
+    /// Inherent as well as on the trait, because [`Self::interactive_exec`]
+    /// returns a `Command` and both of them are this one function.
     pub fn interactive_exec_argv(&self, sandbox: &str, argv: &[&str]) -> Vec<String> {
         let mut out = vec![self.bin.display().to_string()];
         if let Some(g) = &self.gateway {
@@ -655,6 +665,10 @@ impl OpenShell for CliClient {
         let display = "provider list --output json";
         let out = self.run_checked(["provider", "list", "--output", "json"], display)?;
         Self::parse_json(&out.stdout, display)
+    }
+
+    fn interactive_argv(&self, name: &str, argv: &[&str]) -> Vec<String> {
+        self.interactive_exec_argv(name, argv)
     }
 }
 

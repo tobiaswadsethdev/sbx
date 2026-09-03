@@ -65,6 +65,12 @@ pub struct Config {
     /// Where the TUI's picker looks for repositories. Replaces the built-in
     /// roots rather than adding to them, like `SBX_REPO_ROOTS`, which still wins.
     pub repo_roots: Option<Vec<PathBuf>>,
+    /// Where worktree sessions put their working copies, one directory each.
+    ///
+    /// Server-side, like [`Self::repo_roots`] and for the same reason: the
+    /// machine that adds the worktree is the one that has the checkout. `None`
+    /// means [`crate::backend::Worktree::default_root`].
+    pub worktree_root: Option<PathBuf>,
     /// How often the TUI reads the sandboxes. See its `Intervals`:
     /// this is one number scaling a set of measured ones, because they are
     /// related to each other and a single absolute interval would break the
@@ -241,6 +247,7 @@ impl Config {
             repo_roots: raw
                 .repo_roots
                 .map(|list| list.iter().map(|p| expand_tilde(p)).collect()),
+            worktree_root: raw.worktree_root.as_deref().map(expand_tilde),
             refresh,
             skills: resolved_skills,
             mcp,
@@ -282,6 +289,7 @@ struct Raw {
     policy: Option<String>,
     providers: Option<Vec<String>>,
     repo_roots: Option<Vec<PathBuf>>,
+    worktree_root: Option<PathBuf>,
     refresh: Option<String>,
     skills: Option<Vec<String>>,
     /// `[[mcp]]` tables. An `Option` so `deny_unknown_fields` still rejects a
@@ -588,6 +596,7 @@ mod tests {
             "policy",
             "providers",
             "repo_roots",
+            "worktree_root",
             "refresh",
             "skills",
         ] {

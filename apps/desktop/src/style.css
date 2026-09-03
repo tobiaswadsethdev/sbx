@@ -136,6 +136,34 @@ main { display: flex; flex: 1; min-height: 0; }
 .worktree .branch { grid-area: branch; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worktree .age { grid-area: age; color: var(--dim); }
 
+/* A session with no sandbox around it. Amber rather than red: it is a
+   deliberate choice someone made, not a fault -- and never the default grey,
+   which would let it pass for a sandboxed row at a glance. */
+.worktree .badge {
+  margin-left: 6px;
+  padding: 0 3px;
+  border: 1px solid var(--accent);
+  border-radius: 3px;
+  color: var(--accent);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+}
+
+/* What the policy pane and the events feed show for a session that has no
+   isolation. A stated absence, styled as a statement: an empty pane is what a
+   pane that failed to load looks like. */
+.unisolated { color: var(--dim); }
+.unisolated h3 {
+  margin: 0 0 6px;
+  color: var(--accent);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.unisolated p { margin: 0; max-width: 46ch; }
+
 .state { font-size: 11px; text-transform: lowercase; }
 .state.running { color: var(--running); }
 .state.waiting { color: var(--waiting); font-weight: 700; }
@@ -428,6 +456,23 @@ header .new:disabled { color: var(--dim); cursor: default; }
 .dialog .tick { display: flex; align-items: center; gap: 8px; padding: 2px 0; cursor: pointer; }
 .dialog .tick input { width: auto; }
 .dialog .hint { color: var(--dim); }
+
+/* The where-it-runs choice: the hint beside each is the part that matters, so
+   it wraps under the label rather than being clipped on one line. */
+.dialog .kinds .tick { align-items: baseline; flex-wrap: wrap; }
+.dialog .kinds .hint { flex-basis: 100%; padding-left: 22px; max-width: 52ch; }
+
+/* What picking the second one gives up. Amber and boxed, because it is the one
+   thing in this dialog that changes what the session promises -- and it is a
+   statement about the choice rather than an error with it. */
+.dialog .warn {
+  margin: 10px 0 0;
+  padding: 7px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  color: var(--text);
+  max-width: 60ch;
+}
 
 .repos { list-style: none; margin: 8px 0 0; padding: 0; max-height: 46vh; overflow-y: auto; }
 .repos button {

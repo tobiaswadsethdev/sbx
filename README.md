@@ -83,6 +83,11 @@ on the right.
 - **Two front ends over one server.** The same sessions from a terminal or from
   a window, and the window can be on a different machine from the sandboxes --
   see [docs/server.md](docs/server.md).
+- **A worktree, when a sandbox is the wrong tool.** `--worktree` starts the
+  session as a `git worktree` on the server instead: seconds rather than
+  minutes, the machine's own toolchains, and **no isolation whatsoever** -- so
+  it is labelled that way in every list, the policy and events panes say so, and
+  it is never the default. [docs/worktrees.md](docs/worktrees.md) is the trade.
 
 ## Quickstart
 
@@ -141,6 +146,7 @@ sbx doctor                                    # check gateway, docker, tmux, ima
 sbx image build                               # build the sandbox image (automatic on first use)
 sbx image build --toolchain dotnet,rust       # ... plus toolchains, as their own image variant
 sbx new --repo <url> --task "what to do"      # sandbox + clone + branch + agent
+sbx new --worktree --repo <path> --task "..."  # ... or a git worktree here, with no isolation
 sbx ls                                        # sessions, reconciled with the gateway
 sbx attach <name>                             # attach to the agent; Ctrl-b d to detach
 sbx diff <name>                               # what the agent has changed so far
@@ -185,6 +191,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 | [The server](docs/server.md)               | `sbxd`, pairing a client on another machine, WSL, what a token is worth |
 | [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |
 | [Policy and events](docs/policy.md)        | what is enforced, the audit feed, and acting on a denial              |
+| [Worktree sessions](docs/worktrees.md)     | sessions with no sandbox: what they buy, and everything they give up  |
 | [Git hosts](docs/git-hosts.md)             | GitHub and Azure DevOps, and how publishing keeps the token away      |
 | [Toolchains](docs/toolchains.md)           | node, .NET and Rust in a sandbox, and the registry each one may reach |
 | [Skills](docs/skills.md)                   | carrying your own skills into a sandbox                               |

@@ -13,11 +13,11 @@
 //! otherwise: every mutation reports what git actually said, and the caller
 //! re-reads the status afterwards rather than assuming its own change landed.
 
-use openshell_client::OpenShell;
 use serde::{Deserialize, Serialize};
 
+use crate::backend::Backend;
 use crate::seed::sh_quote;
-use crate::session::{REPO_PATH, Session};
+use crate::session::Session;
 
 /// What happened to one path.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
@@ -227,7 +227,7 @@ pub struct FileDiff {
 /// One exec, not two: they are serialised per sandbox, and a diff of a file is
 /// the sort of thing someone clicks through twenty of.
 pub fn file_diff(
-    client: &dyn OpenShell,
+    backend: &dyn Backend,
     session: &Session,
     path: &str,
     against: Against,
@@ -280,7 +280,7 @@ pub fn file_diff(
         },
     );
 
-    let out = run(client, session, &script)?;
+    let out = run(backend, session, &script)?;
     let mut halves = out.trim_end_matches('\n').splitn(2, '\n');
     let original = decode(halves.next().unwrap_or(""))?;
     let modified = decode(halves.next().unwrap_or(""))?;
@@ -308,11 +308,14 @@ fn decode(s: &str) -> Result<Vec<u8>, String> {
     crate::files::decode_base64(s.trim()).ok_or_else(|| "the file came back malformed".to_string())
 }
 
-fn run(client: &dyn OpenShell, session: &Session, script: &str) -> Result<String, String> {
-    let full = format!("cd {repo} && {script}", repo = sh_quote(REPO_PATH));
-    let out = client
-        .exec(&session.sandbox, &["sh", "-c", &full])
-        .map_err(|e| format!("sandbox unreachable: {e}"))?;
+fn run(backend: &dyn Backend, session: &Session, script: &str) -> Result<String, String> {
+    let full = format!(
+        "cd {repo} && {script}",
+        repo = sh_quote(&backend.paths(session).repo)
+    );
+    let out = backend
+        .exec(session, &["sh", "-c", &full])
+        .map_err(|e| e.to_string())?;
     if !out.ok() {
         // git's own words. A push rejected for being behind, a commit with
         // nothing staged, a pull with a conflict -- all things the person
@@ -327,31 +330,31 @@ fn run(client: &dyn OpenShell, session: &Session, script: &str) -> Result<String
     Ok(out.stdout)
 }
 
-pub fn status(client: &dyn OpenShell, session: &Session) -> Result<Status, String> {
+pub fn status(backend: &dyn Backend, session: &Session) -> Result<Status, String> {
     let out = run(
-        client,
+        backend,
         session,
         "git status --porcelain=v1 --branch --untracked-files=all",
     )?;
     Ok(parse_status(&out))
 }
 
-pub fn stage(client: &dyn OpenShell, session: &Session, path: &str) -> Result<(), String> {
+pub fn stage(backend: &dyn Backend, session: &Session, path: &str) -> Result<(), String> {
     let path = crate::files::clean(path)?;
     // `add -A` on the path so a deletion stages as one; plain `add` would only
     // ever stage content that is there.
     run(
-        client,
+        backend,
         session,
         &format!("git add -A -- {}", sh_quote(&path)),
     )
     .map(|_| ())
 }
 
-pub fn unstage(client: &dyn OpenShell, session: &Session, path: &str) -> Result<(), String> {
+pub fn unstage(backend: &dyn Backend, session: &Session, path: &str) -> Result<(), String> {
     let path = crate::files::clean(path)?;
     run(
-        client,
+        backend,
         session,
         &format!("git restore --staged -- {}", sh_quote(&path)),
     )
@@ -363,13 +366,13 @@ pub fn unstage(client: &dyn OpenShell, session: &Session, path: &str) -> Result<
 /// The one destructive thing here, and it races the agent by definition: it can
 /// be part-way through writing the file this is restoring. The caller asks
 /// first; this only does as it is told.
-pub fn discard(client: &dyn OpenShell, session: &Session, path: &str) -> Result<(), String> {
+pub fn discard(backend: &dyn Backend, session: &Session, path: &str) -> Result<(), String> {
     let path = crate::files::clean(path)?;
     let quoted = sh_quote(&path);
     // An untracked file has nothing to restore it to, so it is removed instead
     // -- which is what every git client means by discarding one.
     run(
-        client,
+        backend,
         session,
         &format!(
             "if git ls-files --error-unmatch -- {quoted} >/dev/null 2>&1; \
@@ -385,7 +388,7 @@ fn commit_message_is_empty(message: &str) -> bool {
     message.trim().is_empty()
 }
 
-pub fn commit(client: &dyn OpenShell, session: &Session, message: &str) -> Result<String, String> {
+pub fn commit(backend: &dyn Backend, session: &Session, message: &str) -> Result<String, String> {
     if commit_message_is_empty(message) {
         return Err("a commit needs a message".into());
     }
@@ -395,15 +398,15 @@ pub fn commit(client: &dyn OpenShell, session: &Session, message: &str) -> Resul
         "git commit -F - <<'SBX_COMMIT_MSG'\n{message}\nSBX_COMMIT_MSG",
         message = message.trim(),
     );
-    run(client, session, &script)
+    run(backend, session, &script)
 }
 
-pub fn push(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
+pub fn push(backend: &dyn Backend, session: &Session) -> Result<String, String> {
     // `-u` on every push, not only the first: it is a no-op once set, and
     // without it a branch that has never been pushed has no upstream to report
     // ahead and behind against afterwards.
     run(
-        client,
+        backend,
         session,
         &format!(
             "git push -u origin HEAD:{branch}",
@@ -412,14 +415,14 @@ pub fn push(client: &dyn OpenShell, session: &Session) -> Result<String, String>
     )
 }
 
-pub fn pull(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
+pub fn pull(backend: &dyn Backend, session: &Session) -> Result<String, String> {
     // `--ff-only`: a merge commit made behind the agent's back, in a working
     // copy it is still editing, is not something to do on a button press.
-    run(client, session, "git pull --ff-only")
+    run(backend, session, "git pull --ff-only")
 }
 
-pub fn fetch(client: &dyn OpenShell, session: &Session) -> Result<String, String> {
-    run(client, session, "git fetch --prune")
+pub fn fetch(backend: &dyn Backend, session: &Session) -> Result<String, String> {
+    run(backend, session, "git fetch --prune")
 }
 
 #[cfg(test)]

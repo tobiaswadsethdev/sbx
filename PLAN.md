@@ -2049,14 +2049,146 @@ for free, with nothing persisted client-side.
   `tmux: None` on the channel means the agent's own, so a client written before
   any of this keeps working -- there is a test for exactly that, because it is
   the kind of compatibility that breaks silently.
-- **32. Worktree backend** — the `Backend` trait, the second implementation, and
-  the labelling that keeps it honest.
+- **31c. A window that pairs itself, and the Windows half** — DONE. Pairing from
+  the header and from the empty screen, `sbx-core` building for Windows, and the
+  `.msi`/NSIS bundles in the release. Pulled forward out of increment 35,
+  because the alternative was a Windows user who cannot reach a server at all.
+
+  The instruction the empty screen used to give -- run `sbxd pair` over there,
+  `sbx connect` here, then reopen this window -- is fine on Linux and impossible
+  on Windows, where there is no `sbx`: the CLI drives Docker, tmux and a
+  gateway, none of which are on that side.
+
+  The pairing is not a second implementation. `sbx_client::pair` is the parsing,
+  the dial, the fingerprint check, the "is this an `sbxd` speaking this protocol"
+  check and the save; `sbx connect` is that plus a `println!` and the dialog is
+  that plus a form. Nothing is written until the server has answered, and what
+  comes back is the server's own version -- the one thing a paste cannot fake.
+  No error echoes the string back, since it carries a token.
+
+  **The client half did not compile for Windows, and nothing said so.**
+  `state.rs` reached for `std::os::unix::fs` to set 0600 on a key and 0700 on
+  its directory, and `update.rs` for the executable bit, with no `cfg`
+  anywhere -- so `sbx-core` failed to build for the one platform the desktop
+  application was supposed to be a client from. Windows gets
+  `%LOCALAPPDATA%\sbx`, chosen the way `$XDG_STATE_HOME` was: roaming is the
+  half of a profile that follows a user to another machine, and a pairing token
+  is a login to one host. There is no mode to set there and the module says so
+  rather than pretending to enforce one. CI checks the target on every change,
+  because what it guards against costs seconds here and a tagged release
+  anywhere else.
+
+  No Linux bundle, deliberately: a Tauri bundle links against the webkit2gtk of
+  the distribution that built it, and one `.deb` would be a promise about GTK
+  versions this cannot keep.
+
+  **A third WebKit metrics bug, found by building the dialog.** The zero font
+  metrics that gave the terminal a zero-height cell also make `line-height:
+  normal` resolve to nothing on a form control, whose height is its line-height
+  times its rows -- so every input and textarea in the window was a 14-pixel
+  sliver with its text clipped through the middle. It survived because fields
+  are typed into rather than read, and because a `<select>` beside them renders
+  correctly, bringing its own metrics. A pairing string is the one field you
+  read back, which is how it surfaced. Controls get the explicit line-height the
+  rest of the document must not have, and their padding absorbs the two pixels
+  it puts the baseline out by.
+- **32. Worktree backend** — DONE. The `Backend` trait, the second
+  implementation, and the labelling that keeps it honest. 552 tests, five of
+  them against a real git repository.
+
+  Everything in `ops`, `git`, `files`, `publish` and `seed` takes a backend
+  now instead of a gateway client, and every function in them is unchanged
+  otherwise. That is the shape of the whole increment: a worktree session is
+  not a special case anywhere above the trait, it is a different set of answers
+  to three questions -- where does an exec go, where are the files, is there
+  any isolation to report.
+
+  **The trait is all *where* and no *what*.** The scripts stay shared: one
+  definition of the diff, the poll, the status scrape, the review paste and the
+  seeder, each handed the paths and the tmux invocation it should use. A backend
+  with its own copy of the diff script would be a second answer to what a diff
+  is, which is the thing the two front ends already exist to avoid. `place` and
+  `configure` are separate for the reason the record is written between them: a
+  sandbox with no record yet is an orphan a refresh in another process will try
+  to adopt, and imposing MCP endpoints made that window seconds wide.
+
+  **The absence of isolation is stated, never implied.** `Isolation::None` is
+  refused with a sentence rather than answered with an empty pane -- an empty
+  policy pane is exactly what one that failed to load looks like, and the pane's
+  whole job is to say what the session cannot reach. The wording is the
+  server's, once, so the terminal and the window cannot drift; the protocol
+  grew a `no-isolation` failure kind and the desktop's Tauri bridge grew from a
+  `String` error into `{kind, message}`, which the comment on that type had
+  predicted would happen the first time something needed to branch. `sbx ls`
+  grew a `KIND` column, the tree grew a badge, and the facts pane trades
+  `sandbox`/`policy` for `isolation`/`workdir`.
+
+  Three things a worktree session cannot have, each of which had to be *said*:
+  the policy pane, the events feed, and a publish with the same guarantee.
+  `publish.rs` needed no code change for the last one -- the credential prelude
+  already degrades to a plain `git` when the gateway's placeholder is absent --
+  which is exactly why it needed a paragraph instead: the button is the same and
+  the token is the server's.
+
+  **The record cannot live in the working copy.** The invariant everything else
+  rests on -- the sandbox is the source of truth about itself -- has no worktree
+  equivalent. `.sbx/` in the working copy would be in every `git status` the
+  agent runs, in every diff under review, and one `git clean -fdx` from gone. So
+  it lives under the server's state directory, and adoption after a lost cache
+  is that directory reconciled against the worktrees still on disk. Removing a
+  session with no record answers `RecordOnly` rather than guessing at a
+  directory: unlike a sandbox name, a worktree's path is not a function of the
+  session's name once a root has been reconfigured.
+
+  **tmux is the server's, and that is a naming problem, not a plumbing one.**
+  Every sandbox has a tmux server to itself and can call the agent's session
+  `agent`. Here they share one -- with each other, and with whatever the person
+  at that machine is running -- so the agent is `sbx-<name>` and its shells are
+  `sbx-<name>-shell-N`, and `shells` filters on the backend's prefix instead of
+  "everything except the agent's". Without that, two sessions attach to one
+  agent and your own tmux sessions are offered as a session's shells. There is
+  an `#[ignore]`d test for exactly that, because it needs a tmux server.
+
+  **One backend being unreachable is not the other's problem.** `refresh_with`
+  used to be a gateway call that either worked or failed the command. A machine
+  with no `openshell` on the path at all still has git, and refusing to list its
+  worktree sessions would make the second backend useless precisely where it is
+  most useful -- so a backend that cannot answer contributes a warning and its
+  sessions pass through with the state they last had, never as `dead`. Only
+  every backend failing is an error, because that is no information at all
+  rather than a degraded list.
+
+  Two bugs the live run found, both in the shared half rather than the new one.
+  A `base=$(git symbolic-ref ...)` under the seeder's `set -e` **aborts the
+  script and prints nothing at all**, which is how a create failed with `failed
+  ` and an empty reason; the state file's last step is now reported when the log
+  has nothing to quote, which is a better answer for every seeder failure of
+  that shape. And `resolve_base_script` only ever tried `origin/<base>`, so a
+  checkout with no remote had no base and the diff pane said so on every
+  session -- it falls back to the local ref last, after the remote-tracking one,
+  which is the order that keeps a sandboxed diff measured from where the work
+  started. A worktree session records the checkout's current branch as its base
+  for the same reason.
+
+  What is not here: hook-driven status, since `sbx-status` is baked into the
+  image and a worktree session's state comes from reading the screen; skills and
+  MCP, since the agent is the server's own and packing them into the worktree
+  would put them in `git status`; and a project made from a checkout with no
+  origin, which `projects::add` still refuses because a project is also what a
+  sandboxed session clones.
+
+  Verified in the running application: a worktree session created from the
+  window's form, badged in the tree, with the policy and events panes stating
+  the absence and the facts pane naming the directory -- and the same session
+  created, diffed, attached and removed from the command line against a
+  repository with no remote at all.
 - **33. Managed MCP and skill sync** — the catalog, container lifecycle, the
   secret store, and the client-to-server skill upload.
 - **34. Task inbox** — GitHub, Azure DevOps and Jira; open-from-ticket and the
   publish round trip.
-- **35. Ship it** — notifications, usage and rate-limit display, Windows
-  packaging and signing, and the install story for a server that is not local.
+- **35. Ship it** — notifications, usage and rate-limit display, and signing.
+  Windows packaging and the install story for a server that is not local landed
+  early, in increment 31c.
 
 ## Risks
 

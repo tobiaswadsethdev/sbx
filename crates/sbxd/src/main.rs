@@ -16,7 +16,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use openshell_client::CliClient;
 use sbx_proto::Pairing;
 
 use auth::Tokens;
@@ -117,7 +116,7 @@ fn serve(opts: Serve) -> Fallible {
     // Once, at startup rather than per request: repairing a record left mid
     // lifecycle costs an exec per session, and what it fixes is a create that
     // died, which cannot happen again while the server is down.
-    match sbx_core::ops::refresh_with(&CliClient::default(), true) {
+    match sbx_core::ops::refresh_with(&rpc::backends(), true) {
         Ok(r) => {
             for name in &r.adopted {
                 println!("adopted `{name}`");

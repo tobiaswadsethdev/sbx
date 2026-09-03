@@ -702,6 +702,10 @@ impl Form {
         session::validate_name(&name).map_err(|e| e.to_string())?;
         let base = self.base.text().trim();
         Ok(ops::Draft {
+            // The terminal creates sandboxed sessions only. The worktree
+            // backend is offered in the window, which is where a form can say
+            // out loud what picking it gives up; see `docs/desktop.md`.
+            backend: session::Kind::Sandbox,
             // The terminal has no projects; see `Session::project`.
             project: None,
             name,

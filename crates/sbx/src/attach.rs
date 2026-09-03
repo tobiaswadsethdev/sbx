@@ -3,11 +3,13 @@
 //! Shared by `sbx attach` and the TUI rather than living in the core, because
 //! it is the one part of attaching that is about *this* terminal: a client
 //! driving a session from somewhere else has its own pty to manage and no use
-//! for raw mode here. What the core keeps is [`sbx_core::ops::attach_script`], the
-//! shell that runs at the sandbox end, which is the same wherever it is run from.
+//! for raw mode here. What the core keeps is
+//! [`sbx_core::ops::attach_argv`] -- the command that attaches, which the
+//! session's backend decides and which is the same wherever it is run from.
 
-use openshell_client::CliClient;
+use std::process::Command;
 
+use sbx_core::backend::Backends;
 use sbx_core::ops;
 use sbx_core::session::Session;
 
@@ -35,17 +37,16 @@ use sbx_core::session::Session;
 /// terminal that cannot be put into raw mode -- output redirected, no tty --
 /// attaches anyway rather than refusing, since that is still useful for reading.
 pub fn interactively(
-    client: &CliClient,
+    backends: &Backends,
     session: &Session,
 ) -> std::io::Result<std::process::ExitStatus> {
     let _raw = RawMode::enter();
-    let script = ops::attach_script(&session.tmux);
+    let argv = ops::attach_argv(backends.for_session(session), session, &session.tmux)
+        .map_err(std::io::Error::other)?;
     // Not `.output()` and never killed: the child must exit on its own, because
     // killing an `exec --tty` wedges the exec path for that sandbox until it is
     // recreated.
-    client
-        .interactive_exec(&session.sandbox, &["sh", "-c", &script])
-        .status()
+    Command::new(&argv[0]).args(&argv[1..]).status()
 }
 
 /// Raw mode for as long as it is alive.
