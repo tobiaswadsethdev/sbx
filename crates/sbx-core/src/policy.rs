@@ -1,0 +1,1287 @@
+//! Policy templates, the mid-run widen, and the policy pane's body.
+//!
+//! The isolation is the reason this tool exists rather than claude-squad, so it
+//! is deliberately visible: a named template at creation, the effective rules
+//! in a pane, and a keybinding to widen or tighten egress while the agent runs.
+//!
+//! Templates are embedded in the binary and written to a temp file when the CLI
+//! needs a path, the same trick [`crate::image`] uses for the build context, so
+//! `sbx` works installed rather than only from a checkout.
+
+use std::fmt::Write as _;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use openshell_client::{Policy, PolicyRevision, PolicyUpdate};
+
+use crate::endpoints::Lists;
+use crate::pane;
+
+/// A policy shipped with the binary, selectable by name.
+pub struct Template {
+    pub name: &'static str,
+    /// One line, for `--help` and the pane.
+    pub summary: &'static str,
+    pub yaml: &'static str,
+}
+
+/// The templates, widest-denying first. Order is the order `sbx new --help`
+/// lists them in, so it reads as a range rather than a set.
+pub const TEMPLATES: [Template; 3] = [
+    Template {
+        name: "readonly-explore",
+        summary: "clone and read; no push, no model API",
+        yaml: include_str!("../../../policies/readonly-explore.yaml"),
+    },
+    Template {
+        name: "feature-work",
+        summary: "clone, agent, push (github + azure devops)",
+        yaml: include_str!("../../../policies/feature-work.yaml"),
+    },
+    Template {
+        name: "net-open",
+        summary: "feature-work plus npm and PyPI",
+        yaml: include_str!("../../../policies/net-open.yaml"),
+    },
+];
+
+/// The template used when `--policy` is not given.
+pub const DEFAULT_TEMPLATE: &str = "feature-work";
+
+pub fn find(name: &str) -> Option<&'static Template> {
+    TEMPLATES.iter().find(|t| t.name == name)
+}
+
+/// Template names and summaries, for help text.
+pub fn help() -> String {
+    TEMPLATES
+        .iter()
+        .map(|t| format!("{:<17}{}", t.name, t.summary))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A policy resolved to a file the `openshell` CLI can be pointed at.
+///
+/// Owns the temp file when the policy came from a template, and removes it on
+/// drop -- so it has to stay alive until `sandbox create` has run, not just
+/// until the path has been read.
+#[derive(Debug)]
+pub struct Resolved {
+    /// What to record in the session: the template name, or the path as given.
+    pub label: String,
+    path: PathBuf,
+    temp: bool,
+}
+
+impl Resolved {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Resolved {
+    fn drop(&mut self) {
+        if self.temp {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("no policy template or file `{spec}`\n\navailable templates:\n{available}")]
+    Unknown { spec: String, available: String },
+    #[error("could not write the {template} template to {path}: {source}")]
+    Write {
+        template: String,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Resolve `--policy`: a template name, or a path to a YAML file.
+///
+/// A name is tried first, so a file called `net-open.yaml` in the working
+/// directory cannot silently shadow the template of that name -- but a spec
+/// that looks like a path (`./net-open`, `policies/net-open.yaml`) is never
+/// matched against a template, so the checked-in files stay usable directly.
+pub fn resolve(spec: &str) -> Result<Resolved, Error> {
+    let looks_like_path = spec.contains('/') || spec.ends_with(".yaml") || spec.ends_with(".yml");
+
+    if !looks_like_path && let Some(t) = find(spec) {
+        return materialize(t);
+    }
+
+    let path = PathBuf::from(spec);
+    if path.is_file() {
+        return Ok(Resolved {
+            label: spec.to_string(),
+            path,
+            temp: false,
+        });
+    }
+    Err(Error::Unknown {
+        spec: spec.to_string(),
+        available: help(),
+    })
+}
+
+/// Write an embedded template out so the CLI can be given a path.
+fn materialize(t: &Template) -> Result<Resolved, Error> {
+    // The pid keeps concurrent invocations from sharing a file. Not a security
+    // boundary: the content is a compile-time constant.
+    let path =
+        std::env::temp_dir().join(format!("sbx-policy-{}-{}.yaml", t.name, std::process::id()));
+    fs::write(&path, t.yaml).map_err(|source| Error::Write {
+        template: t.name.to_string(),
+        path: path.clone(),
+        source,
+    })?;
+    Ok(Resolved {
+        label: t.name.to_string(),
+        path,
+        temp: true,
+    })
+}
+
+/// The mid-run widen: the package registries.
+///
+/// Sent as a single `policy update`, because `--binary` applies to every
+/// `--add-endpoint` in the invocation: splitting npm and PyPI the way
+/// `net-open.yaml` splits them would mean two calls, two revisions and two
+/// six-second waits. The cost is that node can reach PyPI and uv can reach npm.
+///
+/// What the gateway does with that is not what asking for it suggests. Measured
+/// against 0.0.110, three `--add-endpoint` flags become *three* rules, one per
+/// endpoint (`allow_pypi_org_443`, `allow_registry_npmjs_org_443`, ...), each
+/// carrying the full binary list -- not one merged rule. Hence
+/// [`preset_rule_names`] returning a list, and hence the pane rendering the
+/// policy as it comes back rather than describing what was requested.
+pub struct Preset {
+    /// How to describe the preset to the user. Not the rule's name in the
+    /// policy: `--rule-name` is rejected for a multi-endpoint update, so the
+    /// gateway picks that, and reporting this string as the rule name would be
+    /// a lie. Use [`preset_rule_names`] for what it is actually called.
+    pub label: &'static str,
+    /// `host:port`.
+    pub endpoints: &'static [&'static str],
+    /// A method class, not an allow-list. `rules:` alone is default-deny, but
+    /// `access:` grants its whole method class; a registry fetch is thousands
+    /// of unpredictable paths, so read-only says what is actually meant.
+    pub access: &'static str,
+    pub binaries: &'static [&'static str],
+}
+
+pub const REGISTRIES: Preset = Preset {
+    label: "package registries (npm, PyPI)",
+    endpoints: &[
+        "registry.npmjs.org:443",
+        "pypi.org:443",
+        "files.pythonhosted.org:443",
+    ],
+    access: "read-only",
+    // node covers npm and npx, which are JavaScript files with a `#!` line, so
+    // the kernel-resolved exe is the interpreter. uv is a real binary. Plain
+    // `pip` is deliberately not covered: its exe is a version-pinned
+    // uv-managed interpreter path that would break on the next image rebuild.
+    binaries: &["/usr/bin/node", "/usr/local/bin/uv"],
+};
+
+impl Preset {
+    /// Add the preset's endpoints.
+    pub fn widen(&self) -> PolicyUpdate {
+        PolicyUpdate {
+            add_endpoints: self
+                .endpoints
+                .iter()
+                .map(|e| format!("{e}:{}:rest:enforce", self.access))
+                .collect(),
+            binaries: self.binaries.iter().map(|b| (*b).to_string()).collect(),
+            // Only accepted with exactly one --add-endpoint, so it cannot be
+            // set here; the gateway derives a rule name from the first host.
+            rule_name: None,
+            // The whole point is that the next request is governed by the new
+            // rules, so returning before they load would be a lie.
+            wait: true,
+            ..Default::default()
+        }
+    }
+
+    /// Remove them again. Removing every endpoint of a rule removes the rule,
+    /// verified against 0.0.110.
+    pub fn tighten(&self) -> PolicyUpdate {
+        PolicyUpdate {
+            remove_endpoints: self.endpoints.iter().map(|e| (*e).to_string()).collect(),
+            wait: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// The rule keys the gateway actually created for the preset, if any.
+///
+/// `--rule-name` is rejected for a multi-endpoint update, so the names are the
+/// gateway's to choose -- and it chooses one per endpoint, derived from the
+/// host. Matching on the endpoints instead keeps "is this already applied?"
+/// correct whatever it picks.
+pub fn preset_rule_names(policy: &Policy, preset: &Preset) -> Vec<String> {
+    policy
+        .network_policies
+        .iter()
+        .filter(|(_, p)| {
+            p.endpoints
+                .iter()
+                .any(|e| preset.endpoints.contains(&e.host_port().as_str()))
+        })
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+/// The policy pane's content, as facts rather than as text.
+///
+/// Introduced when a second thing had to draw it. `render` used to build marked
+/// up text straight out of the gateway's reply, which is fine for one renderer
+/// and wrong for two: a web view would have had to parse the terminal's markup
+/// back into structure it never should have lost, and the wire would have
+/// carried a rendering rather than an answer.
+///
+/// **Facts, not prose.** There is no `notices: Vec<String>` here, though the
+/// terminal draws several. Every one of them is a conclusion from something in
+/// this struct -- `revision.settled`, `template` beside `revision.version`,
+/// `revision.source` -- so each renderer states them in its own voice rather
+/// than being handed English it must display verbatim. The derivations are one
+/// line each, and [`View::changed_since_creation`] and friends are them.
+///
+/// It also keeps `openshell-client` off the wire entirely, which is worth more
+/// than it sounds: the gateway's own types are a `0.0.x` project's, and pinning
+/// a protocol to them would mean their churn is protocol churn.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct View {
+    /// The template the session was created from, which is recorded on the
+    /// session rather than derivable from the policy.
+    pub template: Option<String>,
+    pub revision: Revision,
+    /// `None` when the gateway returned a revision with no policy in it, which
+    /// is different from a policy that grants nothing.
+    pub network: Option<Vec<Rule>>,
+    /// Omitted when the global lists are empty, which is the common case.
+    pub lists: Option<ListsView>,
+    /// `None` for the same reason as `network`.
+    pub locked: Option<Locked>,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Revision {
+    pub version: u32,
+    pub active_version: u32,
+    /// Whether the submitted revision is the one being enforced.
+    pub settled: bool,
+    pub source: Option<String>,
+    pub hash: Option<String>,
+}
+
+impl View {
+    pub fn of(rev: &PolicyRevision, template: Option<&str>, lists: &Lists) -> Self {
+        let revision = Revision {
+            version: rev.version,
+            active_version: rev.active_version,
+            settled: rev.is_settled(),
+            source: (!rev.policy_source.is_empty()).then(|| rev.policy_source.clone()),
+            hash: (!rev.hash.is_empty()).then(|| rev.hash.clone()),
+        };
+
+        let Some(policy) = &rev.policy else {
+            return View {
+                template: template.map(str::to_string),
+                revision,
+                network: None,
+                lists: None,
+                locked: None,
+            };
+        };
+
+        View {
+            template: template.map(str::to_string),
+            revision,
+            network: Some(policy.network_policies.iter().map(Rule::of).collect()),
+            lists: ListsView::of(policy, lists),
+            locked: Some(Locked::of(policy)),
+        }
+    }
+
+    /// Whether the rules have moved away from the template since creation.
+    ///
+    /// A widen, a tighten, or one endpoint allowed from the events feed. Worth
+    /// saying, because the pane names a template whose rules are visibly not
+    /// the ones below, which reads as a bug rather than as history.
+    pub fn changed_since_creation(&self) -> bool {
+        self.revision.version > 1 && self.template.is_some()
+    }
+
+    /// Whether a gateway-global lock outranks this sandbox's own policy.
+    pub fn globally_locked(&self) -> bool {
+        self.revision.source.as_deref() == Some("global")
+    }
+}
+
+/// One network rule: what may be reached, by which binaries.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Rule {
+    /// What `policy update` addresses, which is not always the display name.
+    pub key: String,
+    /// Only when it differs from the key.
+    pub name: Option<String>,
+    /// Absolute paths, as the kernel resolves them. Empty means the rule grants
+    /// nothing at all.
+    pub binaries: Vec<String>,
+    pub endpoints: Vec<Endpoint>,
+}
+
+impl Rule {
+    fn of((key, rule): (&String, &openshell_client::NetworkPolicy)) -> Self {
+        let name = rule
+            .name
+            .as_deref()
+            .filter(|n| *n != key)
+            .map(str::to_string);
+        Rule {
+            key: key.clone(),
+            name,
+            binaries: rule.binaries.iter().map(|b| b.path.clone()).collect(),
+            endpoints: rule.endpoints.iter().map(Endpoint::of).collect(),
+        }
+    }
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Endpoint {
+    pub host_port: String,
+    pub protocol: Option<String>,
+    pub enforcement: Option<String>,
+    pub access: Access,
+    /// Method and path rules, when the endpoint has any.
+    pub l7: Vec<L7>,
+    pub tls: Tls,
+}
+
+impl Endpoint {
+    fn of(e: &openshell_client::Endpoint) -> Self {
+        Endpoint {
+            host_port: e.host_port(),
+            protocol: e.protocol.clone(),
+            enforcement: e.enforcement.clone(),
+            access: match &e.access {
+                Some(a) => Access::Class(a.clone()),
+                // Absence is the meaningful case: no access class and a rules
+                // block is default-deny, which is stricter than anything
+                // `access:` can express.
+                None if !e.rules.is_empty() => Access::RulesOnly,
+                None => Access::None,
+            },
+            l7: e.rules.iter().filter_map(L7::of).collect(),
+            tls: match e.tls.as_deref() {
+                Some("skip") => Tls::Skip,
+                Some("terminate") => Tls::Terminate,
+                _ => Tls::Default,
+            },
+        }
+    }
+
+    /// Whether both an access class and method rules are set, which grants the
+    /// union of the two and surprises people who expect the intersection.
+    pub fn access_and_rules(&self) -> bool {
+        matches!(self.access, Access::Class(_)) && !self.l7.is_empty()
+    }
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Access {
+    /// `read-only`, `read-write`, `full`.
+    Class(String),
+    /// Governed only by its method rules.
+    RulesOnly,
+    /// Nothing is granted.
+    None,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Tls {
+    Default,
+    Skip,
+    /// Deprecated: termination is automatic now.
+    Terminate,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct L7 {
+    pub allow: bool,
+    pub method: String,
+    pub path: String,
+}
+
+impl L7 {
+    fn of(rule: &openshell_client::Rule) -> Option<Self> {
+        if let Some(a) = &rule.allow {
+            return Some(L7 {
+                allow: true,
+                method: a.method.clone(),
+                path: a.path.clone(),
+            });
+        }
+        rule.deny.as_ref().map(|d| L7 {
+            allow: false,
+            method: d.method.clone(),
+            path: d.path.clone(),
+        })
+    }
+}
+
+/// The global lists, each said against what this policy actually holds.
+///
+/// The third column is the one worth having: a list entry only describes what a
+/// *new* session gets, and this session may predate the entry or have moved
+/// since.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListsView {
+    pub allow: Vec<ListedAllow>,
+    pub block: Vec<ListedBlock>,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListedAllow {
+    pub endpoint: String,
+    pub binaries: Vec<String>,
+    pub in_policy: bool,
+}
+
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ListedBlock {
+    pub endpoint: String,
+    pub still_in_policy: bool,
+}
+
+impl ListsView {
+    fn of(policy: &Policy, lists: &Lists) -> Option<Self> {
+        if lists.is_empty() {
+            return None;
+        }
+        let present = |endpoint: &str| {
+            policy
+                .network_policies
+                .values()
+                .any(|r| r.endpoints.iter().any(|e| e.host_port() == endpoint))
+        };
+        Some(ListsView {
+            allow: lists
+                .allow
+                .iter()
+                .map(|a| ListedAllow {
+                    endpoint: a.endpoint.clone(),
+                    binaries: a.binaries.clone(),
+                    in_policy: present(&a.endpoint),
+                })
+                .collect(),
+            block: lists
+                .block
+                .iter()
+                .map(|e| ListedBlock {
+                    endpoint: e.clone(),
+                    still_in_policy: present(e),
+                })
+                .collect(),
+        })
+    }
+}
+
+/// The sections Landlock froze at creation.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Locked {
+    pub include_workdir: bool,
+    pub read_write: Vec<String>,
+    pub read_only: Vec<String>,
+    /// `user:group`, when the policy sets one.
+    pub run_as: Option<String>,
+}
+
+impl Locked {
+    fn of(policy: &Policy) -> Self {
+        let fs = &policy.filesystem_policy;
+        Locked {
+            include_workdir: fs.include_workdir,
+            read_write: fs.read_write.clone(),
+            read_only: fs.read_only.clone(),
+            run_as: policy.process.run_as_user.as_ref().map(|u| {
+                let group = policy.process.run_as_group.as_deref().unwrap_or("-");
+                format!("{u}:{group}")
+            }),
+        }
+    }
+}
+
+/// Render a [`View`] as the policy pane's body.
+///
+/// Network first: it is the section that can be changed while the agent runs,
+/// and the one worth reading. Filesystem and process come last, under a notice,
+/// because they are frozen at creation -- and the gateway does not say so.
+///
+/// The prose is this renderer's, not the view's. Every notice below is a
+/// sentence about something the view states as a fact, so a different renderer
+/// says it differently rather than repeating a terminal's wording.
+pub fn render(view: &View) -> String {
+    let mut out = String::new();
+
+    pane::section(&mut out, "policy");
+    pane::field(
+        &mut out,
+        "template",
+        view.template.as_deref().unwrap_or("(none recorded)"),
+    );
+    let r = &view.revision;
+    let revision = if r.settled {
+        format!("{} (loaded)", r.version)
+    } else {
+        format!("{} submitted, {} loaded", r.version, r.active_version)
+    };
+    pane::field(&mut out, "revision", revision);
+    if let Some(source) = &r.source {
+        pane::field(&mut out, "source", source);
+    }
+    if let Some(hash) = &r.hash {
+        // The first 12 characters are what the CLI itself prints on an update,
+        // so the two can be compared by eye.
+        pane::field(&mut out, "hash", hash.chars().take(12).collect::<String>());
+    }
+    if !r.settled {
+        pane::notice(
+            &mut out,
+            "a newer revision has been submitted; the rules below are the ones loaded",
+        );
+    }
+    // The template is what the session was created from, and stays recorded
+    // after a widen or a tighten has moved the policy away from it. Without
+    // this the pane names a template whose rules are visibly not the ones
+    // below, which reads as a bug rather than as history.
+    if view.changed_since_creation() {
+        pane::notice(
+            &mut out,
+            "the network rules have been changed since creation; the template names",
+        );
+        pane::notice(
+            &mut out,
+            "what the session started from, not what it has now",
+        );
+    }
+    if view.globally_locked() {
+        pane::notice(
+            &mut out,
+            "a gateway-global policy lock is in force and outranks this sandbox's own",
+        );
+    }
+
+    let Some(network) = &view.network else {
+        out.push('\n');
+        pane::notice(&mut out, "the gateway returned no policy payload");
+        return out;
+    };
+
+    render_network(&mut out, network);
+    if let Some(lists) = &view.lists {
+        render_lists(&mut out, lists);
+    }
+    if let Some(locked) = &view.locked {
+        render_locked(&mut out, locked);
+    }
+    out
+}
+
+/// The global allow and block lists, and whether this sandbox reflects them.
+///
+/// Drawn here because this is the pane someone opens to answer "what may this
+/// reach?", and a standing decision that is applied to every new session but
+/// visible in no pane is exactly the kind of state that turns into a bug report
+/// about the gateway.
+fn render_lists(out: &mut String, lists: &ListsView) {
+    out.push('\n');
+    pane::section(out, "global lists - applied to every new session");
+
+    for a in &lists.allow {
+        let state = if a.in_policy {
+            "in this policy"
+        } else {
+            "NOT in this policy"
+        };
+        pane::field(out, "allow", format!("{}  {state}", a.endpoint));
+        for b in &a.binaries {
+            pane::field(out, "", b.clone());
+        }
+    }
+    for b in &lists.block {
+        // Reversed, and deliberately not "not in this policy": for a block,
+        // absent is the outcome asked for, and phrasing it as a negative would
+        // make the healthy case read as the alarming one.
+        let state = if b.still_in_policy {
+            "STILL in this policy"
+        } else {
+            "gone from this policy"
+        };
+        pane::field(out, "block", format!("{}  {state}", b.endpoint));
+    }
+
+    // The thing "blacklist" invites people to assume, said once where it will
+    // be read. There is no deny-overrides-allow layer at L4: an endpoint is
+    // unreachable unless a rule names it, so a block is a removal and blocking
+    // something no template grants changes nothing.
+    pane::notice(
+        out,
+        "a block removes an endpoint; it is not a deny that outranks an allow, so",
+    );
+    pane::notice(
+        out,
+        "blocking something no policy grants was already the case and does nothing",
+    );
+}
+
+fn render_network(out: &mut String, network: &[Rule]) {
+    out.push('\n');
+    if network.is_empty() {
+        pane::section(out, "network");
+        pane::notice(out, "no network rules: nothing in this sandbox has egress");
+        return;
+    }
+
+    for rule in network {
+        // The key and the display name differ (`github_git` vs `github-git`),
+        // and the key is what `policy update` addresses, so it leads.
+        let heading = match &rule.name {
+            Some(name) => format!("network - {}  ({name})", rule.key),
+            None => format!("network - {}", rule.key),
+        };
+        pane::section(out, heading);
+
+        if rule.binaries.is_empty() {
+            pane::notice(out, "no binaries: this rule grants nothing");
+        } else {
+            // Every binary on its own row. A joined list is unreadable at the
+            // pane's width, and the kernel-resolved path is the thing you have
+            // to compare against a denial message character by character.
+            for (i, b) in rule.binaries.iter().enumerate() {
+                let label = if i == 0 { "binaries" } else { "" };
+                pane::field(out, label, b);
+            }
+        }
+
+        for e in &rule.endpoints {
+            let mut line = e.host_port.clone();
+            for v in [&e.protocol, &e.enforcement].into_iter().flatten() {
+                let _ = write!(line, "  {v}");
+            }
+            match &e.access {
+                Access::Class(a) => {
+                    let _ = write!(line, "  {a}");
+                }
+                Access::RulesOnly => line.push_str("  (rules only)"),
+                Access::None => line.push_str("  no access granted"),
+            }
+            if e.tls == Tls::Skip {
+                line.push_str("  tls:skip");
+            }
+            pane::field(out, "endpoint", line);
+
+            for l7 in &e.l7 {
+                let verdict = if l7.allow { "allow " } else { "deny  " };
+                pane::field(out, "", format!("{verdict} {} {}", l7.method, l7.path));
+            }
+            if e.access_and_rules() {
+                pane::notice(
+                    out,
+                    "access and rules together grant the union, not the intersection",
+                );
+            }
+            if e.tls == Tls::Terminate {
+                pane::notice(
+                    out,
+                    "`tls: terminate` is deprecated; termination is automatic now",
+                );
+            }
+        }
+    }
+}
+
+/// The sections that cannot be changed after creation.
+fn render_locked(out: &mut String, locked: &Locked) {
+    out.push('\n');
+    pane::section(out, "filesystem and process - locked at creation");
+
+    pane::field(
+        out,
+        "workdir",
+        if locked.include_workdir {
+            "included"
+        } else {
+            "excluded"
+        },
+    );
+    for (label, paths) in [
+        ("read-write", &locked.read_write),
+        ("read-only", &locked.read_only),
+    ] {
+        if paths.is_empty() {
+            continue;
+        }
+        for (i, p) in paths.iter().enumerate() {
+            pane::field(out, if i == 0 { label } else { "" }, p);
+        }
+    }
+    if let Some(run_as) = &locked.run_as {
+        pane::field(out, "run as", run_as);
+    }
+
+    // Measured, not assumed: `policy set` with an extra read_write path returns
+    // "Policy version 4 loaded", `policy get --full` then reports the new path,
+    // and every subsequent Landlock application still logs the creation-time
+    // count. So the gateway's own answer for this section cannot be trusted on
+    // a live sandbox, and the pane has to say which half it is showing.
+    pane::notice(
+        out,
+        "these are as submitted, not necessarily as enforced: Landlock is applied",
+    );
+    pane::notice(
+        out,
+        "at creation, and a later change is accepted and reported but never takes",
+    );
+    pane::notice(out, "effect. Recreate the session to change them.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openshell_client::{Binary, Endpoint, MethodPath, NetworkPolicy, Rule};
+
+    /// Every test here but [`the_global_lists_are_shown_against_this_policy`] is
+    /// about the sandbox's own rules, so the lists go through a shim rather than
+    /// a third argument at twenty call sites.
+    fn render(rev: &PolicyRevision, template: Option<&str>) -> String {
+        super::render(&View::of(rev, template, &Lists::default()))
+    }
+
+    fn revision(policy: Option<Policy>) -> PolicyRevision {
+        serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "active_version": 1,
+            "hash": "90715775a1ec73bed8bcf1b289d245562fe2dfec88ba9dee0c26fc6ebe02eab6",
+            "policy_source": "sandbox",
+            "status": "effective",
+        }))
+        .map(|mut r: PolicyRevision| {
+            r.policy = policy;
+            r
+        })
+        .unwrap()
+    }
+
+    /// A standing decision applied to every new session but visible in no pane
+    /// is the kind of state that turns into a bug report about the gateway. The
+    /// third column is the point: a list entry describes what a *new* session
+    /// gets, and this session may predate it or have moved since.
+    #[test]
+    fn the_global_lists_are_shown_against_this_policy() {
+        let mut lists = Lists::default();
+        lists.allow("pastebin.com:443", vec!["/usr/bin/curl".into()]);
+        // One the policy still grants, and one it never did.
+        lists.block("registry.npmjs.org:443");
+        lists.block("nowhere.example.com:443");
+
+        let body = pane::to_plain(&super::render(&View::of(
+            &revision(Some(policy_with("npm", "registry.npmjs.org"))),
+            Some("net-open"),
+            &lists,
+        )));
+
+        assert!(body.contains("global lists"), "{body}");
+        // Asked for and not there: the allow entry postdates this sandbox.
+        assert!(
+            body.contains("pastebin.com:443  NOT in this policy"),
+            "{body}"
+        );
+        assert!(body.contains("/usr/bin/curl"), "{body}");
+        // Asked to go and still here, which is the row worth noticing.
+        assert!(
+            body.contains("registry.npmjs.org:443  STILL in this policy"),
+            "{body}"
+        );
+        // Asked to go and gone. Phrased as the outcome, not as an absence: for a
+        // block, absent is what was wanted, and "not in this policy" would make
+        // the healthy case read as the alarming one.
+        assert!(
+            body.contains("nowhere.example.com:443  gone from this policy"),
+            "{body}"
+        );
+        // And the thing "blacklist" invites people to assume, said out loud.
+        assert!(body.contains("not a deny that outranks an allow"), "{body}");
+    }
+
+    /// Empty lists are the common case and do not need a heading saying so.
+    /// The view is what a second renderer gets, so what it drops is what that
+    /// renderer can never show. Checked field by field against a policy with
+    /// one of everything in it.
+    #[test]
+    fn the_view_keeps_what_the_pane_needs() {
+        let rev = revision(Some(policy_with("npm", "registry.npmjs.org")));
+        let view = View::of(&rev, Some("net-open"), &Lists::default());
+
+        assert_eq!(view.template.as_deref(), Some("net-open"));
+        assert!(view.revision.settled);
+        assert!(view.lists.is_none(), "empty lists are omitted, not empty");
+
+        let network = view.network.expect("a policy payload means rules");
+        let rule = network.iter().find(|r| r.key == "npm").expect("the rule");
+        assert!(!rule.binaries.is_empty());
+        let endpoint = &rule.endpoints[0];
+        assert_eq!(endpoint.host_port, "registry.npmjs.org:443");
+
+        // And the locked half, which no amount of `policy update` can change.
+        assert!(view.locked.is_some());
+    }
+
+    /// A revision the gateway answered with no policy in it is not the same as
+    /// a policy that grants nothing, and the view has to keep them apart.
+    #[test]
+    fn a_revision_with_no_payload_has_no_network_rather_than_no_rules() {
+        let view = View::of(&revision(None), None, &Lists::default());
+        assert!(view.network.is_none());
+        assert!(view.locked.is_none());
+        assert!(render(&revision(None), None).contains("no policy payload"));
+    }
+
+    /// The notices the terminal prints are conclusions from these two, so a
+    /// renderer that words them differently still agrees about when to.
+    #[test]
+    fn the_derived_facts_are_what_the_notices_are_built_from() {
+        let mut rev = revision(Some(policy_with("npm", "registry.npmjs.org")));
+
+        // Version 1 with a template: untouched since creation.
+        assert!(!View::of(&rev, Some("net-open"), &Lists::default()).changed_since_creation());
+        // Moved since, by a widen or one endpoint allowed from the feed.
+        rev.version = 4;
+        rev.active_version = 4;
+        assert!(View::of(&rev, Some("net-open"), &Lists::default()).changed_since_creation());
+        // No template recorded: there is nothing for it to have moved away from.
+        assert!(!View::of(&rev, None, &Lists::default()).changed_since_creation());
+
+        assert!(!View::of(&rev, None, &Lists::default()).globally_locked());
+        rev.policy_source = "global".into();
+        assert!(View::of(&rev, None, &Lists::default()).globally_locked());
+    }
+
+    /// The view crosses a wire, so it has to survive one.
+    #[test]
+    fn a_view_round_trips_through_json() {
+        let mut lists = Lists::default();
+        lists.block("registry.npmjs.org:443");
+        let view = View::of(
+            &revision(Some(policy_with("npm", "registry.npmjs.org"))),
+            Some("net-open"),
+            &lists,
+        );
+
+        let back: View = serde_json::from_str(&serde_json::to_string(&view).unwrap()).unwrap();
+        assert_eq!(back, view);
+        // And renders identically on the far side, which is the whole point.
+        assert_eq!(super::render(&back), super::render(&view));
+    }
+
+    #[test]
+    fn empty_global_lists_add_nothing_to_the_pane() {
+        let body = render(&revision(Some(Policy::default())), Some("net-open"));
+        assert!(!body.contains("global lists"), "{body}");
+    }
+
+    #[test]
+    fn every_template_is_findable_and_parses_as_yaml() {
+        for t in &TEMPLATES {
+            assert!(find(t.name).is_some(), "{} not findable", t.name);
+            assert!(!t.summary.is_empty());
+            // Not a YAML parser -- the crate has none -- but the shape a policy
+            // must have is cheap to assert, and a template that lost its
+            // network section would deny everything without saying so.
+            assert!(t.yaml.contains("version: 1"), "{}", t.name);
+            assert!(t.yaml.contains("filesystem_policy:"), "{}", t.name);
+            assert!(t.yaml.contains("run_as_user: sandbox"), "{}", t.name);
+            assert!(t.yaml.contains("/dev/pts"), "{} must allow a pty", t.name);
+        }
+        assert!(find(DEFAULT_TEMPLATE).is_some());
+        assert!(find("no-such-template").is_none());
+    }
+
+    /// Strip `#` comments, so a test about what a template *does* is not
+    /// confounded by a template explaining what it no longer does.
+    fn directives(yaml: &str) -> String {
+        yaml.lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// The deprecation the gateway warns about on every create. It is worth a
+    /// test rather than a comment because the warning is only visible in the
+    /// sandbox log, which nothing reads by default.
+    #[test]
+    fn no_template_carries_the_deprecated_tls_key() {
+        for t in &TEMPLATES {
+            assert!(
+                !directives(t.yaml).contains("tls: terminate"),
+                "{} still sets tls: terminate",
+                t.name
+            );
+        }
+    }
+
+    /// readonly-explore has to actually deny what it claims to: no model API,
+    /// and no push. A template that quietly allowed either would make the
+    /// strict end of the range a lie.
+    #[test]
+    fn readonly_explore_denies_the_model_api_and_push() {
+        let y = find("readonly-explore").unwrap().yaml;
+        assert!(!y.contains("api.anthropic.com"));
+        assert!(!y.contains("git-receive-pack"), "push must not be allowed");
+        assert!(y.contains("git-upload-pack"), "fetch must still work");
+    }
+
+    #[test]
+    fn net_open_is_feature_work_plus_registries() {
+        let feature = find("feature-work").unwrap().yaml;
+        let open = find("net-open").unwrap().yaml;
+        for host in [
+            "api.anthropic.com",
+            "github.com",
+            "api.github.com",
+            "git-receive-pack",
+        ] {
+            assert!(feature.contains(host), "feature-work lost {host}");
+            assert!(open.contains(host), "net-open lost {host}");
+        }
+        for host in ["registry.npmjs.org", "pypi.org", "files.pythonhosted.org"] {
+            assert!(
+                !feature.contains(host),
+                "feature-work must not reach {host}"
+            );
+            assert!(open.contains(host), "net-open must reach {host}");
+        }
+        // npm is a `#!` script, so the exe the gateway matches is the
+        // interpreter. Listing only /usr/bin/npm denies every install.
+        assert!(open.contains("/usr/bin/node"));
+    }
+
+    /// Both forges in every template. They coexist rather than being separate
+    /// per-host templates because an endpoint is useless without the matching
+    /// provider attached: the credential is a per-session placeholder, so
+    /// listing dev.azure.com in a GitHub session grants reachability to a host
+    /// it holds no token for. Six near-identical files would cost more than
+    /// that is worth. To narrow it, copy the file and delete a block --
+    /// `--policy <path>` takes it directly.
+    #[test]
+    fn every_template_covers_both_forges() {
+        for t in &TEMPLATES {
+            let y = directives(t.yaml);
+            assert!(y.contains("github.com"), "{} lost github", t.name);
+            assert!(y.contains("dev.azure.com"), "{} lost azure devops", t.name);
+            // Azure DevOps has the extra project level, but the git paths are
+            // tail-anchored and identical -- verified against a real clone of
+            // /inetse/inet/_git/Inet.DotFiles.
+            assert!(y.contains("/**/info/refs*"), "{}", t.name);
+        }
+    }
+
+    /// dev.azure.com serves git *and* the REST API, so `_apis` is the only
+    /// thing separating "can fetch" from "can open a pull request". The
+    /// read-only template must not have it.
+    #[test]
+    fn only_the_publishing_templates_reach_the_azure_rest_api() {
+        let ro = directives(find("readonly-explore").unwrap().yaml);
+        assert!(!ro.contains("_apis"), "readonly-explore must not open PRs");
+        assert!(!ro.contains("git-receive-pack"), "and must not push");
+        assert!(!ro.contains("/usr/bin/curl"), "and needs no REST binary");
+
+        for name in ["feature-work", "net-open"] {
+            let y = directives(find(name).unwrap().yaml);
+            assert!(y.contains("_apis"), "{name} cannot open a PR");
+            assert!(y.contains("git-receive-pack"), "{name} cannot push");
+            assert!(y.contains("/usr/bin/curl"), "{name} has no REST binary");
+        }
+    }
+
+    #[test]
+    fn resolves_a_template_by_name_to_a_real_file() {
+        let r = resolve("feature-work").unwrap();
+        assert_eq!(r.label, "feature-work");
+        assert!(r.path().is_file());
+        let written = fs::read_to_string(r.path()).unwrap();
+        assert_eq!(written, find("feature-work").unwrap().yaml);
+
+        // The temp file is the resolver's, and must not outlive it.
+        let path = r.path().to_path_buf();
+        drop(r);
+        assert!(!path.exists(), "the temp policy must be cleaned up");
+    }
+
+    /// A path is relative to the working directory, which under `cargo test` is
+    /// the package root rather than the workspace root -- hence the manifest
+    /// dir rather than a bare `policies/...`.
+    #[test]
+    fn resolves_a_path_and_leaves_it_alone() {
+        let spec = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../policies/feature-work.yaml"
+        );
+        let r = resolve(spec).unwrap();
+        assert_eq!(r.label, spec);
+        let path = r.path().to_path_buf();
+        drop(r);
+        assert!(path.exists(), "a file the user owns must never be removed");
+    }
+
+    /// A spec that looks like a path is never matched against a template, so
+    /// the checked-in `policies/*.yaml` stay directly usable -- and a template
+    /// name still wins over a same-named file in the working directory, so
+    /// `--policy net-open` cannot be hijacked by a local file.
+    #[test]
+    fn a_template_name_and_a_path_do_not_shadow_each_other() {
+        assert!(resolve("net-open").unwrap().label == "net-open");
+        assert!(matches!(resolve("./net-open"), Err(Error::Unknown { .. }),));
+        assert!(matches!(resolve("nope"), Err(Error::Unknown { .. })));
+        // The error has to be actionable, so it lists what is available.
+        let e = resolve("nope").unwrap_err().to_string();
+        for t in &TEMPLATES {
+            assert!(e.contains(t.name), "{e}");
+        }
+    }
+
+    #[test]
+    fn the_widen_preset_round_trips() {
+        let widen = REGISTRIES.widen();
+        assert_eq!(widen.add_endpoints.len(), REGISTRIES.endpoints.len());
+        assert!(
+            widen
+                .add_endpoints
+                .contains(&"pypi.org:443:read-only:rest:enforce".to_string())
+        );
+        assert!(widen.binaries.contains(&"/usr/bin/node".to_string()));
+        assert!(widen.wait, "a widen that has not loaded yet is not a widen");
+        assert!(!REGISTRIES.label.is_empty());
+        assert!(
+            widen.rule_name.is_none(),
+            "the CLI rejects --rule-name with several --add-endpoint, so the \
+             gateway names the rules and there is nothing to pass"
+        );
+        assert!(!widen.is_empty());
+
+        let tighten = REGISTRIES.tighten();
+        assert_eq!(tighten.remove_endpoints.len(), REGISTRIES.endpoints.len());
+        assert!(
+            tighten
+                .remove_endpoints
+                .contains(&"pypi.org:443".to_string())
+        );
+        assert!(tighten.add_endpoints.is_empty());
+        assert!(!tighten.is_empty());
+        // Removal addresses host:port only; carrying the access class over from
+        // the widen spec would not match anything.
+        for e in &tighten.remove_endpoints {
+            assert_eq!(e.matches(':').count(), 1, "{e} is not host:port");
+        }
+    }
+
+    fn policy_with(key: &str, host: &str) -> Policy {
+        let mut p = Policy::default();
+        p.network_policies.insert(
+            key.to_string(),
+            NetworkPolicy {
+                name: Some(key.to_string()),
+                endpoints: vec![Endpoint {
+                    host: host.to_string(),
+                    port: 443,
+                    ..Default::default()
+                }],
+                binaries: vec![Binary {
+                    path: "/usr/bin/node".into(),
+                }],
+            },
+        );
+        p
+    }
+
+    /// The gateway names the rule, not us: `--rule-name` is rejected for a
+    /// multi-endpoint update. So "is the preset applied?" has to be answered
+    /// from the endpoints -- matching on a name we chose would answer no to a
+    /// rule that is right there, and the widen key would toggle nothing.
+    #[test]
+    fn the_preset_is_recognised_under_a_gateway_chosen_name() {
+        for key in ["sbx-registries", "registry-npmjs-org", "whatever_it_picks"] {
+            let p = policy_with(key, "registry.npmjs.org");
+            assert_eq!(
+                preset_rule_names(&p, &REGISTRIES),
+                vec![key.to_string()],
+                "not found under {key}"
+            );
+        }
+
+        let unrelated = policy_with("github_git", "github.com");
+        assert!(preset_rule_names(&unrelated, &REGISTRIES).is_empty());
+    }
+
+    #[test]
+    fn renders_a_rule_with_its_binaries_and_endpoints() {
+        let body = render(
+            &revision(Some(policy_with("npm", "registry.npmjs.org"))),
+            Some("net-open"),
+        );
+        assert!(body.contains("net-open"), "{body}");
+        assert!(body.contains("1 (loaded)"), "{body}");
+        assert!(body.contains("90715775a1ec"), "{body}");
+        assert!(body.contains("registry.npmjs.org:443"), "{body}");
+        assert!(body.contains("/usr/bin/node"), "{body}");
+        // Truncated, not the whole 64-character hash.
+        assert!(!body.contains("90715775a1ec73"), "{body}");
+    }
+
+    /// An endpoint with neither an access class nor rules grants nothing, and
+    /// one with rules and no access is default-deny. Rendering both as a bare
+    /// host would make a policy that denies look like one that allows.
+    #[test]
+    fn an_endpoint_says_what_it_actually_grants() {
+        let mut p = Policy::default();
+        p.network_policies.insert(
+            "r".into(),
+            NetworkPolicy {
+                name: None,
+                binaries: vec![Binary {
+                    path: "/usr/bin/git".into(),
+                }],
+                endpoints: vec![
+                    Endpoint {
+                        host: "a.example".into(),
+                        port: 443,
+                        rules: vec![Rule {
+                            allow: Some(MethodPath {
+                                method: "GET".into(),
+                                path: "/x".into(),
+                            }),
+                            deny: None,
+                        }],
+                        ..Default::default()
+                    },
+                    Endpoint {
+                        host: "b.example".into(),
+                        port: 443,
+                        ..Default::default()
+                    },
+                    Endpoint {
+                        host: "c.example".into(),
+                        port: 443,
+                        access: Some("read-only".into()),
+                        rules: vec![Rule {
+                            allow: Some(MethodPath {
+                                method: "GET".into(),
+                                path: "/y".into(),
+                            }),
+                            deny: None,
+                        }],
+                        ..Default::default()
+                    },
+                ],
+            },
+        );
+        let body = render(&revision(Some(p)), None);
+
+        assert!(body.contains("a.example:443  (rules only)"), "{body}");
+        assert!(body.contains("allow  GET /x"), "{body}");
+        assert!(body.contains("b.example:443  no access granted"), "{body}");
+        // The union caveat is the thing that bit us in testing: an allow-list
+        // next to `access: read-only` reads as a restriction but is not one.
+        assert!(body.contains("union, not the intersection"), "{body}");
+    }
+
+    /// The finding that cost the most to establish: a live filesystem change is
+    /// accepted, reported as effective, and never enforced. If the pane renders
+    /// the section without saying so, it actively misleads.
+    #[test]
+    fn the_locked_sections_are_labelled_as_unenforceable() {
+        let body = render(&revision(Some(Policy::default())), None);
+        assert!(body.contains("locked at creation"), "{body}");
+        assert!(body.contains("never takes"), "{body}");
+        assert!(body.contains("Recreate the session"), "{body}");
+    }
+
+    #[test]
+    fn a_sandbox_with_no_network_rules_says_so() {
+        let body = render(&revision(Some(Policy::default())), None);
+        assert!(
+            body.contains("nothing in this sandbox has egress"),
+            "{body}"
+        );
+    }
+
+    /// Between submitting a widen and the supervisor loading it, the pane must
+    /// not claim the new rules are in force.
+    #[test]
+    fn an_unsettled_revision_is_flagged() {
+        let mut rev = revision(Some(Policy::default()));
+        rev.version = 4;
+        rev.active_version = 3;
+        let body = render(&rev, None);
+        assert!(body.contains("4 submitted, 3 loaded"), "{body}");
+        assert!(body.contains("the ones loaded"), "{body}");
+    }
+
+    /// A widen or a tighten moves the policy away from its template. Naming the
+    /// template without saying so reads as the pane showing the wrong rules.
+    #[test]
+    fn a_changed_policy_says_the_template_is_only_history() {
+        let mut rev = revision(Some(Policy::default()));
+        rev.version = 2;
+        rev.active_version = 2;
+        let body = render(&rev, Some("net-open"));
+        assert!(body.contains("changed since creation"), "{body}");
+
+        // At revision 1 nothing has changed, so the caveat would be noise.
+        let fresh = render(&revision(Some(Policy::default())), Some("net-open"));
+        assert!(!fresh.contains("changed since creation"), "{fresh}");
+
+        // And with no template recorded there is nothing to disclaim.
+        let mut anon = revision(Some(Policy::default()));
+        anon.version = 2;
+        anon.active_version = 2;
+        assert!(!render(&anon, None).contains("changed since creation"));
+    }
+
+    #[test]
+    fn a_global_lock_is_called_out() {
+        let mut rev = revision(Some(Policy::default()));
+        rev.policy_source = "global".into();
+        assert!(render(&rev, None).contains("global policy lock"));
+    }
+
+    /// `policy get` without `--full` returns metadata only. Rendering that as
+    /// an empty policy would show a sandbox as having no rules at all.
+    #[test]
+    fn a_missing_payload_is_not_an_empty_policy() {
+        let body = render(&revision(None), Some("feature-work"));
+        assert!(body.contains("no policy payload"), "{body}");
+        assert!(!body.contains("locked at creation"), "{body}");
+    }
+}

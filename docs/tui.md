@@ -1,5 +1,10 @@
 # The TUI
 
+This is the terminal interface. There is also a desktop workspace over the same
+sessions -- [desktop.md](desktop.md) -- and neither is the other's front end:
+both build on `sbx-core`, and a decision that lives in only one of them is a bug
+that has been caught more than once here.
+
 `sbx` with no arguments opens the TUI: every session in one list, and
 whatever one of them is doing beside it.
 
@@ -36,6 +41,11 @@ first thing in its transcript.
 
 A session takes two rows -- what it is, then where it has got to -- because those
 are two different questions and answering both on one line left room for neither.
+A row that reads `worktree` before the branch is a session with **no sandbox
+around it**, running on this machine with your own rights; the terminal cannot
+create one -- that is the window's, which is where the choice can be spelled out
+-- but it shows one created there rather than letting it pass for isolated. See
+[worktrees.md](worktrees.md).
 The rows are numbered, and `1`-`9` jump straight to one. The right-hand pane's
 views are tabs in its heading, so the pane keeps every row of its height for
 content.

@@ -6,7 +6,7 @@ name: Release
 #     git tag v0.2.0 && git push origin v0.2.0
 #
 # The asset names are part of the contract with both of them, and a test in
-# `crates/sbx/src/update.rs` fails if the three ever disagree.
+# `crates/sbx-core/src/update.rs` fails if the three ever disagree.
 on:
   push:
     tags: ["v*"]
@@ -89,9 +89,141 @@ jobs:
             ${{ matrix.target }}.sha256
           if-no-files-found: error
 
+  # The desktop application for Windows, which is the one platform where there
+  # is nothing else to install: `sbx` and `sbxd` need a gateway, a Docker daemon
+  # and tmux, so the Windows side is the window and nothing but the window. It
+  # pairs with a server from its own connect dialog rather than from a CLI --
+  # see docs/desktop.md -- which is what makes an installer on its own useful.
+  #
+  # Linux is deliberately not built here. A Tauri bundle links against the
+  # webkit2gtk of the distribution that built it, so one .deb or AppImage would
+  # be a promise about GTK versions this cannot keep; there, it is built from the
+  # tree. See docs/install.md.
+  desktop:
+    name: desktop (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the tag looks like a version
+        shell: bash
+        run: |
+          case "$TAG" in
+            v[0-9]*.[0-9]*.[0-9]*) echo "building $TAG" ;;
+            *) echo "TAG=$TAG is not a vX.Y.Z tag"; exit 1 ;;
+          esac
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: apps/desktop/src-tauri
+          key: desktop-windows
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      # The version in the bundle is the one Windows shows in Add or Remove
+      # Programs and the one an upgrade compares against, so it has to be the
+      # tag rather than whatever the file said when it was last edited.
+      - name: Take the version from the tag
+        shell: bash
+        run: |
+          set -eu
+          conf=apps/desktop/src-tauri/tauri.conf.json
+          jq --arg v "${TAG#v}" '.version = $v' "$conf" > "$conf.new"
+          mv "$conf.new" "$conf"
+          jq -r .version "$conf"
+
+      # Signing, when there is a certificate to sign with.
+      #
+      # An unsigned installer is not broken -- the checksums below are the
+      # integrity story and they are the one that does not expire -- but
+      # SmartScreen puts a full-width warning in front of it, and "more info ->
+      # run anyway" is a bad first impression for a tool whose whole pitch is
+      # isolation.
+      #
+      # Conditional on the secret rather than required, so a fork and a
+      # maintainer without a certificate can both still cut a release. The
+      # thumbprint is read back from the imported certificate rather than
+      # configured, because a thumbprint in a config file and a certificate in a
+      # secret are two things to keep in step and only one of them is visible.
+      #
+      # Never verified against a real certificate at the time of writing: there
+      # was none to test with. What is verified is the unsigned path, which is
+      # every release so far.
+      # `secrets` and not a step-level `env`: a step's own `env` is not in scope
+      # for its `if`, so that reads as empty and the step never runs.
+      - name: Import the signing certificate
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        id: cert
+        shell: pwsh
+        env:
+          SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $pfx = [System.IO.Path]::GetTempFileName() + '.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT))
+          $password = ConvertTo-SecureString -String $env:SIGNING_PASSWORD -AsPlainText -Force
+          $imported = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          "thumbprint=$($imported.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        shell: bash
+        env:
+          THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+        run: |
+          set -eu
+          npm --prefix apps/desktop ci
+          if [ -n "${THUMBPRINT:-}" ]; then
+            # A timestamp is what keeps a signature valid after the
+            # certificate expires; without one the installer stops verifying
+            # the day the certificate does.
+            npm --prefix apps/desktop run tauri -- build --config \
+              "{\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$THUMBPRINT\",\"digestAlgorithm\":\"sha256\",\"timestampUrl\":\"http://timestamp.digicert.com\"}}}"
+          else
+            echo "no signing certificate; building unsigned"
+            npm --prefix apps/desktop run tauri -- build
+          fi
+
+      # Renamed to carry the tag and the target, like the tarballs, and
+      # checksummed into the same SHA256SUMS -- an installer downloaded from a
+      # release page deserves the same verification as a binary.
+      - name: Package
+        shell: bash
+        run: |
+          set -eu
+          bundle=apps/desktop/src-tauri/target/release/bundle
+          mkdir -p dist
+          for msi in "$bundle"/msi/*.msi; do
+            cp "$msi" "dist/sbx-desktop-${TAG}-x86_64-pc-windows-msvc.msi"
+          done
+          for exe in "$bundle"/nsis/*-setup.exe; do
+            cp "$exe" "dist/sbx-desktop-${TAG}-x86_64-pc-windows-msvc-setup.exe"
+          done
+          cd dist
+          sha256sum *.msi *.exe > desktop-windows.sha256
+          cat desktop-windows.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sbx-desktop-windows
+          path: |
+            dist/sbx-desktop-${{ env.TAG }}-x86_64-pc-windows-msvc.msi
+            dist/sbx-desktop-${{ env.TAG }}-x86_64-pc-windows-msvc-setup.exe
+            dist/desktop-windows.sha256
+          if-no-files-found: error
+
   publish:
     name: Publish the release
-    needs: build
+    needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -118,4 +250,6 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             dist/*.tar.gz
+            dist/*.msi
+            dist/*.exe
             dist/SHA256SUMS

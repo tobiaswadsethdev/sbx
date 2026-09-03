@@ -16,11 +16,11 @@
 use openshell_client::Provider;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::ops;
-use crate::policy;
-use crate::repos::{Facts, LocalRepo};
-use crate::session;
-use crate::toolchain;
+use sbx_core::ops;
+use sbx_core::policy;
+use sbx_core::repos::{Facts, LocalRepo};
+use sbx_core::session;
+use sbx_core::toolchain;
 
 /// A single-line text field with a cursor.
 ///
@@ -284,7 +284,7 @@ impl Picker {
         let Some(repos) = &self.repos else {
             return;
         };
-        self.matches = crate::repos::filter(repos, self.query.text());
+        self.matches = sbx_core::repos::filter(repos, self.query.text());
         // Back to the best match: keeping the old index as the query changes
         // would leave the cursor on whatever happened to land at that row.
         self.cursor = 0;
@@ -421,9 +421,13 @@ pub struct Defaults {
     /// about what your agents can reach, made in the config file. The form's job
     /// here is only to put it on the draft, so the TUI and `sbx new` cannot
     /// create sessions with different tools.
-    pub mcp: Vec<crate::mcp::Server>,
+    pub mcp: Vec<sbx_core::mcp::Server>,
     /// Skills copied into the sandbox. Carried, not chosen, like `mcp`.
-    pub skills: Vec<crate::skills::Skill>,
+    pub skills: Vec<sbx_core::skills::Skill>,
+    /// What a work branch is named under. Carried for the same reason as `mcp`:
+    /// so the terminal and the window and `sbx new` cannot name branches
+    /// differently on one machine.
+    pub branch_prefix: String,
 }
 
 /// One entry of the form's policy chooser.
@@ -498,8 +502,10 @@ pub struct Form {
     /// The config file's provider list, kept because the gateway's own list may
     /// arrive after the form is open and has to be ticked the same way then.
     configured_providers: Option<Vec<String>>,
-    mcp: Vec<crate::mcp::Server>,
-    skills: Vec<crate::skills::Skill>,
+    mcp: Vec<sbx_core::mcp::Server>,
+    skills: Vec<sbx_core::skills::Skill>,
+    /// What a work branch is named under; see [`Defaults::branch_prefix`].
+    branch_prefix: String,
     /// Why the provider list is empty, when the gateway could not be asked.
     providers_error: Option<String>,
     field: Field,
@@ -566,6 +572,7 @@ impl Form {
             configured_providers: defaults.providers.clone(),
             mcp: defaults.mcp.clone(),
             skills: defaults.skills.clone(),
+            branch_prefix: defaults.branch_prefix.clone(),
             providers_error,
             history,
             field: Field::Task,
@@ -702,6 +709,16 @@ impl Form {
         session::validate_name(&name).map_err(|e| e.to_string())?;
         let base = self.base.text().trim();
         Ok(ops::Draft {
+            // The terminal creates sandboxed sessions only. The worktree
+            // backend is offered in the window, which is where a form can say
+            // out loud what picking it gives up; see `docs/desktop.md`.
+            backend: session::Kind::Sandbox,
+            // The convention, from the config file. No inbox here, so nothing
+            // is started from a ticket and nothing needs a branch of its own.
+            branch: Some(format!("{}/{name}", self.branch_prefix)),
+            ticket: None,
+            // The terminal has no projects; see `Session::project`.
+            project: None,
             name,
             // Checked by the picker, so an empty string here is unreachable;
             // it would fail the create rather than doing something surprising.
@@ -854,37 +871,25 @@ pub struct History {
     pub providers: Vec<String>,
 }
 
-/// Which credentials to tick.
+/// Which credentials to tick, as [`Choice`]es for the chooser.
 ///
-/// Two rules, in order. A provider is the obvious choice when it is the only one
-/// of the type that is wanted -- the agent's, and the repository host's -- since
-/// a session without the agent's credential comes up to a login prompt and one
-/// without the host's cannot clone a private repository.
-///
-/// When there are several of a type, the type alone cannot say which: two Azure
-/// PATs are two organisations, and the wrong one fails three steps later. That
-/// used to mean nothing was ticked, which is just as wrong for the common case --
-/// the answer is almost always the one used last time. So `used_before`, the
-/// providers the last session for this host was given, breaks the tie. It is
-/// evidence rather than a guess: it can only be wrong where the user was wrong.
+/// The rule itself is [`ops::preselect_providers`], in the core, because the
+/// window's create form needs the same answer and a session started from either
+/// has to arrive with the same credentials. This is only the shape the chooser
+/// wants it in.
 fn preselect(providers: &[Provider], repo: &LocalRepo, used_before: &[String]) -> Vec<Choice> {
-    let agent = session::agent_provider_type("claude");
-    let forge = repo
-        .origin
-        .as_deref()
-        .and_then(|url| crate::forge::Remote::parse(url).ok())
-        .map(|r| r.forge.provider_profile());
-
-    let unique = |kind: &str| providers.iter().filter(|p| p.kind == kind).count() == 1;
-
+    let choices: Vec<ops::ProviderChoice> = providers
+        .iter()
+        .map(|p| ops::ProviderChoice {
+            name: p.name.clone(),
+            kind: p.kind.clone(),
+        })
+        .collect();
+    let ticked = ops::preselect_providers(&choices, repo.origin.as_deref(), used_before);
     providers
         .iter()
         .map(|p| Choice {
-            selected: [agent, forge]
-                .into_iter()
-                .flatten()
-                .any(|kind| kind == p.kind)
-                && (unique(&p.kind) || used_before.contains(&p.name)),
+            selected: ticked.contains(&p.name),
             name: p.name.clone(),
             kind: p.kind.clone(),
         })

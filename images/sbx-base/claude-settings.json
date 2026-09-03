@@ -12,6 +12,10 @@
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
     "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"
   },
+  "statusLine": {
+    "type": "command",
+    "command": "sbx-usage"
+  },
   "hooks": {
     "SessionStart": [
       { "hooks": [{ "type": "command", "command": "sbx-status idle" }] }

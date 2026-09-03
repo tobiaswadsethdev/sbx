@@ -151,7 +151,7 @@ verification itself is untouched.
 
 ## Adding one
 
-`crates/sbx/src/toolchain.rs` is one table, and a toolchain is an entry in it
+`crates/sbx-core/src/toolchain.rs` is one table, and a toolchain is an entry in it
 plus a Dockerfile fragment under `images/sbx-base/toolchains/`. The entry names
 the registries and the *kernel-resolved* binaries that may reach them, and the
 markers that make the create form tick it. The tests in that module check the

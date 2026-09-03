@@ -115,7 +115,7 @@ pub struct Sandbox {
 /// `policy`, but the policy pane reads it from `policy get --full` instead --
 /// that call additionally reports which revision is *active*, which is what
 /// distinguishes a submitted policy from an enforced one.
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 struct RawSandbox {
     id: String,
     name: String,
@@ -141,7 +141,7 @@ impl From<RawSandbox> for Sandbox {
     }
 }
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct GatewayStatus {
     pub gateway: String,
     pub server: String,
@@ -151,7 +151,7 @@ pub struct GatewayStatus {
     pub authentication: Authentication,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Authentication {
     #[serde(default)]
     pub provider: String,
@@ -204,7 +204,7 @@ pub struct CreateOpts {
 /// the flag. `sandbox get` carries a `policy` too, but this is the call that
 /// also says which revision is *active*, which is the only way to tell a
 /// submitted policy from a loaded one.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct PolicyRevision {
     #[serde(default)]
     pub version: u32,
@@ -232,7 +232,7 @@ impl PolicyRevision {
     }
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Policy {
     #[serde(default)]
     pub filesystem_policy: FilesystemPolicy,
@@ -243,7 +243,7 @@ pub struct Policy {
     pub network_policies: BTreeMap<String, NetworkPolicy>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct FilesystemPolicy {
     #[serde(default)]
     pub include_workdir: bool,
@@ -253,7 +253,7 @@ pub struct FilesystemPolicy {
     pub read_write: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct ProcessPolicy {
     #[serde(default)]
     pub run_as_user: Option<String>,
@@ -261,7 +261,7 @@ pub struct ProcessPolicy {
     pub run_as_group: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct NetworkPolicy {
     #[serde(default)]
     pub name: Option<String>,
@@ -271,7 +271,7 @@ pub struct NetworkPolicy {
     pub binaries: Vec<Binary>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Endpoint {
     #[serde(default)]
     pub host: String,
@@ -299,7 +299,7 @@ impl Endpoint {
 }
 
 /// A method/path rule. Exactly one of the two is set.
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Rule {
     #[serde(default)]
     pub allow: Option<MethodPath>,
@@ -307,7 +307,7 @@ pub struct Rule {
     pub deny: Option<MethodPath>,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct MethodPath {
     #[serde(default)]
     pub method: String,
@@ -315,7 +315,7 @@ pub struct MethodPath {
     pub path: String,
 }
 
-#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct Binary {
     #[serde(default)]
     pub path: String,
@@ -381,6 +381,13 @@ pub trait OpenShell {
     /// Providers defined at the gateway, for offering a choice of
     /// credentials rather than requiring their names to be known.
     fn providers(&self) -> Result<Vec<Provider>>;
+    /// The invocation that attaches a terminal to a sandbox, as an argv.
+    ///
+    /// On the trait rather than only on [`CliClient`] because the thing that
+    /// spawns it asks a *backend* for it now, and a backend holds one of these
+    /// as a trait object. An argv rather than a `Command` because it is spawned
+    /// under a pty, which needs the program and its arguments apart.
+    fn interactive_argv(&self, name: &str, argv: &[&str]) -> Vec<String>;
 }
 
 /// [`OpenShell`] backed by the `openshell` CLI.
@@ -503,6 +510,9 @@ impl CliClient {
     /// the program and its arguments separately. Kept as the one definition of
     /// what an interactive exec *is*, so the embedded terminal and `sbx attach`
     /// cannot end up talking to the gateway differently.
+    ///
+    /// Inherent as well as on the trait, because [`Self::interactive_exec`]
+    /// returns a `Command` and both of them are this one function.
     pub fn interactive_exec_argv(&self, sandbox: &str, argv: &[&str]) -> Vec<String> {
         let mut out = vec![self.bin.display().to_string()];
         if let Some(g) = &self.gateway {
@@ -655,6 +665,10 @@ impl OpenShell for CliClient {
         let display = "provider list --output json";
         let out = self.run_checked(["provider", "list", "--output", "json"], display)?;
         Self::parse_json(&out.stdout, display)
+    }
+
+    fn interactive_argv(&self, name: &str, argv: &[&str]) -> Vec<String> {
+        self.interactive_exec_argv(name, argv)
     }
 }
 

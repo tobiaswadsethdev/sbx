@@ -24,7 +24,7 @@ diff pane's wrapping.
 
 ```sh
 cargo build
-cargo test --workspace                                    # 403 tests
+cargo test --workspace                                    # 539 tests
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -- doctor                                       # the CLI, from the tree
@@ -54,7 +54,7 @@ The code has a voice, and matching it is most of what review here is about.
   without losing information, delete it.
 * **Tests stay hermetic.** A test that needs a gateway, Docker or a network goes
   behind `#[ignore]`. Pane classification is tested against captured specimens
-  in `crates/sbx/tests/panes/`; add a specimen rather than a mock when you are
+  in `crates/sbx-core/tests/panes/`; add a specimen rather than a mock when you are
   teaching it a new agent state.
 * **No I/O on the render thread.** Gateway calls belong to `tui/worker.rs`; the
   UI sends a `Request` and drains an `Update`.
@@ -100,7 +100,7 @@ git tag v0.2.0 && git push origin v0.2.0
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, packs each as
 `sbx-<tag>-<target>.tar.gz` with the binary flat at the root, and publishes them
 with one `SHA256SUMS` covering both. Three files have to agree about those names
--- the workflow, `install.sh` and `crates/sbx/src/update.rs` -- and a test in
+-- the workflow, `install.sh` and `crates/sbx-core/src/update.rs` -- and a test in
 `update.rs` fails if they ever stop agreeing, so a rename in one of them is
 caught locally rather than by someone's broken install.
 

@@ -25,6 +25,12 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/desktop/package-lock.json
+
       - name: Formatting
         run: cargo fmt --all --check
 
@@ -36,5 +42,67 @@ jobs:
       - name: Tests
         run: cargo test --workspace
 
+      # The desktop application's types are generated from the Rust ones. A
+      # checked-in binding that no longer matches its type is a shape mismatch
+      # discovered at runtime in a webview, so it is a build failure here.
+      - name: TypeScript bindings are current
+        run: |
+          ./scripts/gen-bindings.sh
+          git diff --exit-code -- apps/desktop/src/gen \
+            || { echo "::error::bindings are stale; run ./scripts/gen-bindings.sh"; exit 1; }
+
+      # The desktop application is not a workspace member -- building it needs a
+      # GUI toolkit -- so what CI checks is the half that does not: the types it
+      # is generated from, and that its own TypeScript agrees with them.
+      #
+      # `working-directory` and not `--prefix`: npm's prefix says where the
+      # package is, not where the command runs, so `tsc` started at the
+      # repository root, found no `tsconfig.json` there, and printed its own
+      # help -- which is a failure that looks nothing like a type error. This is
+      # now the same two commands run by hand in `apps/desktop`.
+      - name: Desktop types
+        working-directory: apps/desktop
+        run: |
+          npm ci
+          npm exec -- tsc --noEmit
+
       - name: Build
         run: cargo build --workspace --release
+
+  # The client half has to compile for Windows, because the desktop application
+  # runs there and `sbx-core` is underneath it. Only the client half: there is no
+  # gateway, no Docker daemon and no tmux on that side, so `sbx` and `sbxd`
+  # remain Linux programs and are not built here.
+  #
+  # A check rather than a build, and only these three crates, because what it is
+  # guarding against is one `use std::os::unix::fs` -- which costs seconds to
+  # catch here and a tagged release to catch anywhere else.
+  #
+  # The desktop crate is checked too, and for a reason that cost somebody an
+  # afternoon: `tauri-build` generates a Windows *resource file* and needs
+  # `icons/icon.ico` to do it, which nothing on Linux ever asks for. The icon
+  # was missing for two increments and neither a Linux build, a release that was
+  # never tagged, nor the three crates below could notice.
+  windows:
+    name: the client half compiles on Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check
+        run: cargo check -p sbx-client -p sbx-proto -p sbx-core --all-targets
+
+      # Its own workspace, so it needs its own invocation. `check` and not
+      # `build`: what this is for is the build script and the Windows-only
+      # dependencies resolving, not a binary nobody here will run.
+      - name: Check the desktop application
+        working-directory: apps/desktop/src-tauri
+        run: cargo check

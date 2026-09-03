@@ -11,13 +11,27 @@ base       = "develop"                                # unset: the remote's defa
 policy     = "feature-work"                           # a template, or a path to a YAML file
 providers  = ["claude-oauth", "azure-pat"]            # credentials for a new session
 repo_roots = ["~/dev", "~/work"]                      # where the picker looks
+worktree_root = "~/.local/share/sbx/worktrees"        # where worktree sessions go
+branch_prefix = "tobias"                              # <prefix>/<name> for a work branch
 refresh    = "1s"                                     # how often the TUI reads the sandboxes
 
 skills     = ["ship-pr"]                               # copied into every session
 
 [[mcp]]                                               # one table per MCP server
 name = "jira"                                         # see docs/mcp.md
-url  = "http://mcp-atlassian:9000/mcp"
+url  = "http://mcp-atlassian:9000/mcp"                # ... a server you run
+
+[[mcp]]
+name    = "sentry"                                    # ... or one sbxd runs
+image   = "ghcr.io/example/mcp-sentry:1.4"
+port    = 9000
+secrets = ["SENTRY_TOKEN"]                            # names; values live on the server
+
+[[tracker]]                                           # the task inbox
+kind    = "jira"                                      # see docs/inbox.md
+site    = "https://your-org.atlassian.net"
+email   = "you@example.com"
+secret  = "JIRA_API_TOKEN"
 ```
 
 Everything in it is a *default*: a flag on the command line wins, and so does an
@@ -61,6 +75,19 @@ specific answer wins:
   is still one keystroke away -- and typing drops the preference for good.
 * `repo_roots` **replaces** the conventional places rather than adding to them,
   and `SBX_REPO_ROOTS` still wins over it.
+
+`repo_roots` and `worktree_root` are both about the machine that *runs* the
+sessions, which with a server is not the machine with the window on it: a
+worktree is added to a checkout, and both the checkout and the worktree are the
+server's. See [worktrees.md](worktrees.md).
+
+Two things are deliberately *not* in this file. **Secrets** are named here and
+stored in `$XDG_STATE_HOME/sbx/secrets.json`, because a config file is the kind
+of thing people copy between machines and paste into an issue. And **uploaded
+skills** are not listed at all: what a client has pushed into the server's
+library is a directory listing rather than a decision, and a second list to keep
+in step with it would only ever be wrong. See [mcp.md](mcp.md) and
+[skills.md](skills.md).
 
 
 ---

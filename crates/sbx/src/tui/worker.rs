@@ -10,10 +10,12 @@ use std::thread;
 
 use openshell_client::{CliClient, OpenShell, PolicyRevision, PolicyUpdate, Provider};
 
-use crate::events::Event;
-use crate::ops;
-use crate::repos::{self, Facts, LocalRepo};
-use crate::session::Session;
+use sbx_core::backend::Backends;
+use sbx_core::config::Config;
+use sbx_core::events::Event;
+use sbx_core::ops;
+use sbx_core::repos::{self, Facts, LocalRepo};
+use sbx_core::session::Session;
 
 pub enum Request {
     /// Reconcile the list against the gateway. `repair` re-reads the metadata of
@@ -80,7 +82,7 @@ pub enum Update {
     },
     Published {
         session: String,
-        result: Box<Result<crate::publish::Outcome, String>>,
+        result: Box<Result<sbx_core::publish::Outcome, String>>,
     },
     Destroyed {
         session: String,
@@ -116,7 +118,7 @@ pub enum Update {
 /// hostage for the rest of a clone, and the session is recoverable either way --
 /// the store carries a record of how far it got, and the sandbox carries its own
 /// metadata. Quitting mid-create asks for confirmation for the same reason.
-fn spawn_create(client: CliClient, up_tx: Sender<Update>, draft: ops::Draft) {
+fn spawn_create(client: CliClient, cfg: Config, up_tx: Sender<Update>, draft: ops::Draft) {
     thread::spawn(move || {
         let name = draft.name.clone();
         // Checked here rather than built: `image::build` streams docker's output
@@ -127,14 +129,14 @@ fn spawn_create(client: CliClient, up_tx: Sender<Update>, draft: ops::Draft) {
         // the gateway with docker's words about a manifest. The message names the
         // command that builds it, which is a command line rather than a
         // keystroke for the reason above.
-        let tag = crate::toolchain::tag(&draft.toolchains);
-        if !crate::image::exists_tag(&tag) {
+        let tag = sbx_core::toolchain::tag(&draft.toolchains);
+        if !sbx_core::image::exists_tag(&tag) {
             let fix = if draft.toolchains.is_empty() {
                 "sbx image build".to_string()
             } else {
                 format!(
                     "sbx image build --toolchain {}",
-                    crate::toolchain::labels(&draft.toolchains).join(",")
+                    sbx_core::toolchain::labels(&draft.toolchains).join(",")
                 )
             };
             let _ = up_tx.send(Update::Created {
@@ -152,7 +154,8 @@ fn spawn_create(client: CliClient, up_tx: Sender<Update>, draft: ops::Draft) {
                 step,
             });
         };
-        let result = ops::create(&client, &draft, progress);
+        let backends = Backends::from_config(Box::new(client), &cfg);
+        let result = ops::create(&backends, &draft, progress);
         let _ = up_tx.send(Update::Created {
             session: draft.name,
             result: Box::new(result),
@@ -170,11 +173,15 @@ impl Worker {
     /// `roots` is where a repository scan looks. Resolved by the caller rather
     /// than here: it depends on the config file and the working directory, and
     /// neither is the worker's business to go and read between requests.
-    pub fn spawn(client: CliClient, roots: Vec<repos::Root>) -> Self {
+    pub fn spawn(client: CliClient, cfg: Config, roots: Vec<repos::Root>) -> Self {
         let (req_tx, req_rx) = channel::<Request>();
         let (up_tx, up_rx) = channel::<Update>();
 
         let handle = thread::spawn(move || {
+            // Both backends, built per request rather than held: it is two paths
+            // and a client handle, no I/O, and building it each time is what
+            // lets an edited `worktree_root` apply without restarting the TUI.
+            let backends = || Backends::from_config(Box::new(client.clone()), &cfg);
             while let Ok(req) = req_rx.recv() {
                 let update = match req {
                     Request::Shutdown => break,
@@ -184,39 +191,39 @@ impl Worker {
                     // inline would freeze the state column and every pane for
                     // as long as it lasts.
                     Request::Create(draft) => {
-                        spawn_create(client.clone(), up_tx.clone(), *draft);
+                        spawn_create(client.clone(), cfg.clone(), up_tx.clone(), *draft);
                         continue;
                     }
-                    Request::Refresh { repair } => match ops::refresh_with(&client, repair) {
+                    Request::Refresh { repair } => match ops::refresh_with(&backends(), repair) {
                         Ok(r) => Update::Sessions(Box::new(r)),
                         Err(e) => Update::Failed(e.to_string()),
                     },
                     Request::Diff(session) => Update::Diff {
-                        body: ops::repo_diff(&client, &session),
+                        body: ops::repo_diff(backends().for_session(&session), &session),
                         session: session.name,
                     },
                     Request::Poll(session) => Update::Polled {
-                        poll: Box::new(ops::poll(&client, &session)),
+                        poll: Box::new(ops::poll(backends().for_session(&session), &session)),
                         session: session.name,
                     },
                     Request::Policy(session) => Update::Policy {
-                        result: Box::new(ops::policy(&client, &session)),
+                        result: Box::new(ops::policy(backends().for_session(&session), &session)),
                         session: session.name,
                     },
                     Request::Events(session) => Update::Events {
-                        result: Box::new(ops::events(&client, &session)),
+                        result: Box::new(ops::events(backends().for_session(&session), &session)),
                         session: session.name,
                     },
                     Request::Publish(session) => Update::Published {
                         result: Box::new(ops::publish(
-                            &client,
+                            backends().for_session(&session),
                             &session,
-                            &crate::publish::Options::default(),
+                            &sbx_core::publish::Options::default(),
                         )),
                         session: session.name,
                     },
                     Request::Destroy(name) => Update::Destroyed {
-                        result: Box::new(ops::destroy(&client, &name)),
+                        result: Box::new(ops::destroy(&backends(), &name)),
                         session: name,
                     },
                     Request::ScanRepos => Update::Repos(repos::discover_in(&roots)),
@@ -234,7 +241,11 @@ impl Worker {
                         update,
                         label,
                     } => Update::Repolicied {
-                        result: Box::new(ops::repolicy(&client, &session, &update)),
+                        result: Box::new(ops::repolicy(
+                            backends().for_session(&session),
+                            &session,
+                            &update,
+                        )),
                         session: session.name,
                         label,
                     },

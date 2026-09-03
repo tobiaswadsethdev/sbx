@@ -1,0 +1,20 @@
+[package]
+name = "sbx-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The wire between an sbx client and sbxd"
+
+[dependencies]
+sbx-core = { path = "../sbx-core" }
+serde.workspace = true
+base64 = "0.22"
+ts-rs = { version = "12", optional = true }
+
+[features]
+ts = ["dep:ts-rs", "sbx-core/ts"]
+
+[dev-dependencies]
+serde_json.workspace = true

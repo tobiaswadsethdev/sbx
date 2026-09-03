@@ -1,0 +1,139 @@
+# sbx defaults. Everything here is optional, and everything here is a *default*:
+# a flag on the command line always wins, and so does an explicit choice in the
+# create form. Delete a key to go back to the built-in behaviour.
+#
+# Written by `sbx config --init`. `sbx config` shows what is in force.
+
+# Gateway to talk to. Unset means the active one, as `openshell gateway list`
+# reports it. `--gateway` overrides this.
+# gateway = "default"
+
+# Repository a `sbx new` with no --repo clones. The TUI's picker opens on this
+# one too, when it finds it -- a filter away from anything else, rather than a
+# scroll.
+# repo = "https://github.com/octocat/Hello-World"
+
+# Branch to clone from. Unset means the remote's default branch, which is almost
+# always what you want; set it for a repository that develops off something else.
+# base = "develop"
+
+# Policy applied to a new session: a template name, or a path to a YAML file.
+# `sbx policies` lists the templates.
+# policy = "feature-work"
+
+# Credential providers attached to a new session, by name; `openshell provider
+# list` shows what exists. Providers are per organisation, not per forge, so a
+# work repository and a personal one need one each.
+#
+# Setting this replaces the create form's guesswork with your answer: the form
+# normally ticks the agent's credential and the repository host's when the type
+# names exactly one, and this says so outright instead.
+# providers = ["claude-oauth", "azure-pat"]
+
+# Where the create form's picker looks for repositories, replacing the usual
+# places (the working directory and its parent, ~/dev, ~/src, ~/code, ~/projects,
+# ~/work, ~/repos, ~/git, and ~ itself one level deep) rather than adding to
+# them. `SBX_REPO_ROOTS` still wins over this.
+# repo_roots = ["~/dev", "~/work"]
+
+# Where worktree sessions put their working copies, one directory per session.
+# Defaults to ~/.local/share/sbx/worktrees.
+#
+# A worktree session is *not* sandboxed: it is a `git worktree` added to a
+# checkout on this machine, and the agent in it runs as this user, with this
+# user's git credentials and whatever the network allows. It is labelled as such
+# everywhere it appears, and it has no policy pane and no events feed because
+# there is nothing deciding anything. The sandbox stays the default.
+# worktree_root = "~/.local/share/sbx/worktrees"
+
+# How often the TUI reads the sandboxes. One number, because the intervals
+# underneath it are measured and related to each other: this scales all of them,
+# so 2s polls half as often as the 1s default and 500ms twice as often. The cost
+# is `git status` inside every live sandbox, so raise it on a large repository or
+# a long list, and lower it if the diff pane feels behind the agent. 250ms to 60s.
+# refresh = "1s"
+
+# MCP servers the agent gets, one table each. They run on the host -- in their
+# own containers, holding their own credentials -- and the sandbox is granted one
+# endpoint each, reachable only by the agent binary. Nothing else in the sandbox
+# can talk to them, and no token ever lands on the sandbox filesystem.
+#
+# The url is what the *sandbox* sees, which is not what your browser sees:
+# `localhost` in there is the sandbox itself and is refused outright. Use the
+# container's name when it has joined the gateway's own docker network
+# (`--network openshell-docker`, nothing published), or `host.openshell.internal`
+# for a port published on the host. `transport` is "http" (the default) or "sse".
+#
+# Applies to sessions created after the change; existing ones keep what they were
+# made with. See the MCP section of the README for the docker side.
+# [[mcp]]
+# name = "jira"
+# url = "http://mcp-atlassian:9000/mcp"
+#
+# [[mcp]]
+# name = "azure-devops"
+# url = "http://mcp-azure-devops:9001/mcp"
+# transport = "http"
+#
+# A table with an `image` instead of a `url` is *managed*: sbxd starts the
+# container, keeps it on the gateway's network, restarts it, and holds its
+# secrets. Its url is derived -- http://sbx-mcp-<name>:<port>/mcp -- which is
+# why there is none to write, and why the two ways a hand-written one goes wrong
+# cannot happen. `secrets` names environment variables whose values live in the
+# server's own store, never here: `printf %s "$TOKEN" | sbxd secret <NAME>`.
+# The integrations screen in the window has the same buttons as `sbxd mcp`.
+# [[mcp]]
+# name = "sentry"
+# image = "ghcr.io/example/mcp-sentry:1.4"
+# port = 9000
+# args = ["--transport", "http"]
+# env = { SENTRY_ORG = "inet" }
+# secrets = ["SENTRY_TOKEN"]
+
+# What a work branch is named under: `<prefix>/<name>`. Defaults to `sbx`, which
+# is what every session's branch has been. Set it to your own name and a session
+# started from a ticket is `tobias/PROJ-123-add-the-changelog`, which is the
+# convention a tracker's commit hooks and your reviewers already look for.
+# branch_prefix = "tobias"
+
+# The trackers the task inbox reads, one table each. Read on this machine, over
+# REST, with the credential in this machine's secret store -- named here, never
+# written here. `sbxd secret <NAME>` stores it; `sbx doctor` says when one is
+# missing, because a tracker with no credential produces an inbox that is
+# silently missing its rows.
+#
+# `on_publish` is where to move a ticket when its session is published, which
+# also comments the pull request onto it. The default query is "assigned to me
+# and not done"; `query` replaces it with JQL or WIQL. See docs/inbox.md.
+# [[tracker]]
+# kind = "jira"
+# site = "https://your-org.atlassian.net"
+# email = "you@example.com"
+# secret = "JIRA_API_TOKEN"
+# on_publish = "Ready for Review"
+#
+# [[tracker]]
+# kind = "azure-devops"
+# org = "your-org"
+# project = "YourProject"
+# secret = "AZURE_DEVOPS_PAT"
+#
+# [[tracker]]
+# kind = "github"
+# repo = "owner/name"
+# secret = "GITHUB_TOKEN"
+
+# Skills copied into every new session, by name or by path. A name is one of
+# your own, under ~/.claude/skills; anything with a `/` in it is a path, so a
+# skill living in a repository can be pointed at where it is.
+#
+# A copy, taken while the sandbox is seeded -- a symlink cannot cross into a
+# sandbox, and a bind mount would hand it the rest of your home directory. What
+# this file holds is the pointer, so editing the original changes the next
+# session; a running one keeps what it was created with.
+#
+# These are paths on the machine that runs the sessions. Skills on a *client*
+# machine are pushed to the server's library instead -- from the window, and
+# automatically before every create -- and a session gets both. See
+# docs/skills.md.
+# skills = ["ship-pr", "~/dev/notes/.claude/skills/changelog"]

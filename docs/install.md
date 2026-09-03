@@ -1,5 +1,15 @@
 # Installing sbx
 
+There are two things to install and they do not go in the same place. **`sbx`
+and `sbxd` run where the sandboxes are**, which is Linux, because the isolation
+is kernel-enforced. **The desktop application runs where you are sitting**,
+which may be the same machine or may be Windows -- it makes requests of an
+`sbxd` and needs no gateway, no Docker and no tmux of its own.
+
+Most of this page is the first half. [The desktop
+application](#the-desktop-application) at the end is the second, and is all that
+a Windows machine needs.
+
 ## Prerequisites
 
 Linux with systemd and a Docker daemon. Verified on Arch on WSL2; nothing here
@@ -98,12 +108,114 @@ sbx doctor
 ```
 
 Start something: `sbx new --repo <url> --task "..."`, or `sbx` for the
-TUI, where `n` does the same thing with a picker and a form --
+terminal interface, where `n` does the same thing with a picker and a form --
 [tui.md](tui.md).
+
+There is a desktop workspace as well, and it talks to a server rather than to
+the gateway directly -- so it works whether the sandboxes are on this machine or
+another one. It is the next section; [desktop.md](desktop.md) is what the window
+does once it is running.
 
 If you would rather see each step yourself before trusting a tool with it,
 [manual-loop.md](manual-loop.md) is the whole loop run by hand, against the
 versions it was verified on.
+
+## The desktop application
+
+A window onto an `sbxd`. It holds no sandboxes and starts none itself: it dials
+a server, pins that server's certificate, and asks. So the machine it runs on
+needs none of the prerequisites above -- and the server it dials can be this
+machine, a box on the LAN, or the Linux side of the same laptop.
+
+Whichever platform, the last step is the same: **the window pairs with a server
+from its own dialog**, so nothing above has to be installed beside it. Run
+`sbxd pair desktop --host <the address the window will dial>` on the server,
+paste the `sbx://…` line it prints into the window, and that is the install
+finished. [desktop.md](desktop.md#connecting-it-to-a-server) is that step in
+full, and [server.md](server.md) is the case where the two are on different
+machines.
+
+### Linux
+
+Built from the tree. A Tauri bundle links against the webkit2gtk of the
+distribution that built it, so a `.deb` or an AppImage published here would be a
+promise about GTK versions it could not keep -- which is why the release page
+carries a Windows installer and no Linux one.
+
+The libraries, with their development headers:
+
+| | |
+| --- | --- |
+| Arch | `sudo pacman -S webkit2gtk-4.1 gtk3 libsoup3 base-devel curl file openssl librsvg` |
+| Debian, Ubuntu | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev build-essential curl file libssl-dev librsvg2-dev` |
+| Fedora | `sudo dnf install webkit2gtk4.1-devel gtk3-devel libsoup3-devel openssl-devel curl file librsvg2-devel` |
+
+Tauri's own [prerequisites](https://v2.tauri.app/start/prerequisites/) page is
+the list that is kept current; these are the three that matter -- `webkit2gtk-4.1`
+is the engine, and the two bugs in [desktop.md](desktop.md#the-font-metrics-webkit-gets-wrong)
+are its. Node 22 or newer and the same Rust as the rest of the tree are the
+other two.
+
+```sh
+cd apps/desktop
+npm install
+npm run tauri build      # bundle in src-tauri/target/release/bundle/
+npm run tauri dev        # or run it from the tree, which is what to do while working on it
+```
+
+**`npm run tauri dev` rather than the debug binary.** A development build loads
+the frontend from Vite's dev server, and that is what starts it; running
+`src-tauri/target/debug/sbx-desktop` on its own gives a window that says
+`Operation was cancelled` and reads exactly like a broken frontend.
+
+### Windows
+
+There is no `sbx` for Windows and there is not meant to be. The CLI drives
+Docker, tmux and a gateway, and none of those are on that side; what runs there
+is the window, which pairs itself. This is the arrangement the server was built
+for: Linux in WSL doing the work, the window out on Windows.
+
+Download the installer for the release you want from the [releases
+page](https://github.com/tobiaswadsethdev/sbx/releases) -- either of:
+
+```
+sbx-desktop-vX.Y.Z-x86_64-pc-windows-msvc.msi          # Windows Installer
+sbx-desktop-vX.Y.Z-x86_64-pc-windows-msvc-setup.exe    # the same application, NSIS
+```
+
+Both are covered by the release's `SHA256SUMS`, the same file `install.sh`
+verifies a Linux binary against, so an installer can be checked before it is
+run:
+
+```powershell
+(Get-FileHash .\sbx-desktop-vX.Y.Z-x86_64-pc-windows-msvc.msi -Algorithm SHA256).Hash.ToLower()
+```
+
+**A release built without a signing certificate is unsigned**, and SmartScreen
+says so with a full-width warning before it will run one. The checksum above is
+the integrity story either way -- it is the one that does not expire -- and the
+release workflow signs the installers when a certificate is in the repository's
+secrets (`WINDOWS_CERTIFICATE`, a base64 PFX, and
+`WINDOWS_CERTIFICATE_PASSWORD`), skipping it when there is none so that a fork
+can still cut a release.
+
+WebView2 is the only runtime it needs, and Windows 11 ships with it; on Windows
+10 the installer's own prompt or Microsoft's Evergreen bootstrapper supplies it.
+
+Building it there instead needs Rust, Node 22 or newer, and the MSVC build tools
+(the *Desktop development with C++* workload), then the same two commands as on
+Linux. Only the client half of this repository compiles for Windows, which CI
+checks on every change; `sbx` and `sbxd` do not, and are not asked to.
+
+**Updating is downloading the newer installer.** `sbx update` replaces a Linux
+binary in place and has no Windows half; a `.msi` installed over an older one
+upgrades it. There is no background check on either platform.
+
+**If the server is in WSL**, which is the case this was built for, the address
+the window dials depends on how WSL is networked -- mirrored means
+`localhost:17671` and NAT means an address that changes on every restart. `sbx
+doctor` on the Linux side says which is in force and what to dial. See [the WSL
+case](server.md#the-wsl-case).
 
 ## Updating
 

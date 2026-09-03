@@ -1,0 +1,26 @@
+# Deliberately its own workspace, not a member of the one at the repository
+# root. `cargo build --workspace` there would otherwise need webkit2gtk, gtk3
+# and libsoup present on every machine that builds `sbx` -- including CI, which
+# has no business installing a GUI toolkit to check that a session store
+# reconciles.
+[workspace]
+
+[package]
+name = "sbx-desktop"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.89"
+license = "Apache-2.0"
+description = "The sbx desktop application"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+sbx-core = { path = "../../../crates/sbx-core" }
+sbx-proto = { path = "../../../crates/sbx-proto" }
+sbx-client = { path = "../../../crates/sbx-client" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri-plugin-notification = "2.4.0"

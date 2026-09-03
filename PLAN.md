@@ -1516,3 +1516,917 @@ Things a future session should know that are not obvious from the code:
 * `openshell logs` and `policy list` have no `--output json`. The log is parsed
   by line in `events.rs`; policy history is not surfaced at all because the
   table would have to be scraped.
+
+---
+
+# Pivot: the ADE
+
+Increments 0-22 built a terminal UI for one person on one Linux box. The pivot
+keeps every part of that -- the sandbox per session, the per-binary policy, the
+allow/deny feed, the credentials the sandbox never sees -- and puts a desktop
+application in front of it, with the server free to be somewhere else.
+
+The reference for the shape is [Orca](https://github.com/stablyai/orca): a fleet
+of parallel agents, a task inbox wired to the trackers, a real terminal, diffs
+you can annotate. What Orca isolates with a git worktree, this isolates with a
+kernel-enforced sandbox, and the policy and events panes are the part no ADE
+has.
+
+## Why the code is ready for this
+
+`ops.rs` -- the operations both the CLI and the TUI already share -- imports
+nothing from ratatui. `openshell-client` is one trait. Sessions describe
+themselves from inside their own sandbox, so a client dying is a non-event and
+a *second* client is nearly free. The headless core is mostly already written;
+it is just not a crate yet.
+
+The exceptions, and the work they imply: `ansi.rs` returns ratatui `Span`s,
+`pane.rs` is presentation, and `policy.rs` builds a pane body. Anything that
+renders has to move behind the boundary, leaving the core returning structured
+values that a terminal and a web view can each draw their own way.
+
+## Locked decisions
+
+| Decision | Choice | Why |
+| --- | --- | --- |
+| Desktop stack | Tauri v2 | Reuses the Rust core and its serde types; the Windows binary is WebView2, so it is ~10MB and Chromium-backed, which is what a WebGL terminal wants. Linux desktop gets WebKitGTK and a rougher terminal -- accepted, because the Linux user already has the TUI |
+| Transport | A listening `sbxd`, TLS + bearer tokens | Chosen over stdio-over-SSH. Costs a certificate and pairing story, buys multi-client, a mobile client later, and a server that does not need an SSH account per user |
+| Backends | Sandboxed *and* unsandboxed worktrees | The sandbox stays the default and the point. A worktree session runs on the server with the server's rights, and is labelled as such everywhere it appears |
+| The TUI | Frozen | Bug fixes only. It stays building against the core, which is the cheapest possible test that the core has not grown a UI dependency |
+| UI data | Structured, never markup | The core returns `PolicyView` and `Vec<Event>`; the TUI makes lines out of them and the web view makes elements. Shipping pane markup over the wire would make the desktop app a screen-scraper of the terminal one |
+
+## Shape
+
+```
+crates/
+  openshell-client/   unchanged -- the trait
+  sbx-core/           ops, session, store, policy, events, seed, skills, mcp,
+                      publish, repos, image, toolchain, config, doctor, status
+  sbx-proto/          the wire types, one serde definition, TS generated from it
+  sbxd/               the server: axum, TLS, /rpc + one multiplexed websocket
+  sbx/                the clap CLI and the frozen TUI, in-process on the core
+apps/desktop/         Tauri v2 -- the only thing that ships to Windows
+```
+
+`sbx-proto` is the single definition of the protocol and `ts-rs` emits the
+TypeScript from it into `apps/desktop/src/gen/`, checked current in CI. Two
+hand-maintained copies of a message type is the failure mode that makes a
+self-hosted client-server product miserable, and it is avoidable for the cost of
+a build step.
+
+### The server
+
+One TLS listener. `POST /rpc` for request-response, one multiplexed websocket
+for everything that streams -- the events feed, agent status, and the PTY --
+because a single connection is one token check, one reconnect path, and one
+thing to notice has dropped.
+
+`GET /version` is unauthenticated and carries a protocol integer. A desktop app
+and a self-hosted server *will* drift, and a client that can say so beats a
+client that fails strangely.
+
+**Binding to anything but `127.0.0.1` is explicit.** An authenticated `sbxd` can
+create containers on its host, which makes it equivalent to root there; that
+belongs in the docs and in the warning the flag prints, not in a footnote.
+
+### Pairing
+
+`sbxd` generates a self-signed certificate on first run, with the hostname, the
+local addresses and `localhost` in its SANs. `sbxd pair` prints one connection
+string -- `sbx://host:port/<token>#<cert-fingerprint>` -- and the QR code that
+the same string becomes useful as when there is a mobile client. The desktop app
+takes one paste. The client pins the fingerprint on first connect and refuses a
+changed one afterwards; tokens are stored hashed, named, and revocable with
+`sbxd token rm`.
+
+### The WSL case, which is the sharp one
+
+The whole point of the Windows story is a server inside WSL and a UI outside it,
+and whether `localhost` reaches across depends on whether WSL2 is in mirrored or
+NAT networking mode. `sbx doctor` on the WSL side should detect which, and print
+the address Windows should actually use -- including the `netsh portproxy` line
+when it is NAT. Getting this wrong looks exactly like a firewall problem and is
+not one.
+
+## Two backends
+
+A `Backend` trait behind `ops`, with the openshell path as one implementation
+and a `git worktree` path as the other:
+
+```rust
+trait Backend {
+    fn create(&self, spec: &SessionSpec) -> Result<Placement>;
+    fn exec(&self, s: &Session, cmd: &[String]) -> Result<Output>;
+    fn attach_pty(&self, s: &Session) -> Result<PtyHandle>;
+    fn destroy(&self, s: &Session) -> Result<()>;
+    fn isolation(&self) -> Isolation;   // Sandboxed { policy, events } | None
+}
+```
+
+Three things a worktree session cannot have, each of which has to be *said*
+rather than left blank:
+
+* **No policy pane.** It reads "no isolation -- this session runs on the server
+  with your rights", not an empty box that looks like a loading failure.
+* **No events feed.** There is no gateway deciding anything, so there is nothing
+  to allow or block.
+* **A different publish.** `publish.rs` pushes from *inside* the sandbox
+  precisely so the token never reaches the host; a worktree push uses the
+  server's own git credentials. Same button, materially different guarantee.
+
+The list badge says which kind a session is. A product whose pitch is isolation
+cannot have a mode where the isolation is quietly absent.
+
+The source-of-truth invariant also bends here: there is no sandbox to hold
+`meta.json`, so a worktree session's record lives in the server's state
+directory -- not in the worktree, where it would show up in every `git status`
+the agent runs. Adoption after cache loss becomes `git worktree list` reconciled
+against that directory.
+
+## Skills and MCP, now that there are two hosts
+
+"The host" used to mean one machine. It now means the server, while the skills
+and the muscle memory live on the machine with the UI.
+
+**Skills** get a server-side library at `$XDG_DATA_HOME/sbx/skills/`, filled
+from two sources: server-local paths, exactly as the config file does today, and
+uploads pushed by the desktop client from its own `~/.claude/skills`. The
+pointer-not-copy property survives -- the client re-uploads on create, so editing
+the original still means the next session gets the edit -- and a session still
+records precisely what it was given.
+
+**MCP servers** stop being a documented `docker run` incantation and become
+something `sbxd` owns: a catalog of name, image, args, environment and transport;
+containers started on `openshell-docker` and health-checked; secrets in a
+server-side store that never travels to a client. `sbx doctor`'s MCP check turns
+into live status in an Integrations screen, and the per-binary grant is unchanged.
+
+The warning in `docs/mcp.md` moves into the UI, at the moment a server is ticked
+for a session rather than in a document nobody re-reads: the agent gains
+everything that server can do, the gateway sees only `POST /mcp`, and a
+filesystem or Docker MCP server is a straight sandbox escape.
+
+## The task inbox
+
+GitHub, Azure DevOps and Jira, read server-side over REST with the credentials in
+the server's store -- REST for what the *UI* shows, MCP for what the *agent*
+gets. They are different consumers and conflating them makes both worse.
+
+`forge.rs` already knows which host a repo belongs to and `publish.rs` already
+opens pull requests on two of them, so the new part is the reading and the round
+trip: open a session from a ticket with the task, base branch and a branch name
+following `name/PROJ-123-description` already filled in, and on publish, comment
+the PR link back and move the ticket. That loop currently exists as a personal
+skill; it is the thing an ADE should do with a button.
+
+## UI
+
+* **Left** -- repositories, then their sessions, each with a state badge, the
+  waiting count, and the isolation kind.
+* **Centre** -- per session: Agent (xterm.js on the websocket), Diff, Files.
+* **Right** -- Facts, Policy, Events. The events feed keeps the TUI's best
+  interaction: pick a decision, allow or block that endpoint, one keystroke.
+* **Top** -- the task inbox.
+
+Two things the desktop gets that the terminal could not. **An OS notification
+when a session starts waiting on a permission prompt** is the single largest
+quality-of-life gain here; watching several agents is exactly the case where a
+terminal loses. And **inline comments on a diff, batched and sent back to the
+agent**, which is review as a conversation rather than a re-prompt.
+
+The terminal is a place this is better positioned than the reference. tmux
+already runs *inside* the sandbox, so xterm.js over the websocket to
+`openshell exec --tty` gets scrollback and reconnect across a dropped network
+for free, with nothing persisted client-side.
+
+## Increments
+
+- **23. Headless core** — DONE. `sbx-core` holds the twenty modules that do not
+  draw; `crates/sbx` keeps the clap CLI and the frozen TUI. No behaviour changed:
+  the same 408 tests pass, now 259 in the core and 149 in the binary, and
+  `sbx doctor`, `policies`, `toolchains` and `config` were run against the live
+  gateway afterwards to check that the embedded policy YAML, Dockerfiles and
+  `config.example.toml` all survived moving a directory.
+
+  Two things crossed the line and had to move. `ansi.rs` returned ratatui
+  `Span`s, so it now tokenizes into a `Style`/`Color`/`Modifiers` of its own --
+  serde-derived, because a captured screen is something a client will be sent --
+  and `tui/ansi.rs` maps that onto ratatui. And `ops::attach_interactively` put
+  the local terminal into raw mode through `ratatui::crossterm`, which is not the
+  core's business: it moved to `attach.rs` in the binary, where both callers
+  already live, so it is still one definition rather than two. `ops` keeps
+  `attach_script`, which is the same shell wherever it is run from -- and the
+  long comment explaining that script, which had drifted onto the caller, is now
+  on it.
+
+  **The plan said `pane.rs` moves to the TUI, and the code says otherwise.**
+  `pane.rs` is markup in a `String` with no UI dependency at all, and it has
+  three consumers, not one: `policy.rs` builds a body with it, `ops.rs` shares
+  its sigils for the diff, and `sbx policy` prints `to_plain` to a pipe. Moving
+  it into the TUI would have dragged two core modules and a CLI command along
+  behind it. It stays in the core.
+
+  What that markup *is* -- a serialised pane, parsed back by whoever draws it --
+  is still wrong for a wire protocol, and the `PolicyView` this deferred is real
+  work. It belongs in increment 24, where `sbx-proto` will say what shape the
+  structured version actually needs to be. Designing it now, against no consumer,
+  would have been guessing.
+- **24. `sbx-proto` and `sbxd`** — DONE, apart from the two halves that turned
+  out to want a UI first; see below. The wire types, the server, TLS, tokens,
+  pairing, `/rpc`, and `sbx` itself as a client of it. `sbx doctor` learns the
+  paired servers and the WSL networking modes. 485 tests.
+
+  The types on the wire are the core's own rather than a second set of DTOs.
+  That couples the protocol to the core's structs -- renaming a field is a
+  protocol break -- and `VERSION` behind an unauthenticated `/version` is what
+  makes the break loud. A second definition would only have moved the coupling
+  somewhere a compiler cannot see it.
+
+  Errors are an envelope and not a status, because a request that failed for a
+  reason the client should act on is not a transport failure: the round trip
+  worked. A status is kept for what really is transport. The one in between is
+  an `op` an older server has never heard of, which comes back as `unsupported`,
+  because a client can explain that and cannot explain a 400.
+
+  Pairing is `sbx://host:port/<token>#<fingerprint>`, and the fingerprint is the
+  part that matters: it means the *first* connection is verified too, which is
+  the hole in ordinary trust-on-first-use. The client checks it and nothing
+  else -- deliberately not the hostname, since the fingerprint answers a stronger
+  question and a name check would only break a server reached at an address that
+  is not in its certificate, which is the WSL case exactly.
+
+  **Building `sbx --server` before any UI paid for itself three times**, in ways
+  the type checker could not have found. `--server ls` parsed as a server called
+  `ls` and fell through to the TUI. `TcpStream::connect` has no timeout, so the
+  read and write timeouts set immediately after it -- and the comment claiming
+  they covered a port with nothing on it -- were both wrong. And the token set
+  was read once at startup, so `sbxd revoke` did nothing until someone restarted
+  the server, which is the opposite of what revoking is for.
+
+  **Two parts moved out, because they wanted a consumer first.** The multiplexed
+  websocket carries the events feed, agent status and the PTY, and every one of
+  those is shaped by what the UI does with it -- the PTY especially, which is
+  increment 26's whole subject. The TypeScript generation wants a UI build to
+  generate into. `PolicyView` moved with them for the same reason it was deferred
+  out of 23: `Reply::Policy` currently carries the revision and the global lists,
+  which the CLI renders with the same code the TUI uses, and the structured
+  version should be designed against the thing that will draw it.
+- **25. The shell** — DONE. Tauri v2 and React, the session list, and
+  facts/policy/events read-only, against a live `sbxd`. Carried what increment
+  24 left with it: `policy::View` and the generated TypeScript.
+
+  `sbx-client` is its own crate now, because the desktop application needs the
+  same connection the CLI makes and a webview cannot make it -- `fetch` has no
+  say in which certificate it will accept, so pinning has to happen on the Rust
+  side of Tauri. The webview never speaks to the server at all.
+
+  `policy::View` replaced the marked-up string the pane used to be. That also
+  took `openshell-client` off the wire, which is worth more than it sounds: a
+  protocol pinned to a `0.0.x` project's types has that project's churn as
+  protocol churn.
+
+  **The generated types earned their keep the first time they were used.**
+  `State` is lowercase on the wire and `Verdict` is PascalCase -- an
+  inconsistency that has to stay, because events are persisted as JSONL and a
+  rename would make every file on disk unreadable. The hand-written
+  `e.verdict === "denied"` compiled, ran, and would have painted every denial as
+  neutral. Generated, it was a type error.
+
+  `apps/desktop` is deliberately not a workspace member, so `cargo build
+  --workspace` does not need a GUI toolkit installed to check that a session
+  store reconciles.
+
+  **Most of the time this took went on a bug that did not exist.** A development
+  build loads the frontend from Vite's dev server; running the binary directly
+  without that server gives a window reading `Operation was cancelled`, then a
+  blank one, which reads exactly like a broken frontend. Three fixes went in for
+  it -- stripping `crossorigin` from Vite's tags, disabling WebKit's DMABUF
+  renderer, and disabling WebKit's sandbox -- each with a confident comment
+  explaining why it was necessary. Tested afterwards against the working path,
+  none of them were, and all three are gone. The sandbox one is the one worth
+  remembering: a security-relevant change, made on a guess, documented as though
+  it had been established.
+
+  Two things from that detour stayed, both real. Debug builds open the web
+  inspector, which is the only way to see a console message from inside that
+  window. And a screenshot has to name the window id: `x11grab` on a region of
+  the screen returns solid black for a redirected window, which is what made the
+  first captures lie about what was on screen.
+- **26. Terminal** — DONE, drawing included. The multiplexed websocket, the
+  events, status and terminal channels, `sbx-client`'s streaming half,
+  `sbx watch`, and the pane. 501 tests plus three `#[ignore]`d live ones.
+
+  One socket, several channels, JSON frames so a connection stays readable in a
+  log -- terminal bytes base64 inside them, because a pty read lands wherever it
+  lands and a split multi-byte character cannot go in a JSON string. The server
+  polls and sends only what is new, which is the point of it: a client asking
+  `/rpc` every second would spend a handshake per session per second to hear
+  that nothing had changed, and two clients would double the load on a sandbox.
+
+  **The terminal needs a pty on the server's side as well**, which took
+  measuring to find. `openshell exec --tty` gives the sandbox process a real
+  terminal -- `tty` reports one, `test -t 0` succeeds -- but the CLI will not
+  proxy interactively through pipes: with stdin closed it writes tmux's redraw,
+  with stdin an open pipe it writes nothing, ever, sent to or not. `TERM` made
+  no difference; stdin was the whole variable. So the child is spawned into a
+  local pty as a terminal emulator would, which is what
+  `interactive_exec_argv` has always been shaped for. Resizing then becomes the
+  pty's own, which also deleted a deadlock: the `tmux resize-window` exec it
+  replaced was awaited inside the read loop, and execs are serialised per
+  sandbox, so it could wait on the attach that was holding the path.
+
+  Closing a channel detaches with `Ctrl-b d` rather than killing the exec, since
+  killing one wedges the exec path for the whole sandbox. There is a live test
+  that opens a terminal, closes it, and opens it again, because a test that
+  opened one would pass either way.
+
+  **xterm.js did not paint under WebKitGTK**, and the cause was not in the
+  stream: the bytes reached the buffer -- `getLine(1)` read Claude Code's
+  banner -- and the character cell measured zero, which is a renderer that
+  skips. WebKit reports a font's bounding box as zero through a canvas, and
+  xterm picks its canvas measuring strategy on whether those properties exist
+  rather than whether they answer, so it never falls back to measuring the DOM.
+  `src/charSize.ts` probes the canvas and hides `OffscreenCanvas` for the length
+  of `Terminal.open` where it cannot measure, which forces the fallback. Drawing
+  then revealed a second fault with the same cause: WebKit puts the baseline
+  five pixels higher for `line-height: 17px` than for `line-height: normal`,
+  though the two are the same seventeen pixels, and rows are `overflow: hidden`
+  -- so the top of every line was shaved and `README` read as `KEADME`. The
+  rows' spans are put back to `line-height: normal`, which is the only setting
+  consistent with a cell height that was measured that way. Both written up in
+  docs/desktop.md, and both worth reporting upstream.
+
+  Seven rounds went into that last hop, and the test that finally separated
+  "the emulator cannot draw" from "the stream is wrong" was writing one literal
+  string into xterm -- which was identified as the right first move several
+  rounds before it was run.
+- **27. Create** — DONE. The picker and the form as a GUI, and the protocol's
+  first write: `Repos`, `Inspect`, `NewOptions` and `Create`. 509 tests.
+
+  Two stages, like the TUI's and for the same reason: which repository is a
+  search, what kind of session is a handful of fields with defaults good enough
+  to submit on sight.
+
+  **The repositories are the server's.** A checkout only ever *names* a remote,
+  but which checkouts exist is a fact about the machine that will do the
+  cloning, and `repo_roots` is configured there -- so a window pointed at a
+  server elsewhere lists that server's repositories rather than a set of paths
+  it cannot reach.
+
+  `Create` answers when the request is accepted, not when the agent is running.
+  The states a create passes through are already on the session and already
+  polled, so a request that waited would hold a connection open for a minute to
+  say what the list was about to say anyway; what it does do before returning is
+  everything that can be judged from the request, so an unknown toolchain or a
+  name that is not a name fails against the request that caused it. The image
+  build moved onto that thread, since the reason it sits in `sbx new` rather
+  than in `ops::create` is that it streams docker's output to a terminal, and a
+  server has none.
+
+  Three decisions kept out of the webview on purpose, all because a second
+  implementation is a second answer: the name is derived by the server from the
+  same `derive_name` the command line uses when the field is blank; the
+  credentials are ticked by `preselect_providers`, which moved out of the TUI
+  into the core when this form needed the same answer -- caught by looking at
+  the finished form and seeing nothing ticked, which would have created sessions
+  whose agent comes up to a login prompt; and skills and MCP servers are read
+  from the server's config by `into_draft` rather than from the request -- so a client cannot attach a tool, or the endpoint the
+  policy then opens for it, by asking for one. `NewSession` exists rather than
+  `Draft` on the wire for that reason.
+
+  The one place the two front ends differ is the picker's filter, which matches
+  substrings where the TUI ranks with `repos::score`. Reimplementing the scorer
+  in TypeScript would be the copy this whole crate layout exists to avoid, and
+  the alternative is a request per keystroke. Written down in docs/desktop.md
+  rather than left to be discovered.
+- **28. Diff** — DONE. The three sections as a pane, and a review that goes to
+  the agent rather than to a pull request. 520 tests.
+
+  The body is the same marked-up text `sbx new`'s TUI draws, so this is the
+  second renderer of the `pane::SECTION`/`NOTICE` contract rather than a second
+  format. Line numbers come from the hunk headers, counted forward as git wrote
+  them, which is what lets a comment name a line at all.
+
+  **A review is one message, sent once.** Six remarks delivered as they are
+  written would interrupt the agent six times, and the second interruption lands
+  while it is acting on the first. `ops::tell` uses `load-buffer` +
+  `paste-buffer -p` rather than `send-keys` for the same reason at a smaller
+  scale: `send-keys` types a multi-line message a key at a time, so every
+  newline in it is a submission. A bracketed paste is one block of text, and the
+  single `Enter` after it is the submission.
+
+  Kept on the server, per session, beside the events feed -- a client is a
+  window onto a session, and a review half-written when the window closes is
+  work. Cleared only after the paste lands, so an unreachable sandbox costs the
+  delivery and not the review. What is stored is the remark plus the line it was
+  written against, verbatim: the working copy moves under a review, and a
+  comment that tried to follow a line through later edits would either be wrong
+  or need a diff of the diff.
+- **29. The workspace shell** — DONE. Projects, the tree, tabs and the dock.
+  525 tests.
+
+  The flat session list was right while a session was the unit of work and
+  stopped being right at four repositories: a list sorted by name says nothing
+  about which four. So the window is shaped like an editor -- projects contain
+  worktrees, a worktree contains what you have open in it, and the dock carries
+  the two things an ADE built on git worktrees has no equivalent for.
+
+  **A project is a decision, not a discovery.** `repos::discover_in` finds every
+  checkout on the machine; a project is the handful someone has said they are
+  working on, and it is created by picking one. Stored rather than derived,
+  because a project with no worktrees yet is the normal state of one you just
+  made and no amount of grouping sessions by clone URL can represent it. A
+  worktree records its project rather than being matched back by URL: two
+  checkouts of one repository is a normal thing to have, and it would otherwise
+  belong to both. `sbx new` has no projects, so what it creates is grouped by
+  clone URL at the bottom of the tree rather than hidden.
+
+  The picker moved out of the create flow and into project creation, which is
+  the point: it was the first question of every create and it is now a standing
+  answer, so what is asked when starting work is the part that varies.
+
+  Tabs are per worktree and stay mounted, hidden rather than unmounted -- a
+  terminal that unmounts closes its channel and detaches. The dock is not a tab
+  on purpose: a denial you have to open a tab to find is one you will not find.
+
+  One bug the restructure introduced and the app caught: the form stopped
+  sending a branch to `Inspect`, since a project stores a path and not a
+  checkout. `base_on_remote` is `branch.is_some_and(..)`, so every branch
+  reported as missing from the remote and the form fell back to the remote's
+  default without saying so. Resolved on the server now, which is what `None` on
+  that request always claimed to mean.
+
+- **30. Files, and the editor** — DONE. `Files` and `File`, the tree under the
+  project tree, and Monaco. 531 tests.
+
+  Read-only, because the agent owns the working copy: two writers with no shared
+  lock is how a file ends up with half of each. One directory per request as the
+  tree is expanded -- a repository is tens of thousands of files and each
+  listing is an exec -- and collapsing forgets a level, so reopening re-reads
+  what the agent has done since. Paths are checked by component on the server;
+  contents come back base64, since an exec's stdout is already lossy UTF-8 and a
+  source file with a stray byte would come back altered.
+
+  Monaco was measured in WebKitGTK before anything was built on it, which is the
+  lesson from the terminal applied rather than restated. It renders: character
+  width 8.4 where xterm's canvas path returned zero. **But it computes its diff
+  in a web worker and fails quietly without one** -- the editor still draws and
+  the diff editor shows two panes with no red or green, which reads as an empty
+  diff. Caught only because the probe counted decorations rather than trusting
+  the screenshot: three with a worker, zero without.
+
+  Importing `monaco-editor` whole also brings the language services, four more
+  workers and a 15MB bundle, to power completions in a viewer that cannot be
+  typed into. The editor API plus `basic-languages` is 4MB and keeps the one
+  worker that matters.
+- **31b. Icons, and the same two pixels again** — DONE. Inline SVG icons, file
+  icons by kind, and the font-metrics correction applied to the window rather
+  than only to the terminal.
+
+  The clipping fixed in increment 26 was never terminal-specific and was fixed
+  as though it were. WebKit puts the baseline about two pixels too high for
+  *any* explicit `line-height`; the body sets `1.5`, so every element that clips
+  lost the top of its text and `NOTES.md` read as `NOIES.md` -- legible enough
+  to look like a font rather than a bug, which is how it survived a whole
+  increment of looking straight at it. One rule on `body`, keyed on the class
+  the probe already sets, fixes all of them.
+
+  Icons are drawn here rather than pulled in: an icon set is a package of a
+  thousand glyphs to use fifteen, each with its own stroke weight. Monaco does
+  bundle codicons and reusing them was the obvious alternative -- it would tie
+  the window's chrome to a version of an editor it happens to embed. The file
+  icons cover the kinds you actually scan a directory for and nothing else; two
+  hundred extensions is two hundred chances to be subtly wrong, and an unknown
+  one gets the same page outline rather than nothing.
+
+- **31a. Git, and the diff in the editor** — DONE. `sbx_core::git`, the dock's
+  git view, and Monaco's side-by-side diff replacing the unified text pane. 539
+  tests.
+
+  Full staging, so `Status` is the index and the working copy as two lists and a
+  file edited, staged and edited again appears in both -- which is the case
+  staging exists for and the one a single list cannot show. The status parser is
+  pure and tested against git's own output: the two columns, a conflict as one
+  entry rather than two, a rename under its new name, and a quoted path
+  unquoted.
+
+  **The agent is editing while the view is on screen**, and that shapes all of
+  it. A status is a snapshot already out of date; staging records the version
+  that exists at that moment; discarding races whatever the agent is writing.
+  Git's index is the only lock there is and the agent does not take it, so the
+  view never pretends otherwise: every action re-reads the status from the
+  server rather than adjusting the list it had, and reports git's own words.
+  `pull` is `--ff-only` and `push` is always `-u`, so a branch that has never
+  been pushed has an upstream to measure against afterwards -- which is why the
+  button says `publish` until it does.
+
+  The review moved into the diff editor and nothing about it had to change:
+  comments have always stored `{file, line, excerpt}`, which is already per
+  file. That is the reward for storing the excerpt rather than a line identity
+  -- the anchor never depended on which rendering it was written against.
+
+  One collision worth remembering: `files::Entry` and `git::Entry` both generate
+  `Entry.ts`, and every exported type lands in one flat directory, so the second
+  silently replaced the first. It surfaced as a type error here; with compatible
+  shapes it would not have.
+
+- **31. Shells beside the agent** — DONE. `Channel::Terminal` names a tmux
+  target, `Shells`/`NewShell`/`KillShell` manage them, and the tab bar grew a
+  `+`. 528 tests.
+
+  Each shell is its own tmux session in the sandbox, which is what removes the
+  contention rather than dropping `attach -d`: that flag evicts a client left
+  behind by a crash and is worth keeping, and two tabs on one tmux session would
+  have evicted each other instead. The same sandbox and the same policy -- a
+  shell is not a way around the isolation, it is a second prompt inside it.
+
+  What shells exist is asked of the sandbox. tmux already knows, and its answer
+  outlives the window closing and a second window opening; a list kept in a
+  client would show one closed from elsewhere and hide one opened there. The
+  server names them too, since two windows adding at once would both pick
+  `shell-2` and the second would silently attach to the first's.
+
+  `tmux: None` on the channel means the agent's own, so a client written before
+  any of this keeps working -- there is a test for exactly that, because it is
+  the kind of compatibility that breaks silently.
+- **31c. A window that pairs itself, and the Windows half** — DONE. Pairing from
+  the header and from the empty screen, `sbx-core` building for Windows, and the
+  `.msi`/NSIS bundles in the release. Pulled forward out of increment 35,
+  because the alternative was a Windows user who cannot reach a server at all.
+
+  The instruction the empty screen used to give -- run `sbxd pair` over there,
+  `sbx connect` here, then reopen this window -- is fine on Linux and impossible
+  on Windows, where there is no `sbx`: the CLI drives Docker, tmux and a
+  gateway, none of which are on that side.
+
+  The pairing is not a second implementation. `sbx_client::pair` is the parsing,
+  the dial, the fingerprint check, the "is this an `sbxd` speaking this protocol"
+  check and the save; `sbx connect` is that plus a `println!` and the dialog is
+  that plus a form. Nothing is written until the server has answered, and what
+  comes back is the server's own version -- the one thing a paste cannot fake.
+  No error echoes the string back, since it carries a token.
+
+  **The client half did not compile for Windows, and nothing said so.**
+  `state.rs` reached for `std::os::unix::fs` to set 0600 on a key and 0700 on
+  its directory, and `update.rs` for the executable bit, with no `cfg`
+  anywhere -- so `sbx-core` failed to build for the one platform the desktop
+  application was supposed to be a client from. Windows gets
+  `%LOCALAPPDATA%\sbx`, chosen the way `$XDG_STATE_HOME` was: roaming is the
+  half of a profile that follows a user to another machine, and a pairing token
+  is a login to one host. There is no mode to set there and the module says so
+  rather than pretending to enforce one. CI checks the target on every change,
+  because what it guards against costs seconds here and a tagged release
+  anywhere else.
+
+  No Linux bundle, deliberately: a Tauri bundle links against the webkit2gtk of
+  the distribution that built it, and one `.deb` would be a promise about GTK
+  versions this cannot keep.
+
+  **A third WebKit metrics bug, found by building the dialog.** The zero font
+  metrics that gave the terminal a zero-height cell also make `line-height:
+  normal` resolve to nothing on a form control, whose height is its line-height
+  times its rows -- so every input and textarea in the window was a 14-pixel
+  sliver with its text clipped through the middle. It survived because fields
+  are typed into rather than read, and because a `<select>` beside them renders
+  correctly, bringing its own metrics. A pairing string is the one field you
+  read back, which is how it surfaced. Controls get the explicit line-height the
+  rest of the document must not have, and their padding absorbs the two pixels
+  it puts the baseline out by.
+- **32. Worktree backend** — DONE. The `Backend` trait, the second
+  implementation, and the labelling that keeps it honest. 552 tests, five of
+  them against a real git repository.
+
+  Everything in `ops`, `git`, `files`, `publish` and `seed` takes a backend
+  now instead of a gateway client, and every function in them is unchanged
+  otherwise. That is the shape of the whole increment: a worktree session is
+  not a special case anywhere above the trait, it is a different set of answers
+  to three questions -- where does an exec go, where are the files, is there
+  any isolation to report.
+
+  **The trait is all *where* and no *what*.** The scripts stay shared: one
+  definition of the diff, the poll, the status scrape, the review paste and the
+  seeder, each handed the paths and the tmux invocation it should use. A backend
+  with its own copy of the diff script would be a second answer to what a diff
+  is, which is the thing the two front ends already exist to avoid. `place` and
+  `configure` are separate for the reason the record is written between them: a
+  sandbox with no record yet is an orphan a refresh in another process will try
+  to adopt, and imposing MCP endpoints made that window seconds wide.
+
+  **The absence of isolation is stated, never implied.** `Isolation::None` is
+  refused with a sentence rather than answered with an empty pane -- an empty
+  policy pane is exactly what one that failed to load looks like, and the pane's
+  whole job is to say what the session cannot reach. The wording is the
+  server's, once, so the terminal and the window cannot drift; the protocol
+  grew a `no-isolation` failure kind and the desktop's Tauri bridge grew from a
+  `String` error into `{kind, message}`, which the comment on that type had
+  predicted would happen the first time something needed to branch. `sbx ls`
+  grew a `KIND` column, the tree grew a badge, and the facts pane trades
+  `sandbox`/`policy` for `isolation`/`workdir`.
+
+  Three things a worktree session cannot have, each of which had to be *said*:
+  the policy pane, the events feed, and a publish with the same guarantee.
+  `publish.rs` needed no code change for the last one -- the credential prelude
+  already degrades to a plain `git` when the gateway's placeholder is absent --
+  which is exactly why it needed a paragraph instead: the button is the same and
+  the token is the server's.
+
+  **The record cannot live in the working copy.** The invariant everything else
+  rests on -- the sandbox is the source of truth about itself -- has no worktree
+  equivalent. `.sbx/` in the working copy would be in every `git status` the
+  agent runs, in every diff under review, and one `git clean -fdx` from gone. So
+  it lives under the server's state directory, and adoption after a lost cache
+  is that directory reconciled against the worktrees still on disk. Removing a
+  session with no record answers `RecordOnly` rather than guessing at a
+  directory: unlike a sandbox name, a worktree's path is not a function of the
+  session's name once a root has been reconfigured.
+
+  **tmux is the server's, and that is a naming problem, not a plumbing one.**
+  Every sandbox has a tmux server to itself and can call the agent's session
+  `agent`. Here they share one -- with each other, and with whatever the person
+  at that machine is running -- so the agent is `sbx-<name>` and its shells are
+  `sbx-<name>-shell-N`, and `shells` filters on the backend's prefix instead of
+  "everything except the agent's". Without that, two sessions attach to one
+  agent and your own tmux sessions are offered as a session's shells. There is
+  an `#[ignore]`d test for exactly that, because it needs a tmux server.
+
+  **One backend being unreachable is not the other's problem.** `refresh_with`
+  used to be a gateway call that either worked or failed the command. A machine
+  with no `openshell` on the path at all still has git, and refusing to list its
+  worktree sessions would make the second backend useless precisely where it is
+  most useful -- so a backend that cannot answer contributes a warning and its
+  sessions pass through with the state they last had, never as `dead`. Only
+  every backend failing is an error, because that is no information at all
+  rather than a degraded list.
+
+  Two bugs the live run found, both in the shared half rather than the new one.
+  A `base=$(git symbolic-ref ...)` under the seeder's `set -e` **aborts the
+  script and prints nothing at all**, which is how a create failed with `failed
+  ` and an empty reason; the state file's last step is now reported when the log
+  has nothing to quote, which is a better answer for every seeder failure of
+  that shape. And `resolve_base_script` only ever tried `origin/<base>`, so a
+  checkout with no remote had no base and the diff pane said so on every
+  session -- it falls back to the local ref last, after the remote-tracking one,
+  which is the order that keeps a sandboxed diff measured from where the work
+  started. A worktree session records the checkout's current branch as its base
+  for the same reason.
+
+  What is not here: hook-driven status, since `sbx-status` is baked into the
+  image and a worktree session's state comes from reading the screen; skills and
+  MCP, since the agent is the server's own and packing them into the worktree
+  would put them in `git status`; and a project made from a checkout with no
+  origin, which `projects::add` still refuses because a project is also what a
+  sandboxed session clones.
+
+  Verified in the running application: a worktree session created from the
+  window's form, badged in the tree, with the policy and events panes stating
+  the absence and the facts pane naming the directory -- and the same session
+  created, diffed, attached and removed from the command line against a
+  repository with no remote at all.
+- **33. Managed MCP and skill sync** — DONE. The catalog, the container
+  lifecycle, the secret store, the client-to-server skill upload, and one screen
+  over all three. 567 tests.
+
+  Two documented procedures became two things the server owns. An MCP server was
+  a `docker run` line copied out of `docs/mcp.md` -- with the credential on
+  it -- and re-typed after every reboot; a skill was a path in the server's
+  config file, which cannot reach the `~/.claude/skills` of the machine the
+  window is on.
+
+  **A catalog entry has a url or an image, never both.** A url is a server
+  somebody else operates, exactly as before. An image makes it managed, and its
+  url is *derived* -- `http://sbx-mcp-<name>:<port>/mcp` -- because the thing
+  that names the container is the thing that joins it to the gateway's network.
+  That deletes both ways a hand-written url goes wrong: a name no sandbox can
+  resolve, and a `localhost` that means the sandbox itself. The keys that belong
+  to a managed entry are refused beside a url rather than ignored, and an entry
+  with both is refused outright: it would be a url pointing somewhere other than
+  the container beside it, which nobody notices until an agent reports a dead
+  tool.
+
+  What a session records is unchanged. `Entry` carries the `Server` a session is
+  given plus how to run it; the image, the environment and the secret names are
+  the server's business and stay out of every session record.
+
+  **Secrets go in and never come back out.** The store is
+  `$XDG_STATE_HOME/sbx/secrets.json`, 0600, beside the pairing tokens and the
+  TLS key; `secrets::get` is `pub(crate)`, so there is no path from a request
+  handler to a value and the compiler is what says so rather than everyone
+  remembering. The protocol carries names and whether each is set. `sbxd secret`
+  reads the value from stdin because an argument lands in a shell history and in
+  `ps`, and `start` passes it through the child's *environment* rather than as
+  `--env NAME=value` for the same reason -- verified by inspecting the running
+  container: the value was inside it and the argument list had only the name.
+
+  **The states are the whole of the feature's honesty**, and one of them took
+  measuring. `--restart unless-stopped` means Docker reports a container it is
+  in the middle of restarting as `Running: true`, so an image crash-looping on a
+  bad argument every two seconds read as healthy -- and did, on screen, until
+  the restart count went into the inspect. `crashing` is now its own state with
+  the container's own last output attached, which is the only thing that ever
+  says why an image will not stay up. `detached` is the other: running, and not
+  on `openshell-docker`, which is fine in `docker ps` and unreachable from every
+  sandbox. Also measured: 29.7.2 says `error: no such object` where older
+  versions said `Error response from daemon: No such object`, so matching the
+  capital reported every never-started container as "docker could not be asked",
+  which sends someone to look at their daemon.
+
+  **Skills got a library, at `$XDG_DATA_HOME/sbx/skills`.** The client reads and
+  packs its own `~/.claude/skills` on the Rust side of the bridge -- a webview
+  cannot see a home directory -- with the same `payload` the seeder uses, and
+  pushes them before every create as well as from the screen. That is what keeps
+  the pointer-not-copy property across two machines: editing a skill on the
+  laptop still means the next session gets the edit. Deliberately not the server
+  user's own skills directory, which is theirs.
+
+  The unpacking is where the care is, because a tar arriving from a client is a
+  program's output rather than a promise: it goes into a staging directory and
+  is checked before it is anywhere that matters -- exactly one top-level entry,
+  named what the upload says it is named, with a `SKILL.md` in it -- and the
+  name is refused by shape, since it decides a directory here and inside every
+  sandbox. GNU tar skips `..` members itself, which is a good default and not a
+  guarantee worth inheriting.
+
+  One screen, and **every action on it answers with the whole view**, re-read.
+  The same decision the git view made and for the same reason: these three
+  explain each other, since a container that will not start is usually a secret
+  that is not there. `sbx doctor`'s MCP check asks the same
+  `mcp::statuses` the screen does, so a check that passes cannot disagree with a
+  screen that says something is wrong, and `sbxd mcp`/`secrets`/`skills` give a
+  headless server the same answers.
+
+  **The generated bindings collided again, and silently this time.**
+  `integrations::View` and `policy::View` are one flat directory apart, so the
+  generated `Reply` carried `{ "reply": "integrations" } & View` pointing at the
+  *policy* view -- a shape mismatch a webview would have found at runtime.
+  Increment 31a hit the same thing with `files::Entry` and `git::Entry` and said
+  it only surfaced because the shapes differed. Four renames later
+  (`McpEntry`, `McpState`, `McpStatus`, `Integrations`), `gen-bindings.sh` now
+  counts `ts(export)` attributes against files written and fails when they
+  disagree, which was proved by re-introducing a collision and watching it fail.
+
+  Verified against real Docker and a real window: two managed entries brought up
+  by `sbxd` at startup, one reachable by container name from another container
+  on the gateway's network with its secret in its environment, one crash-looping
+  with its stack trace in the screen; `stop` taking the container away and the
+  row going to `absent`; and this machine's own `ship-pr` pushed into the
+  server's library from the window, listed by `sbxd skills` with the path it
+  came from.
+- **34. Task inbox** — DONE. GitHub, Azure DevOps and Jira read server-side,
+  open-from-ticket, and the publish round trip. 580 tests.
+
+  **REST for what the interface shows, MCP for what the agent gets**, and the
+  split is the point rather than a duplication. A list on a timer rendered as
+  rows, and a tool the agent calls when it decides to, are different consumers
+  with different failure modes: a list that cannot be fetched is a pane with a
+  message in it, a tool that cannot be reached is a session whose agent gives up
+  on a step. One mechanism serving both would serve both badly.
+
+  Read with `curl`, which is already on any machine that runs this and already
+  how `publish.rs` talks to Azure DevOps from inside a sandbox; the alternative
+  is an HTTP client, a TLS root store and a redirect policy pulled in for six
+  requests. **The credential goes in on stdin**: `curl -K -` reads the url and
+  the `Authorization` header from standard input, so a token is never in `ps`
+  output or in the text of a failed spawn -- the same care the secret store took
+  in 33, and every value interpolated into that config is quoted, because an
+  unescaped quote there can start a line that names a file to write.
+
+  Three trackers, one `Task`. Nine renderings or one shape, and the id is the
+  tracker's own -- a work item id, an issue number, a Jira key -- because that
+  is what a comment is addressed to. A GitHub task also carries its repository,
+  since `/issues` spans several and a comment has to go to the right one. Each
+  reader is split in two so the parsing is testable against captured answers,
+  which is the only way to have any confidence in a reader of somebody else's
+  JSON: a pull request coming back from the issues endpoint, a WIQL answer of
+  ids with no second request to make, a Jira status nobody may rename for us.
+
+  **A ticket names its session and its branch**, and both are decided on the
+  server so the two front ends could not disagree. The key keeps its case in the
+  branch, because a tracker's commit hooks and a reviewer both look for
+  `PROJ-123`, and loses it in the session name, which has to satisfy
+  `validate_name`. That needed `branch_prefix` in the config file and a
+  `branch` on the request -- the first work branch that is not `sbx/<name>`
+  since increment 1 -- so `session::validate_branch` refuses what git would
+  before it reaches a shell in a sandbox and a remote.
+
+  **A ticket does not know which repository it is about.** A Jira issue names a
+  project and a work item names an area path; neither is a clone URL, and
+  guessing from a name would be wrong exactly where it matters. So the row
+  carries a project chooser, opening on the project of whatever is selected in
+  the tree: the tracker says what to do and you say where.
+
+  The round trip is the last thing a publish does, and both halves are
+  best-effort: by then the branch is pushed and the pull request is open, so a
+  tracker that cannot be written to costs a comment and not the publish. Jira is
+  moved by *transition*, matched by name against what that issue can actually do
+  from where it is -- a workflow only offers some of them -- and a name that is
+  not among them comes back saying which are, because Jira's own answer names
+  neither. Azure DevOps is a `System.State` patch with the json-patch content
+  type. GitHub has no status to move to and says so rather than doing nothing.
+
+  **The bug the loopback test existed to find**: curl reads a `-H` string with
+  no colon in it as an instruction to *remove* a header, so building the
+  credential as `Basic <token>` and passing it as a header sent the request with
+  no `Authorization` at all. Every tracker would have answered 401 and every
+  message would have blamed the token. Nothing in the unit tests could see it --
+  the fix is one `format!` -- so there is now a test that sends a real request
+  to a listener on `127.0.0.1` and reads the headers off the wire, which also
+  covers the Atlassian Document Format a Jira comment has to be and the
+  transition lookup.
+
+  `sbx doctor` grew a check, because a tracker whose credential is not in the
+  store produces an inbox **silently missing its rows**, which looks exactly
+  like having nothing assigned to you. `sbx tasks` prints the same inbox the
+  window shows, locally or through a server.
+
+  Verified end to end against a tracker on loopback: three tickets read over the
+  protocol, one started from the window, and the session's record carrying
+  `tobias/INET-4821-order-backfill-throws-on-an-empty-batch` and the ticket it
+  came from. Against a real Jira, Azure DevOps or GitHub it is unverified: that
+  needs credentials in the server's store, which are the owner's to put there.
+- **35. Ship it** — DONE. Notifications, usage and rate limits, and signing.
+  Windows packaging and the install story for a server that is not local landed
+  early, in increment 31c. 585 tests.
+
+  **Claude Code hands out cost and rate limits in exactly one place: the status
+  line.** No file, no endpoint -- a `statusLine` command it invokes on every
+  render with a JSON payload on stdin. So the image bakes one in whose real job
+  is to keep the payload where a poll can read it, exactly as `sbx-status` does
+  for the hooks, and it prints the line the agent shows:
+  `Opus 5 (1M context)  $0.07  5h 32%  ctx 2%`. The whole payload is kept and
+  the reader takes what it recognises, because the shape belongs to Claude Code
+  and grows.
+
+  **Two things the documentation would have got wrong, and one it does not
+  mention.** `resets_at` is epoch seconds, where the obvious reading of the
+  changelog is an ISO instant -- a reader asking for a string got `None`, which
+  looks like a window with no reset time rather than a parser that missed one.
+  `rate_limits` is absent until the agent has actually called the API, so the
+  first probe -- a session whose agent was never logged in -- had none, and that
+  is the honest shape for a session sitting at a prompt. And beside the cost is
+  a `context_window` with `used_percentage`: how full the context is, which is
+  the number that says whether a session is about to compact, and the most
+  useful thing in the payload. The test fixture is the captured payload rather
+  than one written from the changelog.
+
+  A rate-limit window is the **account's**, not the session's, so the two are
+  displayed in different places: the windows in the header, the cost and the
+  context on the session's own facts pane. Two sessions on one account report
+  the same percentages, and showing them per session would be a lie about what
+  is being measured.
+
+  **The notification needed the window to know something it could not.** `Ls`
+  reports what the *record* says -- `ready`, `idle`, `failed` -- and what the
+  agent is doing is only ever in a poll, so a notification driven by the session
+  list would never have fired. The window now opens a status channel per
+  worktree rather than for the selected one, which is what the plan's list badge
+  needed anyway: the tree shows the live agent state, and `waiting` finally
+  appears in it.
+
+  It fires on the *transition* into waiting -- a session sits in `waiting` until
+  somebody answers it, and notifying on the state would notify every few seconds
+  for as long as it waits -- and never for the first list after the window
+  opens, because three sessions already waiting are three things that have been
+  true for an hour.
+
+  **The toast itself is unverified here, and that is the environment rather than
+  the code.** WSLg has no `org.freedesktop.Notifications` on the session bus at
+  all, so nothing can show one; what was verified is everything up to the call,
+  including the `waiting` badge reaching the tree from a real sandbox. Windows,
+  which is the platform this window ships to, has a notification service.
+
+  Signing is conditional on a certificate being in the repository's secrets, and
+  skipped when there is none so a fork can still cut a release. The thumbprint
+  is read back from the imported certificate rather than configured, because a
+  thumbprint in a config file and a certificate in a secret are two things to
+  keep in step and only one of them is visible. Never run against a real
+  certificate: there was none to test with, which the workflow says beside the
+  step.
+
+  Verified against a real agent in a real sandbox: the image rebuilt with the
+  status line, a session created with a credential, one turn taken, and the
+  payload read back through the poll, the stream and both front ends --
+  `cost $0.07`, `context 2% of 1000k`, `5h 32%` and `7d 7%` in the header. The
+  first attempt had no credential attached and the agent came up to `Not logged
+  in`, which is how the "no rate limits until the API has answered" shape was
+  measured rather than guessed.
+
+## Risks
+
+- **A listening daemon is a new attack surface**, and an authenticated one is
+  root on its host. Mitigation: `127.0.0.1` by default, an explicit and noisy
+  flag to widen, pinned certificates, hashed and revocable tokens -- and saying
+  so plainly rather than implying more safety than there is.
+- **Two backends dilute the pitch.** "Kernel-enforced isolation" and "also, a
+  mode without any" is a harder sentence. Mitigation is the labelling in
+  increment 29, and keeping sandboxed the default everywhere it is offered.
+- **Tauri on Linux is WebKitGTK.** A heavy terminal there will be worse than on
+  Windows. Accepted: the Linux user has the TUI, and the fallback if it does
+  bite is serving the same web UI to a browser, which the transport already
+  allows.
+- **Version skew** between a shipped desktop app and a self-hosted `sbxd`.
+  Mitigation: the unauthenticated `/version` and a client that refuses politely.
+- **Scope.** This is several times the size of the TUI, and the TUI is the
+  hedge: it keeps working the whole way through, so a stalled desktop app costs
+  the new thing rather than the working one.
+- **OpenShell 0.0.x churn now reaches a GUI too**, which is a slower thing to
+  repair than a pane. Unchanged mitigation: all of it stays behind one trait.

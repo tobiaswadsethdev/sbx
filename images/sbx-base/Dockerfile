@@ -167,10 +167,16 @@ RUN CLAUDE_VERSION="$(claude --version 2>/dev/null | awk '{print $1}')" \
 # input. `Stop` ends a turn, so it means idle rather than finished for good.
 # PreToolUse and PostToolUse mostly keep the timestamp fresh, which is what
 # distinguishes an agent still working from a stale file left by a crashed one.
+#
+# `sbx-usage` is the status line command, and the status line is the only place
+# Claude Code hands out what it knows about cost and rate limits -- there is no
+# file it writes them to and no API to ask. It keeps the payload where sbx can
+# read it and prints the line the agent shows.
 COPY sbx-status /usr/local/bin/sbx-status
+COPY sbx-usage /usr/local/bin/sbx-usage
 COPY claude-settings.json /sandbox/.claude/settings.json
 
-RUN chmod 0755 /usr/local/bin/sbx-status \
+RUN chmod 0755 /usr/local/bin/sbx-status /usr/local/bin/sbx-usage \
     && chmod 0644 /sandbox/.claude/settings.json \
     && chown -R sandbox:sandbox /sandbox/.claude
 

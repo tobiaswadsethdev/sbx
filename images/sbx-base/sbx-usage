@@ -1,0 +1,52 @@
+#!/bin/sh
+# sbx-usage -- record what this session has spent, where sbx can read it.
+#
+# This is Claude Code's **status line command**, and that is the only reason it
+# exists: the status line is the one place the agent hands out what it knows
+# about cost and rate limits. There is no file it writes them to and no API to
+# ask, so a status line command that keeps a copy is the honest source. See
+# `usage.rs` on the Rust side.
+#
+# It runs on every render, which is often, so it does the least it can: one
+# `jq`, one write, one rename. The whole payload is kept rather than a selection
+# of fields, because the shape belongs to Claude Code and a copy that picked
+# fields would need editing every time it gained one.
+#
+# Two things this must not do. It must not be slow, since the agent's status
+# line waits for it. And it must not fail loudly: whatever happens here, the
+# agent should still draw a status line, so every path prints something and
+# exits 0.
+dir=/sandbox/.sbx
+mkdir -p "$dir" 2>/dev/null
+
+payload=''
+# `-t 0` for a human running this by hand to see what it does, which would
+# otherwise block forever on stdin that never comes.
+if [ ! -t 0 ]; then
+    payload=$(timeout 2 cat 2>/dev/null)
+fi
+
+if [ -n "$payload" ]; then
+    # Written then renamed, so a reader polling this file never sees half of it.
+    tmp="$dir/usage.json.$$"
+    printf '%s' "$payload" >"$tmp" 2>/dev/null &&
+        mv "$tmp" "$dir/usage.json" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+fi
+
+# The line itself. Terse on purpose: it sits under the transcript of an agent
+# somebody is attached to, and the same numbers are on screen in the window.
+# Every field is optional -- an older Claude Code has no `rate_limits`, and a
+# session that has spent nothing has no `cost` -- so `jq` is asked for what it
+# has and the empty parts collapse.
+printf '%s' "$payload" | jq -r '
+  [
+    (.model.display_name // .model.id // empty),
+    (if .cost.total_cost_usd then "$" + (.cost.total_cost_usd * 100 | round / 100 | tostring) else empty end),
+    (if .rate_limits.five_hour.used_percentage then "5h " + (.rate_limits.five_hour.used_percentage | round | tostring) + "%" else empty end),
+    (if .rate_limits.seven_day.used_percentage then "7d " + (.rate_limits.seven_day.used_percentage | round | tostring) + "%" else empty end),
+    (if .context_window.used_percentage then "ctx " + (.context_window.used_percentage | round | tostring) + "%" else empty end)
+  ] | join("  ")
+' 2>/dev/null || printf 'sbx'
+
+exit 0
