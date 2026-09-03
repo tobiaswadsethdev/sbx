@@ -2189,6 +2189,7 @@ diff --git a/b b/b
                 pane: Some(
                     "● Read README.md\n───────────────\n❯ fix the typo\n  esc to interrupt".into(),
                 ),
+                usage: None,
             }),
         );
 

@@ -158,6 +158,9 @@ impl Paths {
     pub fn status(&self) -> String {
         format!("{}/status.json", self.sbx)
     }
+    pub fn usage(&self) -> String {
+        format!("{}/usage.json", self.sbx)
+    }
     pub fn seed_state(&self) -> String {
         format!("{}/seed.state", self.sbx)
     }

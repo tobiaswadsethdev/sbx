@@ -48,3 +48,4 @@ pub mod store;
 pub mod toolchain;
 pub mod tracker;
 pub mod update;
+pub mod usage;

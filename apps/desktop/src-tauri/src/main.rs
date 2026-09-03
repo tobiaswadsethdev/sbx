@@ -605,6 +605,14 @@ fn main() {
     // tooling see the surface, not a way to run.
     tauri::Builder::default()
         .manage(Streaming::default())
+        // An OS notification when a session starts waiting on a permission
+        // prompt is the single largest quality-of-life gain this window has
+        // over the terminal: watching four agents is exactly the case where a
+        // terminal loses, and a `waiting` badge in a list you are not looking
+        // at is a badge nobody sees. The window decides *when* -- see
+        // `App.tsx` -- because it is the thing that knows which states it has
+        // already seen.
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Debug builds open the inspector. There is no other way to see a
             // console message from inside this window.

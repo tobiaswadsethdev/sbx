@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "What the window is allowed to ask the Rust side for. Commands defined by this application are permitted by being defined; the core plugins are not, and listening for events is one of them -- without this the streaming half is denied, and the only place that is said is the webview's own console.",
   "windows": ["main"],
-  "permissions": ["core:event:default"]
+  "permissions": ["core:event:default", "notification:default"]
 }

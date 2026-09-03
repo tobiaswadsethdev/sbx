@@ -191,6 +191,14 @@ run:
 (Get-FileHash .\sbx-desktop-vX.Y.Z-x86_64-pc-windows-msvc.msi -Algorithm SHA256).Hash.ToLower()
 ```
 
+**A release built without a signing certificate is unsigned**, and SmartScreen
+says so with a full-width warning before it will run one. The checksum above is
+the integrity story either way -- it is the one that does not expire -- and the
+release workflow signs the installers when a certificate is in the repository's
+secrets (`WINDOWS_CERTIFICATE`, a base64 PFX, and
+`WINDOWS_CERTIFICATE_PASSWORD`), skipping it when there is none so that a fork
+can still cut a release.
+
 WebView2 is the only runtime it needs, and Windows 11 ships with it; on Windows
 10 the installer's own prompt or Microsoft's Evergreen bootstrapper supplies it.
 

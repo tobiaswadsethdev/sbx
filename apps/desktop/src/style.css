@@ -60,6 +60,18 @@ header {
 }
 header .mark { color: var(--accent); font-weight: 700; letter-spacing: 0.5px; }
 header .server, header .count { color: var(--dim); }
+/* The account's rate-limit windows, in the header because that is whose they
+   are. Amber past 80%: it is the number that decides whether starting another
+   session is a good idea. */
+header .limit {
+  color: var(--dim);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+}
+header .limit.high { color: var(--accent); border-color: var(--accent); }
+
 header .error { color: var(--bad); margin-left: auto; }
 header select {
   background: var(--bg-sunken);

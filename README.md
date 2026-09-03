@@ -71,7 +71,10 @@ on the right.
   or one click away, and a rule can be widened for a running session from there.
   This is the part an ADE built on git worktrees has no equivalent for.
 - **Several agents at once, without babysitting.** A session blocked on a
-  permission prompt says so in the list, so watching is cheaper than attaching.
+  permission prompt says so in the list -- and the window sends an OS
+  notification the moment it starts waiting, so watching costs nothing at all.
+  What each session has spent, and how much of the account's rate-limit window
+  is gone, come from the agent's own status line.
 - **A toolchain when the task needs one.** `--toolchain dotnet` runs the session
   on an image variant carrying the SDK, and opens nuget for the SDK's binary and
   nothing else. The create form ticks it from what the repository contains.

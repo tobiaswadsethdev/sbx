@@ -19,6 +19,9 @@ import { IntegrationsDialog } from "./Integrations";
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
 import type { Task } from "./gen/Task";
+import type { Poll } from "./gen/Poll";
+import { onSessions, reset as resetNotifications } from "./notify";
+import { close, nextChannelId, open } from "./stream";
 import { NewProjectDialog } from "./NewProject";
 import { NewWorktreeDialog } from "./NewWorktree";
 import type { Against } from "./gen/Against";
@@ -63,6 +66,17 @@ export default function App() {
   const [showingInbox, setShowingInbox] = useState(false);
   /// The ticket a create was started from, carried from the inbox to the form.
   const [fromTask, setFromTask] = useState<Task | null>(null);
+  // Every worktree's last poll: what its agent is doing, what it has spent, and
+  // how full its context is. From a status channel each rather than a request
+  // on a timer -- the server polls the sandbox and sends a frame only when
+  // something changed, which is the whole reason that channel exists.
+  //
+  // **Every session and not only the selected one**, because the state that
+  // matters most is the one you are *not* looking at: a session waiting on a
+  // permission prompt is the thing this window exists to tell you about, and
+  // the session list itself cannot say it. `Ls` reports what the record says --
+  // `ready`, `idle` -- and the agent's own state is only ever in a poll.
+  const [polls, setPolls] = useState<Record<string, Poll>>({});
 
   /// The shells each worktree has, and which tab is in front of it. Both are
   /// per worktree: switching away and back finds it as you left it, because a
@@ -80,6 +94,45 @@ export default function App() {
       })
       .catch((e) => setError(messageOf(e)));
   }, []);
+
+  // Keyed on the *names*, joined, rather than on the array: the list is a new
+  // array every three seconds and re-subscribing to four sandboxes that often
+  // would be worse than not subscribing at all.
+  const names = sessions.map((s) => s.name).join("\u0000");
+  useEffect(() => {
+    if (!server) return;
+    let live = true;
+    const open_ids: number[] = [];
+    for (const name of names.split("\u0000").filter(Boolean)) {
+      const id = nextChannelId();
+      open_ids.push(id);
+      void open(server, id, { kind: "status", session: name }, (frame) => {
+        if (live && frame.is === "status") {
+          setPolls((all) => ({ ...all, [name]: frame.poll }));
+        }
+      }).catch(() => {
+        // A channel that will not open is not worth a message of its own: the
+        // list beside it already says whether the server can be reached.
+      });
+    }
+    return () => {
+      live = false;
+      for (const id of open_ids) void close(id);
+    };
+  }, [server, names]);
+
+  // What the agent is doing, which is what the tree shows and what decides
+  // whether you are interrupted. The record's own state is the fallback: it is
+  // what a session that has never been polled has, and the only thing that can
+  // say `creating`, `failed` or `dead`.
+  const live = useMemo(
+    () =>
+      sessions.map((s) => {
+        const state = polls[s.name]?.status?.state;
+        return state && s.state === "ready" ? { ...s, state } : s;
+      }),
+    [sessions, polls],
+  );
 
   const refresh = useCallback(async () => {
     if (!server) return;
@@ -99,6 +152,9 @@ export default function App() {
   }, [server]);
 
   useEffect(() => {
+    // A different server is a different set of sessions, and the states of the
+    // last one's say nothing about them.
+    resetNotifications();
     void refresh();
     const timer = setInterval(() => void refresh(), REFRESH_MS);
     return () => clearInterval(timer);
@@ -134,7 +190,15 @@ export default function App() {
     />
   ) : null;
 
-  const groups = useMemo(() => group(projects, sessions), [projects, sessions]);
+  // What has just started waiting, which is the whole reason the window
+  // subscribes to every session rather than the selected one. Here rather than
+  // in the fetch, because the state that matters arrives on the status channel
+  // and not in the list.
+  useEffect(() => {
+    onSessions(live);
+  }, [live]);
+
+  const groups = useMemo(() => group(projects, live), [projects, live]);
   const session = sessions.find((s) => s.name === selected) ?? null;
 
   // Asked once per worktree as it is selected. Not polled: a shell appears
@@ -225,6 +289,22 @@ export default function App() {
           {sessions.length} worktree{sessions.length === 1 ? "" : "s"} in {projects.length} project
           {projects.length === 1 ? "" : "s"}
         </span>
+        {/* The rate-limit windows are the *account's*, not this session's --
+            two sessions on one account report the same numbers -- so they sit
+            in the header rather than beside a worktree. The reading is
+            whichever session last reported one; there is no source for it other
+            than an agent's own status line. */}
+        {(selected ? polls[selected]?.usage : undefined)?.windows.map((w) => (
+          <span
+            key={w.label}
+            className={`limit${w.used_percentage >= 80 ? " high" : ""}`}
+            title={
+              w.resets_at ? `resets ${new Date(w.resets_at * 1000).toLocaleString()}` : undefined
+            }
+          >
+            {w.label} {Math.round(w.used_percentage)}%
+          </span>
+        ))}
         <button className="new" disabled={!server} onClick={() => setShowingInbox(true)}>
           inbox
         </button>
@@ -309,6 +389,7 @@ export default function App() {
             <Dock
               server={server}
               session={session}
+              usage={(selected ? polls[selected]?.usage : undefined) ?? null}
               onOpenFile={(path) => openTab(session.name, { kind: "file", path })}
               onOpenDiff={(path, against: Against) =>
                 openTab(session.name, { kind: "filediff", path, against })

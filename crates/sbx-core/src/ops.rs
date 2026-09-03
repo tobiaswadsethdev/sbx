@@ -1367,8 +1367,11 @@ pub fn destroy(backends: &Backends, name: &str) -> Result<Destroyed, String> {
 /// behind each other. One script, one round trip, both answers.
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 // `PartialEq` so a stream can tell a poll that changed from one that did not,
-// which is the difference between a frame and silence.
-#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+// which is the difference between a frame and silence. Not `Eq`: the usage
+// below carries a cost and a percentage, which the status line reports as
+// floats -- and comparing two of them for "has this changed" is exactly what
+// `PartialEq` is for.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Poll {
     pub stat: Option<DiffStat>,
     pub status: Option<status::Report>,
@@ -1378,6 +1381,14 @@ pub struct Poll {
     /// already paid for -- it is what decides the state column -- so showing it
     /// costs nothing beyond the memory. Empty for a sandbox with no agent pane.
     pub pane: Option<String>,
+    /// What the session has spent, and the account's rate-limit windows.
+    ///
+    /// Here rather than in a request of its own because it is another file in
+    /// the same directory: the poll already reads one, and a second round trip
+    /// per session per second to learn a cost that changes once a turn would be
+    /// the most expensive way to display anything. `None` until the agent's
+    /// status line has run once -- see [`crate::usage`].
+    pub usage: Option<crate::usage::Usage>,
 }
 
 /// Read a session's diff stat and agent state in a single exec.
@@ -1422,6 +1433,10 @@ printf '%s
 cat {status_path} 2>/dev/null
 printf '
 %s
+' {usage_marker}
+cat {usage_path} 2>/dev/null
+printf '
+%s
 ' {pane_marker}
 {tmux_bin} capture-pane -pe -t {tmux} 2>/dev/null | tail -n {pane_lines}
 "#,
@@ -1429,6 +1444,8 @@ printf '
         resolve_base = resolve_base_script(session),
         status_marker = seed::sh_quote(status::STATUS_MARKER),
         status_path = seed::sh_quote(&paths.status()),
+        usage_marker = seed::sh_quote(status::USAGE_MARKER),
+        usage_path = seed::sh_quote(&paths.usage()),
         tmux_bin = backend.tmux(),
         pane_marker = seed::sh_quote(status::PANE_MARKER),
         tmux = seed::sh_quote(&session.tmux),
@@ -1446,7 +1463,14 @@ fn parse_poll(stdout: &str, now: u64) -> Poll {
         // An older sandbox, or a script that failed before the first marker.
         None => (stdout, ""),
     };
-    let (hook_part, pane_part) = rest.split_once(status::PANE_MARKER).unwrap_or((rest, ""));
+    // The pane comes off first, and it has to: it is arbitrary text and can
+    // contain anything, including something that looks like the marker after
+    // it. Then the usage file, whose marker is absent from a sandbox built
+    // before the image had a status line -- in which case there is no usage
+    // part rather than a hook part with the rest of the output in it, which is
+    // how this read as an agent with no status at all for one iteration.
+    let (head, pane_part) = rest.split_once(status::PANE_MARKER).unwrap_or((rest, ""));
+    let (hook_part, usage_part) = head.split_once(status::USAGE_MARKER).unwrap_or((head, ""));
 
     // The capture carries the colour it was drawn in, which the pane that shows
     // it wants and the marker search must not see: a phrase with a colour change
@@ -1464,6 +1488,7 @@ fn parse_poll(stdout: &str, now: u64) -> Poll {
         // the agent chose. Emptiness is judged on the stripped copy, because a
         // screen of nothing but colour changes is a blank screen.
         pane: (!plain.trim().is_empty()).then_some(pane_part.trim_end().to_string()),
+        usage: crate::usage::parse(usage_part).filter(|u| !u.is_empty()),
     }
 }
 
@@ -1631,6 +1656,51 @@ mod tests {
         let status = p.status.expect("a status");
         assert_eq!(status.state, crate::session::State::Running);
         assert_eq!(status.detail.as_deref(), Some("Bash"));
+    }
+
+    /// The parts arrive in one stream and each is optional. Ordered so the pane
+    /// comes off first, because it is the one that can contain anything.
+    #[test]
+    fn the_usage_part_is_optional_and_does_not_swallow_the_others() {
+        let with_usage = format!(
+            "1 0 0\n{}\n{{\"state\":\"running\",\"at\":1000,\"detail\":\"Bash\"}}\n\
+             {}\n{{\"cost\":{{\"total_cost_usd\":0.5}},\"rate_limits\":\
+             {{\"five_hour\":{{\"used_percentage\":12}}}}}}\n{}\nesc to interrupt\n",
+            status::STATUS_MARKER,
+            status::USAGE_MARKER,
+            status::PANE_MARKER,
+        );
+        let p = parse_poll(&with_usage, 1010);
+        assert_eq!(p.status.expect("a status").detail.as_deref(), Some("Bash"));
+        let usage = p.usage.expect("usage");
+        assert_eq!(usage.cost_usd, Some(0.5));
+        assert_eq!(usage.windows[0].label, "5h");
+
+        // A sandbox from before the image had a status line: no marker, no
+        // usage, and the hook file still read.
+        let older = format!(
+            "1 0 0\n{}\n{{\"state\":\"idle\",\"at\":1000,\"detail\":\"\"}}\n{}\nbanner\n",
+            status::STATUS_MARKER,
+            status::PANE_MARKER,
+        );
+        let p = parse_poll(&older, 1010);
+        assert!(p.usage.is_none());
+        assert_eq!(
+            p.status.expect("a status").state,
+            crate::session::State::Idle
+        );
+
+        // A pane that contains the marker text must not become the usage.
+        let hostile = format!(
+            "1 0 0\n{}\n{{\"state\":\"idle\",\"at\":1000,\"detail\":\"\"}}\n{}\n\
+             the agent printed {} by itself\n",
+            status::STATUS_MARKER,
+            status::PANE_MARKER,
+            status::USAGE_MARKER,
+        );
+        let p = parse_poll(&hostile, 1010);
+        assert!(p.usage.is_none(), "{:?}", p.usage);
+        assert!(p.pane.expect("a pane").contains("printed"));
     }
 
     #[test]

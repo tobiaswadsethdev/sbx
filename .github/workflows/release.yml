@@ -141,10 +141,57 @@ jobs:
           mv "$conf.new" "$conf"
           jq -r .version "$conf"
 
-      - name: Build
+      # Signing, when there is a certificate to sign with.
+      #
+      # An unsigned installer is not broken -- the checksums below are the
+      # integrity story and they are the one that does not expire -- but
+      # SmartScreen puts a full-width warning in front of it, and "more info ->
+      # run anyway" is a bad first impression for a tool whose whole pitch is
+      # isolation.
+      #
+      # Conditional on the secret rather than required, so a fork and a
+      # maintainer without a certificate can both still cut a release. The
+      # thumbprint is read back from the imported certificate rather than
+      # configured, because a thumbprint in a config file and a certificate in a
+      # secret are two things to keep in step and only one of them is visible.
+      #
+      # Never verified against a real certificate at the time of writing: there
+      # was none to test with. What is verified is the unsigned path, which is
+      # every release so far.
+      # `secrets` and not a step-level `env`: a step's own `env` is not in scope
+      # for its `if`, so that reads as empty and the step never runs.
+      - name: Import the signing certificate
+        if: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+        id: cert
+        shell: pwsh
+        env:
+          SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE }}
+          SIGNING_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
+          $pfx = [System.IO.Path]::GetTempFileName() + '.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGNING_CERT))
+          $password = ConvertTo-SecureString -String $env:SIGNING_PASSWORD -AsPlainText -Force
+          $imported = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          "thumbprint=$($imported.Thumbprint)" >> $env:GITHUB_OUTPUT
+
+      - name: Build
+        shell: bash
+        env:
+          THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+        run: |
+          set -eu
           npm --prefix apps/desktop ci
-          npm --prefix apps/desktop run tauri -- build
+          if [ -n "${THUMBPRINT:-}" ]; then
+            # A timestamp is what keeps a signature valid after the
+            # certificate expires; without one the installer stops verifying
+            # the day the certificate does.
+            npm --prefix apps/desktop run tauri -- build --config \
+              "{\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$THUMBPRINT\",\"digestAlgorithm\":\"sha256\",\"timestampUrl\":\"http://timestamp.digicert.com\"}}}"
+          else
+            echo "no signing certificate; building unsigned"
+            npm --prefix apps/desktop run tauri -- build
+          fi
 
       # Renamed to carry the tag and the target, like the tarballs, and
       # checksummed into the same SHA256SUMS -- an installer downloaded from a

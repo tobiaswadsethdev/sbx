@@ -657,6 +657,7 @@ mod tests {
             }),
             status: None,
             pane: Some("? for shortcuts".into()),
+            usage: None,
         })
         .into();
 

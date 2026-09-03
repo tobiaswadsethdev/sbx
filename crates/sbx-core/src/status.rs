@@ -43,8 +43,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::State;
 
-/// Separates the status file from the pane in the poll script's output.
+/// Separate the parts of the poll script's output from each other.
+///
+/// Markers rather than positions, because the last part is a pane capture: it
+/// is arbitrary text and can contain anything, including something that looks
+/// like the line before it.
 pub const STATUS_MARKER: &str = "===sbx-status===";
+pub const USAGE_MARKER: &str = "===sbx-usage===";
 pub const PANE_MARKER: &str = "===sbx-pane===";
 
 /// How long the hook file is trusted when there is no pane to read, in seconds.

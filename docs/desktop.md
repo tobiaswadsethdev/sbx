@@ -212,6 +212,39 @@ is the reason this is worth building rather than adopting an ADE built on git
 worktrees, and a denial you have to go looking for is one you will not find. It
 costs width the editor would otherwise have; that is the trade.
 
+## What it tells you without being asked
+
+**A worktree waiting on a permission prompt sends an OS notification.** It is
+the single thing this window has that a terminal cannot: watching four agents is
+exactly the case where a terminal loses, and a `waiting` badge in a list you are
+not looking at is a badge nobody sees.
+
+On the transition, not on the state -- a session sits in `waiting` until
+somebody answers it, and notifying on the state would notify every few seconds
+for as long as it waits. And never for the first list after the window opens:
+three sessions already waiting are three things that have been true for an hour,
+not three things that have just happened.
+
+That needs the agent's own state, which the session list does not carry: `Ls`
+reports what the *record* says -- `ready`, `idle`, `failed` -- and what the agent
+is doing is only ever in a poll. So the window opens a status channel per
+worktree rather than for the selected one, which is also what puts a live state
+badge on every row. The server polls each subscribed sandbox and sends a frame
+only when something changed, which is what that channel exists for.
+
+**Cost and rate limits come from the agent's own status line.** Claude Code has
+no file it writes them to and no endpoint to ask; what it has is a `statusLine`
+command it invokes on every render with a JSON payload. The image bakes one in
+whose real job is to keep the payload where a poll can read it -- see
+[sandbox-image.md](sandbox-image.md) -- so the facts pane can show what a session
+has spent and how full its context is, and the header can show the account's
+rate-limit windows.
+
+The windows are in the header and the cost is on the session, and that split is
+deliberate: a rate-limit window belongs to the *account*, so two sessions report
+the same percentages and showing them per session would be a lie about what is
+being measured.
+
 ## The inbox
 
 **inbox** in the header is what your trackers say is assigned to you, read on

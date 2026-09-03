@@ -2758,6 +2758,7 @@ mod tests {
                 }),
                 status: None,
                 pane: None,
+                usage: None,
             }),
         );
 
@@ -2790,6 +2791,7 @@ mod tests {
                 stat: Some(ops::DiffStat::default()),
                 status: None,
                 pane: None,
+                usage: None,
             }),
         );
         app.on_key(key(KeyCode::Char('D')));
@@ -2968,6 +2970,7 @@ mod tests {
                 source: status::Source::Hook,
             }),
             pane: None,
+            usage: None,
         }
     }
 

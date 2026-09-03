@@ -2343,9 +2343,72 @@ for free, with nothing persisted client-side.
   `tobias/INET-4821-order-backfill-throws-on-an-empty-batch` and the ticket it
   came from. Against a real Jira, Azure DevOps or GitHub it is unverified: that
   needs credentials in the server's store, which are the owner's to put there.
-- **35. Ship it** — notifications, usage and rate-limit display, and signing.
+- **35. Ship it** — DONE. Notifications, usage and rate limits, and signing.
   Windows packaging and the install story for a server that is not local landed
-  early, in increment 31c.
+  early, in increment 31c. 585 tests.
+
+  **Claude Code hands out cost and rate limits in exactly one place: the status
+  line.** No file, no endpoint -- a `statusLine` command it invokes on every
+  render with a JSON payload on stdin. So the image bakes one in whose real job
+  is to keep the payload where a poll can read it, exactly as `sbx-status` does
+  for the hooks, and it prints the line the agent shows:
+  `Opus 5 (1M context)  $0.07  5h 32%  ctx 2%`. The whole payload is kept and
+  the reader takes what it recognises, because the shape belongs to Claude Code
+  and grows.
+
+  **Two things the documentation would have got wrong, and one it does not
+  mention.** `resets_at` is epoch seconds, where the obvious reading of the
+  changelog is an ISO instant -- a reader asking for a string got `None`, which
+  looks like a window with no reset time rather than a parser that missed one.
+  `rate_limits` is absent until the agent has actually called the API, so the
+  first probe -- a session whose agent was never logged in -- had none, and that
+  is the honest shape for a session sitting at a prompt. And beside the cost is
+  a `context_window` with `used_percentage`: how full the context is, which is
+  the number that says whether a session is about to compact, and the most
+  useful thing in the payload. The test fixture is the captured payload rather
+  than one written from the changelog.
+
+  A rate-limit window is the **account's**, not the session's, so the two are
+  displayed in different places: the windows in the header, the cost and the
+  context on the session's own facts pane. Two sessions on one account report
+  the same percentages, and showing them per session would be a lie about what
+  is being measured.
+
+  **The notification needed the window to know something it could not.** `Ls`
+  reports what the *record* says -- `ready`, `idle`, `failed` -- and what the
+  agent is doing is only ever in a poll, so a notification driven by the session
+  list would never have fired. The window now opens a status channel per
+  worktree rather than for the selected one, which is what the plan's list badge
+  needed anyway: the tree shows the live agent state, and `waiting` finally
+  appears in it.
+
+  It fires on the *transition* into waiting -- a session sits in `waiting` until
+  somebody answers it, and notifying on the state would notify every few seconds
+  for as long as it waits -- and never for the first list after the window
+  opens, because three sessions already waiting are three things that have been
+  true for an hour.
+
+  **The toast itself is unverified here, and that is the environment rather than
+  the code.** WSLg has no `org.freedesktop.Notifications` on the session bus at
+  all, so nothing can show one; what was verified is everything up to the call,
+  including the `waiting` badge reaching the tree from a real sandbox. Windows,
+  which is the platform this window ships to, has a notification service.
+
+  Signing is conditional on a certificate being in the repository's secrets, and
+  skipped when there is none so a fork can still cut a release. The thumbprint
+  is read back from the imported certificate rather than configured, because a
+  thumbprint in a config file and a certificate in a secret are two things to
+  keep in step and only one of them is visible. Never run against a real
+  certificate: there was none to test with, which the workflow says beside the
+  step.
+
+  Verified against a real agent in a real sandbox: the image rebuilt with the
+  status line, a session created with a credential, one turn taken, and the
+  payload read back through the poll, the stream and both front ends --
+  `cost $0.07`, `context 2% of 1000k`, `5h 32%` and `7d 7%` in the header. The
+  first attempt had no credential attached and the agent came up to `Not logged
+  in`, which is how the "no rate limits until the API has answered" shape was
+  measured rather than guessed.
 
 ## Risks
 

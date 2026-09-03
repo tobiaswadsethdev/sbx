@@ -17,6 +17,7 @@ import { useState } from "react";
 import { FileTree } from "./FileTree";
 import type { Against } from "./gen/Against";
 import type { Session } from "./gen/Session";
+import type { Usage } from "./gen/Usage";
 import { GitView } from "./GitView";
 import { Facts } from "./panes/Facts";
 import { PolicyPane } from "./panes/Policy";
@@ -28,11 +29,15 @@ type View = (typeof VIEWS)[number];
 export function Dock({
   server,
   session,
+  usage,
   onOpenFile,
   onOpenDiff,
 }: {
   server: string;
   session: Session;
+  /// What this session has spent, from the status channel. `null` until its
+  /// agent's status line has run once.
+  usage: Usage | null;
   onOpenFile: (path: string) => void;
   onOpenDiff: (path: string, against: Against) => void;
 }) {
@@ -64,7 +69,7 @@ export function Dock({
             onOpenDiff={onOpenDiff}
           />
         )}
-        {view === "facts" && <Facts session={session} />}
+        {view === "facts" && <Facts session={session} usage={usage} />}
         {view === "policy" && <PolicyPane server={server} name={session.name} />}
         {view === "events" && <EventsPane server={server} name={session.name} />}
       </div>

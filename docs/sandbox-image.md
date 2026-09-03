@@ -54,6 +54,28 @@ it from inside and widening the policy far enough that it could would defeat the
 point. [toolchains.md](toolchains.md) is the whole story -- the variants, the
 registry each toolchain opens, and what to change to add one.
 
+## The status line, and why the image has one
+
+Claude Code hands out what it knows about cost and rate limits in exactly one
+place: the `statusLine` command it invokes on every render, with a JSON payload
+on stdin. There is no file it keeps them in and no endpoint to ask.
+
+So the image bakes in `sbx-usage` and points `statusLine` at it. It writes the
+payload to `/sandbox/.sbx/usage.json`, where the same poll that reads the hook
+file picks it up, and prints the line the agent shows:
+
+```
+  Opus 5 (1M context)  $0.07  5h 32%  ctx 2%
+```
+
+The whole payload is kept rather than a selection of fields, because the shape
+belongs to Claude Code and grows -- and the reader takes what it recognises, so
+an older agent shows less rather than nothing. Two things worth knowing, both
+measured rather than assumed: `rate_limits` only appears once the agent has
+actually called the API, so a session sitting at a login prompt has none; and
+`resets_at` is epoch seconds, where the obvious reading of the changelog is an
+ISO instant.
+
 ---
 
 [← Documentation](README.md) · [README](../README.md)

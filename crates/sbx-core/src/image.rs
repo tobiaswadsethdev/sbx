@@ -28,13 +28,17 @@ use crate::toolchain::{self, Toolchain};
 const DOCKERFILE: &str = include_str!("../../../images/sbx-base/Dockerfile");
 /// Writes `/sandbox/.sbx/status.json` from Claude Code's hooks.
 const SBX_STATUS: &str = include_str!("../../../images/sbx-base/sbx-status");
+/// Writes `/sandbox/.sbx/usage.json` from Claude Code's status line, which is
+/// the only place it hands out what it knows about cost and rate limits.
+const SBX_USAGE: &str = include_str!("../../../images/sbx-base/sbx-usage");
 /// Hook wiring, baked in so a session needs no per-session setup.
 const CLAUDE_SETTINGS: &str = include_str!("../../../images/sbx-base/claude-settings.json");
 
 /// Files making up the build context, as (name in the context, content).
-const CONTEXT: [(&str, &str); 3] = [
+const CONTEXT: [(&str, &str); 4] = [
     ("Dockerfile", DOCKERFILE),
     ("sbx-status", SBX_STATUS),
+    ("sbx-usage", SBX_USAGE),
     ("claude-settings.json", CLAUDE_SETTINGS),
 ];
 
@@ -462,6 +466,40 @@ mod tests {
         }
         fs::remove_dir_all(&dir).expect("cleanup");
         assert!(!dir.exists());
+    }
+
+    /// The status line is the only place Claude Code hands out cost and rate
+    /// limits, so the wiring is three things that have to agree: a script in
+    /// the context, a `COPY` that lands it on PATH, and a `statusLine` in the
+    /// settings the agent reads. Any one of them missing is a usage pane that
+    /// is empty for ever with nothing to say why.
+    #[test]
+    fn the_status_line_is_wired_from_the_context_to_the_settings() {
+        assert!(
+            CONTEXT.iter().any(|(name, _)| *name == "sbx-usage"),
+            "the script has to be in the build context"
+        );
+        assert!(
+            DOCKERFILE.contains("COPY sbx-usage /usr/local/bin/sbx-usage"),
+            "and land on PATH"
+        );
+        let settings: serde_json::Value =
+            serde_json::from_str(CLAUDE_SETTINGS).expect("valid settings");
+        assert_eq!(
+            settings["statusLine"]["command"], "sbx-usage",
+            "and be what the agent's status line runs"
+        );
+        assert_eq!(settings["statusLine"]["type"], "command");
+        // It writes where the poll reads. Both sides of that path are spelled
+        // out in their own file, so the assertion is that they match.
+        assert!(
+            SBX_USAGE.contains("usage.json"),
+            "the script must write the file `usage.json` names"
+        );
+        assert_eq!(
+            crate::backend::Paths::in_sandbox().usage(),
+            "/sandbox/.sbx/usage.json"
+        );
     }
 
     /// `reports_status` probes for this path, so the Dockerfile has to keep
