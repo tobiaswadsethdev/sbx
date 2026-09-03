@@ -70,6 +70,12 @@ jobs:
   # A check rather than a build, and only these three crates, because what it is
   # guarding against is one `use std::os::unix::fs` -- which costs seconds to
   # catch here and a tagged release to catch anywhere else.
+  #
+  # The desktop crate is checked too, and for a reason that cost somebody an
+  # afternoon: `tauri-build` generates a Windows *resource file* and needs
+  # `icons/icon.ico` to do it, which nothing on Linux ever asks for. The icon
+  # was missing for two increments and neither a Linux build, a release that was
+  # never tagged, nor the three crates below could notice.
   windows:
     name: the client half compiles on Windows
     runs-on: windows-latest
@@ -86,3 +92,10 @@ jobs:
 
       - name: Check
         run: cargo check -p sbx-client -p sbx-proto -p sbx-core --all-targets
+
+      # Its own workspace, so it needs its own invocation. `check` and not
+      # `build`: what this is for is the build script and the Windows-only
+      # dependencies resolving, not a binary nobody here will run.
+      - name: Check the desktop application
+        working-directory: apps/desktop/src-tauri
+        run: cargo check
