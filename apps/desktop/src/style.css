@@ -1,18 +1,97 @@
-/* A terminal's palette, because that is what this is a window onto. Colours are
-   named for what they mean rather than what they are, so the one place to
-   change the theme is here. */
+/* The window's surfaces, named for what they mean rather than what they are,
+   so the one place to change the theme is here.
+
+   The palette is Orca's, which is to say shadcn's neutral scale: a near-black
+   page with raised panels on it, and *borders made of the foreground* rather
+   than of a grey. That second part is the whole trick, and worth stating
+   because it is not obvious from a screenshot -- a line at 7% white over any
+   of these surfaces reads as the same line, so a panel can be raised, sunken
+   or flat without three separate border colours to keep in sync. Every hover
+   and selected state below is the same idea at a different alpha.
+
+   What replaced the amber: nothing, deliberately. It was the accent *and* the
+   warning, so a rate limit at 81% and the wordmark were the same colour and
+   neither meant anything. Chrome is now neutral -- near-white on near-black,
+   emphasis by contrast -- and the hues are kept for the four things that are
+   genuinely states: working, needs-you, good, bad. `--warn` is amber still,
+   because an unsandboxed session is a warning and there is no neutral way to
+   say so. */
 :root {
-  --bg: #121216;
-  --bg-raised: #17171d;
-  --bg-sunken: #0e0e12;
-  --line: #26262f;
-  --text: #d6d6dd;
-  --dim: #7d7d8a;
-  --accent: #e9c46a;
-  --running: #569cd6;
-  --waiting: #c586c0;
-  --ok: #6a9955;
-  --bad: #d16969;
+  --bg: #0a0a0a;
+  /* Panels: the sidebar, the dock, a dialog. Raised, not tinted. */
+  --surface: #171717;
+  --surface-2: #262626;
+  /* Where text is entered or code is shown: below the panel, which is to say
+     the page showing through it. Deliberately the same value as `--bg` and
+     kept as its own name -- an input is sunken *relative to the panel it is
+     on*, and a theme that raised the panels further would move this with them
+     rather than with the page. Pure black was the first attempt and is too
+     hard a step down from `--surface`. */
+  --sunken: #0a0a0a;
+
+  --text: #fafafa;
+  --dim: #a1a1a1;
+  /* Third rank: a hint under a label, a count beside a name. Still legible on
+     `--surface`, which `--dim` at half opacity would not be. */
+  --dimmer: #6f6f6f;
+
+  /* Foreground at an alpha, which is what every line and fill in the window
+     actually is. See the note above. */
+  --line: rgb(255 255 255 / 0.07);
+  --line-strong: rgb(255 255 255 / 0.15);
+  --hover: rgb(255 255 255 / 0.045);
+  --selected: rgb(255 255 255 / 0.1);
+  --selected-line: rgb(255 255 255 / 0.18);
+  --ring: #a1a1a1;
+
+  /* A filled button, and the ink on it. Near-white rather than a hue: the only
+     thing in the window loud enough to be the primary action is contrast. */
+  --primary: #e5e5e5;
+  --primary-ink: #171717;
+
+  /* The states. Four hues, and nothing else in the window may use them: a
+     colour that means "an agent is working" cannot also decorate a heading. */
+  --working: #eab308;
+  --attention: #c084fc;
+  --ok: #34d399;
+  --bad: #ff6568;
+  --warn: #eab308;
+
+  /* 10px, Orca's `--radius`. Panels and cards take the full radius; controls
+     take `--r-sm`, because a 10px corner on a 20px button is a lozenge. */
+  --r: 10px;
+  --r-md: 8px;
+  --r-sm: 6px;
+
+  /* Chrome is set in the UI font and content in the mono one, and the split is
+     by what the text *is* rather than where it sits: a label, a heading and a
+     sentence are prose; a branch, a path, a hostname, a diff count and a
+     session's name are identifiers, and an identifier in a proportional font
+     is one you cannot compare against the next one down.
+
+     **`system-ui` is deliberately not in this list**, which is the opposite of
+     the usual advice. On the Linux box this was built on, fontconfig resolves
+     `system-ui` to *Adwaita Mono* -- and because it resolves, the browser never
+     falls through to the sans faces behind it, so the entire window came out
+     monospace with a stack that reads as though it could not. `fc-match
+     system-ui` is the whole story:
+
+         $ fc-match system-ui
+         AdwaitaMono-Regular.ttf: "Adwaita Mono" "Regular"
+
+     Naming the platform faces instead costs one line and cannot go wrong that
+     way: Segoe UI on WebView2, the Apple faces where they exist, then the four
+     that a Linux desktop actually ships. */
+  --font-ui:
+    "Segoe UI Variable Text", "Segoe UI", -apple-system, "SF Pro Text",
+    "Adwaita Sans", Cantarell, Ubuntu, "Noto Sans", Roboto, "Liberation Sans",
+    "Helvetica Neue", Arial, sans-serif;
+  /* Named for the same reason, though `ui-monospace` has never been the one
+     that misresolves -- a monospace generic that picks a monospace face is the
+     case that works. */
+  --font-mono:
+    ui-monospace, "Cascadia Mono", "SF Mono", "JetBrains Mono", "Adwaita Mono",
+    "Liberation Mono", Menlo, Consolas, monospace;
 
   color-scheme: dark;
 }
@@ -27,6 +106,16 @@
    1.5 below, and that is the whole cost. */
 html.broken-font-metrics body,
 html.broken-font-metrics #root { line-height: normal; }
+
+/* The same fault, reached the other way. The rule above only lands on elements
+   that inherit their line-height; anything given an explicit one below -- and
+   the sidebar is full of them, because a card is built out of lines of a known
+   height -- keeps it and keeps the clipping with it. These are exactly the
+   truncating elements, which is where the shearing is visible. */
+html.broken-font-metrics :is(
+  .wt-name, .wt-branch, .wt-age, .wt-stat, .group-label, .group-count,
+  .files .label, .change .path, .tabs button, .git .branch
+) { line-height: normal; }
 
 /* The same zero metrics, costing the opposite thing. A form control takes its
    height from its line-height -- rows times that, for a textarea -- and
@@ -43,273 +132,658 @@ body, html, #root {
   height: 100%;
   background: var(--bg);
   color: var(--text);
-  font: 13px/1.5 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font: 13px/1.5 var(--font-ui);
+  /* The chrome is 12 and 13 pixels of sans-serif, which is the size range
+     where hinting decides whether it looks like an application or like a web
+     page from 2009. */
+  -webkit-font-smoothing: antialiased;
 }
+
+/* Nothing in this window is a document, and a stray drag-select of a label is
+   never what was meant. Restored on the things that *are* text you might want
+   to copy: a hostname, a log, a diff, an error. */
+body { user-select: none; }
+:is(pre, code, .terminal, .monaco, .integration .log, .events, .facts dd,
+    .policy .host, .error, .empty) { user-select: text; }
+
+/* One focus ring for the window, and a visible one. Keyboard focus was
+   previously whatever the engine drew, which on WebKitGTK is nothing on a
+   button with a custom background -- so the tab order existed but could not be
+   seen. `:focus-visible` rather than `:focus` keeps it off the mouse path.
+
+   Outline and offset only. A `border-radius` here looks like it would round
+   the ring, and instead sets the *element's* radius for as long as it has
+   focus: tabbing onto a worktree card snapped its corners from 10px to 6px
+   and back. An outline already follows whatever radius the element has. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* Scrollbars, borrowed wholesale from Orca and worth it: the thumb is drawn
+   inside a transparent border and clipped to the padding box, so a 12px
+   scrollbar shows a 6px thumb that floats clear of the content instead of a
+   full-width trough with a groove down it. `scrollbar-width`/`-color` are the
+   standard properties and the only ones WebKitGTK honours; the `::-webkit-`
+   rules are for WebView2, which is what the Windows build runs on. */
+.scrollbar-sleek {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+.scrollbar-sleek::-webkit-scrollbar { width: 12px; height: 12px; }
+.scrollbar-sleek::-webkit-scrollbar-track { background: none; }
+.scrollbar-sleek::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  background-clip: padding-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+  min-height: 28px;
+}
+.scrollbar-sleek::-webkit-scrollbar-thumb:hover { background: var(--dim); background-clip: padding-box; }
+.scrollbar-sleek::-webkit-scrollbar-corner { background: none; }
 
 .app { display: flex; flex-direction: column; height: 100%; }
 
-header {
+/* The title bar.
+
+   Scoped to the direct child of `.app` rather than left as a bare `header`,
+   because four other things in this window are also `<header>` elements -- a
+   project row in the tree, and the strip at the top of the files, git and diff
+   panes -- and an unscoped rule here reached all of them and had to be undone
+   in each. */
+.app > header {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 14px;
-  height: 38px;
+  gap: 14px;
+  padding: 0 12px;
+  height: 40px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg-raised);
+  background: var(--surface);
   flex: none;
 }
-header .mark { color: var(--accent); font-weight: 700; letter-spacing: 0.5px; }
-header .server, header .count { color: var(--dim); }
+.app > header .mark { font-weight: 600; letter-spacing: -0.01em; }
+.app > header .server, .app > header .count { color: var(--dim); font-size: 12px; }
+.app > header .server { font-family: var(--font-mono); }
 /* The account's rate-limit windows, in the header because that is whose they
    are. Amber past 80%: it is the number that decides whether starting another
    session is a good idea. */
-header .limit {
+.app > header .limit {
   color: var(--dim);
   font-size: 11px;
-  padding: 1px 5px;
+  font-family: var(--font-mono);
+  padding: 1px 6px;
   border: 1px solid var(--line);
-  border-radius: 3px;
+  border-radius: 999px;
 }
-header .limit.high { color: var(--accent); border-color: var(--accent); }
+.app > header .limit.high { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
 
-header .error { color: var(--bad); margin-left: auto; }
-header select {
-  background: var(--bg-sunken);
+.app > header .error { color: var(--bad); margin-left: auto; font-size: 12px; }
+.app > header select {
+  background: var(--sunken);
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 2px 6px;
+  border-radius: var(--r-sm);
+  padding: 3px 7px;
   font: inherit;
+  font-size: 12px;
 }
+
+/* The four things the window can do. Icon *and* label: an icon-only toolbar is
+   a quiz, and there is room for both at this width. */
+.app > header .new {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: background-color 150ms, border-color 150ms, color 150ms;
+}
+.app > header .new:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.app > header .new:disabled { color: var(--dimmer); cursor: default; }
+/* The last button sits against the window edge unless something pushes it in,
+   and `header .error` only exists when there is one. */
+.app > header .new:last-of-type { margin-right: 0; }
 
 main { display: flex; flex: 1; min-height: 0; }
 
-/* the tree: projects, and the worktrees in them */
+/* ------------------------------------------------------------------------- */
+/* the tree: projects, and the worktrees in them                             */
+/* ------------------------------------------------------------------------- */
+
 .tree {
-  width: 280px;
+  width: 260px;
   flex: none;
   overflow-y: auto;
   border-right: 1px solid var(--line);
-  padding: 6px 4px 20px;
+  background: var(--surface);
+  padding: 6px 0 24px;
 }
-.tree .group { margin-bottom: 10px; }
-.tree .group > header {
+.tree .group { margin-bottom: 6px; }
+
+/* The project's row. Sticky, so scrolling a long list never leaves you
+   looking at worktrees without knowing whose. */
+.group-head {
   display: flex;
-  align-items: baseline;
-  gap: 6px;
-  padding: 4px 8px 3px;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 6px 0 4px;
   position: sticky;
   top: 0;
-  background: var(--bg);
+  z-index: 1;
+  background: var(--surface);
 }
-.tree .label {
+/* Everything except the actions: the twisty, the name, the count. One button,
+   so the whole width of the row collapses the group -- a 14-pixel chevron is a
+   target you have to aim at. */
+.group-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   flex: 1;
-  color: var(--accent);
+  min-width: 0;
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 2px 4px;
+  cursor: pointer;
+  transition: background-color 150ms;
+}
+.group-toggle:hover { background: var(--hover); }
+.group-twist { color: var(--dimmer); flex: none; }
+.group-label {
+  min-width: 0;
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* A group that is not a project reads as a heading, not as a place you can act. */
-.tree .label.loose { color: var(--dim); font-weight: 400; }
-.tree .add {
+/* A group that is not a project reads as a heading, not as a place you can
+   act -- there is nothing here to act on. */
+.group-label.loose { color: var(--dim); font-weight: 500; font-family: var(--font-mono); }
+.group-count {
+  flex: none;
+  color: var(--dimmer);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The project's controls, out of the way until wanted.
+   Orca's reveal, and the mechanism is the interesting part: the buttons
+   collapse to *zero width* rather than to zero opacity, so they take no space
+   from the project name until the pointer is in the group. Transitioning
+   `max-width` alongside the opacity is what keeps that from being a jump. */
+.group-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+@media (hover: hover) {
+  .group-actions {
+    max-width: 0;
+    opacity: 0;
+    overflow: hidden;
+    transition: max-width 150ms, opacity 150ms;
+  }
+  /* `:focus-within` is not a nicety here: without it these are two buttons
+     that the keyboard can reach and the eye cannot find. */
+  .group:hover .group-actions,
+  .group:focus-within .group-actions { max-width: 60px; opacity: 1; }
+}
+
+/* An icon-only control that is quiet until pointed at. The shared recipe for
+   the sidebar's actions, the dock's, and the change list's. */
+.quiet-icon {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
   background: none;
   border: none;
+  border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
   cursor: pointer;
-  padding: 0 2px;
+  transition: background-color 150ms, color 150ms;
 }
-.tree .add:hover { color: var(--accent); }
-.tree .add.none { cursor: default; }
-.tree .empty-group { color: var(--dim); margin: 0; padding: 2px 8px 4px 18px; font-style: italic; }
+.quiet-icon:hover { background: var(--line); color: var(--text); }
+/* Forgetting a project, discarding a file. Red on hover only: the button is
+   not a warning sitting on screen, it is a warning at the moment you reach
+   for it. */
+.quiet-icon.danger:hover { color: var(--bad); }
 
+.group-note {
+  flex: none;
+  color: var(--dimmer);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding-right: 4px;
+}
+.empty-group {
+  color: var(--dimmer);
+  margin: 0;
+  padding: 2px 12px 6px 26px;
+  font-size: 12px;
+}
+
+/* One worktree.
+   A card, not a row: bordered, inset from the sidebar's edge, and carrying a
+   1px *transparent* border at rest so that selecting it colours a border that
+   was already there instead of adding one and moving every row below by a
+   pixel. The transition covers exactly the three properties the states differ
+   in. */
 .worktree {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-areas: "name state" "branch age";
-  gap: 1px 8px;
-  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  width: calc(100% - 8px);
+  margin: 1px 4px;
+  padding: 5px 8px 6px 6px;
   text-align: left;
-  padding: 5px 8px 5px 18px;
   background: none;
-  border: none;
-  border-left: 2px solid transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r);
   color: inherit;
   font: inherit;
   cursor: pointer;
+  transition: background-color 200ms, border-color 200ms, box-shadow 200ms;
 }
-.worktree:hover { background: var(--bg-raised); }
-.worktree.on { background: var(--bg-raised); border-left-color: var(--accent); }
-.worktree .name { grid-area: name; }
-.worktree .state { grid-area: state; }
-.worktree .branch { grid-area: branch; color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.worktree .age { grid-area: age; color: var(--dim); }
-
-/* A session with no sandbox around it. Amber rather than red: it is a
-   deliberate choice someone made, not a fault -- and never the default grey,
-   which would let it pass for a sandboxed row at a glance. */
-.worktree .badge {
-  margin-left: 6px;
-  padding: 0 3px;
-  border: 1px solid var(--accent);
-  border-radius: 3px;
-  color: var(--accent);
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  vertical-align: 1px;
+/* Guarded, because on a touch screen `:hover` sticks to whatever was tapped
+   last and leaves a row looking selected when it is not. */
+@media (hover: hover) {
+  .worktree:hover { background: var(--hover); }
+  .worktree.on:hover { background: var(--selected); }
+}
+.worktree.on {
+  background: var(--selected);
+  border-color: var(--selected-line);
+  /* Barely a shadow, and the point of it is not depth: it separates the
+     selected card from the one directly beneath it, which a fill alone at this
+     contrast does not. */
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.25);
 }
 
-/* What the policy pane and the events feed show for a session that has no
-   isolation. A stated absence, styled as a statement: an empty pane is what a
-   pane that failed to load looks like. */
-.unisolated { color: var(--dim); }
-.unisolated h3 {
-  margin: 0 0 6px;
-  color: var(--accent);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.unisolated p { margin: 0; max-width: 46ch; }
-
-.state { font-size: 11px; text-transform: lowercase; }
-.state.running { color: var(--running); }
-.state.waiting { color: var(--waiting); font-weight: 700; }
-.state.ready, .state.idle { color: var(--ok); }
-.state.failed, .state.dead { color: var(--bad); }
-.state.creating, .state.seeding { color: var(--accent); }
-
-.files { min-height: 0; padding-bottom: 16px; }
-.files > header {
-  position: sticky;
-  top: 0;
-  background: var(--bg);
-  color: var(--dim);
-  padding: 0 0 4px;
-}
-.files .entry {
-  display: flex;
-  gap: 4px;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
+/* The state's column. Fixed width and aligned to the first line of text, so
+   the names of eleven worktrees line up whatever their agents are doing --
+   which is the reason this is a column and not an inline mark. */
+.wt-state { flex: none; display: flex; align-items: center; height: 18px; }
+.wt-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 1px; }
+.wt-head { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.wt-name {
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   color: var(--text);
-  font: inherit;
-  padding: 1px 4px;
-  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.files .entry:hover { background: var(--bg-raised); }
-.files .entry.dir .label { color: var(--waiting); }
-.files .entry { align-items: center; gap: 5px; }
-.files .twist { width: 14px; color: var(--dim); flex: none; display: inline-flex; }
-.files .label { overflow: hidden; text-overflow: ellipsis; }
-.files .loading, .files .error { padding: 1px 8px; margin: 0; }
 
-/* the file pane */
-.file { display: flex; flex-direction: column; height: 100%; }
-.file .monaco { flex: 1; min-height: 0; }
+/* A session with no sandbox around it.
+   Amber, and spelled out. Not red, because it is a deliberate choice someone
+   made and not a fault; never the neutral grey the rest of this card is in,
+   which would let it pass for a sandboxed row at a glance. The icon and the
+   word both, because the icon alone is a mark you have to have been taught and
+   this is the one thing on the card that must not be missed. */
+.wt-bare {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+  padding: 0 4px 0 3px;
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+  font-size: 8.5px;
+  line-height: 14px;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+}
+.wt-bare > svg { width: 8px; height: 8px; }
 
-/* the editor area: tabs, and whatever is open */
+/* The second line: what branch, how far along, how old. All of it dim and all
+   of it monospace -- these are identifiers and numbers you compare down the
+   column, and none of them is the thing you are looking for when you scan the
+   list. */
+.wt-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  color: var(--dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 16px;
+}
+.wt-branch-icon { color: var(--dimmer); flex: none; width: 11px; height: 11px; }
+.wt-branch { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Pushed to the right and never squeezed: the diff and the age are short, and
+   the branch is the one thing on the line that can afford to be cut. */
+.wt-stat { flex: none; margin-left: auto; display: flex; gap: 4px; font-variant-numeric: tabular-nums; }
+.wt-stat .added { color: var(--ok); }
+.wt-stat .removed { color: var(--bad); }
+.wt-stat .untracked { color: var(--dimmer); }
+.wt-age { flex: none; color: var(--dimmer); font-variant-numeric: tabular-nums; }
+/* With no diff yet there is nothing to push the age over, so it does it. */
+.wt-stat + .wt-age { margin-left: 0; }
+.wt-branch + .wt-age { margin-left: auto; }
+
+/* ------------------------------------------------------------------------- */
+/* what an agent is doing, as one mark                                       */
+/* ------------------------------------------------------------------------- */
+
+/* The box every state renders into, whatever shape it is. Fixed at 14 so the
+   column never changes width; see `StateDot` in icons.tsx. */
+.state-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+.state-dot .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+
+/* Working. A ring with a gap in it, stepped rather than smooth: twelve frames
+   a second reads as a mechanical tick instead of a spin, which is both calmer
+   next to eleven other rows and closer to what the terminal this window
+   replaced actually drew. */
+.state-dot .spinner {
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: state-spin 1s steps(12, end) infinite;
+}
+@keyframes state-spin { to { transform: rotate(1turn); } }
+/* Reduced motion gets the gap filled in as well as the animation stopped: a
+   ring frozen with a quarter missing looks like a rendering fault. */
+@media (prefers-reduced-motion: reduce) {
+  .state-dot .spinner { animation: none; border-top-color: currentColor; opacity: 0.7; }
+}
+
+.state-dot.running { color: var(--working); }
+/* The sandbox is not up yet, which is a different wait from an agent's. */
+.state-dot.creating, .state-dot.seeding { color: var(--dim); }
+/* The loud one, and the reason the window subscribes to every session rather
+   than the selected one. */
+.state-dot.waiting { color: var(--attention); }
+.state-dot.ready { color: var(--ok); }
+.state-dot.idle { color: var(--dimmer); }
+.state-dot.published { color: var(--ok); }
+.state-dot.failed, .state-dot.dead { color: var(--bad); }
+
+/* ------------------------------------------------------------------------- */
+/* the editor area: tabs, and whatever is open                               */
+/* ------------------------------------------------------------------------- */
+
 .editor { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.tabs { display: flex; gap: 2px; padding: 6px 10px 0; border-bottom: 1px solid var(--line); flex: none; }
-.tabs .tab { display: inline-flex; align-items: baseline; border-bottom: 2px solid transparent; }
-.tabs .tab.on { border-bottom-color: var(--accent); }
+.tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px;
+  height: 36px;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+/* A tab is a pill that fills in when active, rather than a label with a rule
+   under it. Same reason as the worktree card: the fill carries the state at
+   any width, and an underline on a two-character shell name does not. */
+.tabs .tab {
+  display: inline-flex;
+  align-items: center;
+  border-radius: var(--r-sm);
+  transition: background-color 150ms;
+  flex: none;
+}
+.tabs .tab:hover { background: var(--hover); }
+.tabs .tab.on { background: var(--selected); }
 .tabs .tab.on button { color: var(--text); }
 .tabs button {
   background: none;
   border: none;
+  border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
-  padding: 4px 10px 6px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 5px 10px;
   cursor: pointer;
+  white-space: nowrap;
 }
-.tabs .tab button { padding-right: 4px; }
-/* Only shown on a shell; see Tabs.tsx. Dim until hovered, because closing one
-   kills what is running in it. */
-.tabs .close { display: inline-flex; align-items: center; padding: 4px 7px 6px 2px; }
+.tabs .tab button { padding-right: 5px; }
+/* Only shown on a shell and on a file; see Tabs.tsx. Dim until hovered,
+   because closing a shell kills what is running in it. */
+.tabs .close {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 7px 5px 2px;
+  color: var(--dimmer);
+}
 .tabs .close:hover { color: var(--bad); }
-.tabs > .add { display: inline-flex; align-items: center; color: var(--dim); padding: 4px 8px 6px; }
-.tabs > .add:hover { color: var(--accent); }
+.tabs > .add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  padding: 0;
+  color: var(--dim);
+  margin-left: 2px;
+}
+.tabs > .add:hover { background: var(--line); color: var(--text); }
 /* Every tab stays mounted -- see Tabs.tsx -- so the inactive ones are hidden
    rather than removed, and `hidden` alone loses to `display: flex`. */
 .tab-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; }
 .tab-body[hidden] { display: none; }
 .tab-body:has(> .terminal) { padding: 0; overflow: hidden; }
 
-/* the dock: what is true about this worktree, always on screen */
+/* the file pane */
+.file { display: flex; flex-direction: column; height: 100%; }
+.file .monaco { flex: 1; min-height: 0; border-radius: var(--r-md); overflow: hidden; }
+
+/* ------------------------------------------------------------------------- */
+/* the dock: what is true about this worktree, always on screen              */
+/* ------------------------------------------------------------------------- */
+
 .dock {
   width: 400px;
   flex: none;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--line);
+  background: var(--surface);
   min-height: 0;
 }
-.dock-tabs { display: flex; gap: 1px; padding: 6px 8px 0; border-bottom: 1px solid var(--line); flex: none; }
+.dock-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 8px;
+  height: 36px;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  flex: none;
+}
 .dock-tabs button {
   background: none;
   border: none;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
-  padding: 4px 7px 6px;
+  font-size: 12px;
+  padding: 4px 9px;
   cursor: pointer;
+  transition: background-color 150ms, color 150ms;
 }
-.dock-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+.dock-tabs button:hover { background: var(--hover); color: var(--text); }
+.dock-tabs button.on { color: var(--text); background: var(--selected); }
 .dock-body { flex: 1; overflow-y: auto; padding: 10px 12px; min-height: 0; }
 
-/* the git view */
-.git { min-height: 0; padding-bottom: 16px; }
-.git > header { display: flex; gap: 8px; padding: 0 0 6px; }
-.git .branch { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.git .ab { color: var(--dim); margin-left: auto; white-space: nowrap; }
-.git .ab.none { color: var(--waiting); }
-.git-ops { display: flex; gap: 4px; padding: 0 0 8px; }
-.git-ops button {
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-  border-radius: 3px;
+/* ------------------------------------------------------------------------- */
+/* the file tree, in the dock                                                */
+/* ------------------------------------------------------------------------- */
+
+.files { min-height: 0; padding-bottom: 16px; }
+.files > header {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  color: var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0 0 6px;
+  gap: 8px;
+}
+.files .entry {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: var(--r-sm);
   color: var(--text);
   font: inherit;
-  padding: 2px 8px;
+  padding: 2px 6px;
   cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 120ms;
 }
-.git-ops button:hover:not(:disabled) { border-color: var(--accent); }
-.git-ops button:disabled { color: var(--dim); cursor: default; }
+.files .entry:hover { background: var(--hover); }
+.files .entry.dir .label { color: var(--text); }
+.files .twist { width: 14px; color: var(--dimmer); flex: none; display: inline-flex; }
+.files .label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.files .loading, .files .error { padding: 2px 6px; margin: 0; color: var(--dim); font-size: 12px; }
+
+/* ------------------------------------------------------------------------- */
+/* the git view                                                              */
+/* ------------------------------------------------------------------------- */
+
+.git { min-height: 0; padding-bottom: 16px; }
+.git > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 8px;
+}
+.git .branch {
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git .ab {
+  color: var(--dim);
+  margin-left: auto;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+/* Never pushed is not the same as in sync, which is why pushing says
+   "publish" rather than nothing. */
+.git .ab.none { color: var(--attention); }
+.git-ops { display: flex; align-items: center; gap: 5px; padding: 0 0 10px; }
+.git-ops button {
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--dim);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: background-color 150ms, border-color 150ms, color 150ms;
+}
+.git-ops button:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--line-strong);
+  color: var(--text);
+}
+.git-ops button:disabled { color: var(--dimmer); cursor: default; }
 .git-ops .quiet {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   background: none;
   border-color: transparent;
   color: var(--dim);
   margin-left: auto;
-  padding: 2px 6px;
 }
+.git-ops .quiet:hover:not(:disabled) { background: var(--line); border-color: transparent; }
+/* What git said back. Sunken and monospace: it is output, not a message the
+   window composed. */
 .git .said {
-  margin: 0 0 8px;
-  padding: 5px 7px;
-  background: var(--bg-sunken);
-  border-left: 2px solid var(--line);
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  background: var(--sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
   white-space: pre-wrap;
   color: var(--dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
   max-height: 120px;
   overflow-y: auto;
 }
 
-.changes h3 { font-size: 11px; color: var(--dim); font-weight: 400; margin: 8px 0 2px; padding: 0; text-transform: uppercase; }
-.changes .count { color: var(--dim); }
-.change { display: flex; align-items: center; }
-.change:hover { background: var(--bg-raised); }
+.changes h3 {
+  font-size: 11px;
+  color: var(--dim);
+  font-weight: 500;
+  margin: 10px 0 3px;
+  padding: 0;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.changes .count { color: var(--dimmer); font-family: var(--font-mono); }
+.change {
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-sm);
+  transition: background-color 120ms;
+}
+.change:hover { background: var(--hover); }
 .change .open {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   flex: 1;
   min-width: 0;
   text-align: left;
@@ -317,108 +791,274 @@ main { display: flex; flex: 1; min-height: 0; }
   border: none;
   color: inherit;
   font: inherit;
-  padding: 2px 4px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 3px 6px;
   cursor: pointer;
 }
+/* Right-to-left so a long path is cut at the front, where the repository root
+   is, rather than at the end, where the filename is. */
 .change .path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; }
-.change .mark { width: 10px; flex: none; }
+.change .mark { width: 10px; flex: none; text-align: center; }
 .change .mark.added, .change .mark.untracked { color: var(--ok); }
-.change .mark.modified, .change .mark.renamed { color: var(--accent); }
+.change .mark.modified, .change .mark.renamed { color: var(--working); }
 .change .mark.deleted, .change .mark.conflicted { color: var(--bad); }
+/* One action per row, revealed with the row. The same collapse the project
+   header uses, and for the same reason: a stage button on forty rows is forty
+   things to read past. */
 .change .act {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
   background: none;
   border: none;
+  border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
-  padding: 2px 5px;
+  padding: 0;
+  margin-right: 3px;
   cursor: pointer;
+  transition: background-color 120ms, color 120ms, opacity 120ms;
 }
-.change .act:hover { color: var(--accent); }
+@media (hover: hover) {
+  .change .act { opacity: 0; }
+  .change:hover .act, .change:focus-within .act { opacity: 1; }
+}
+.change .act:hover { background: var(--line); color: var(--text); }
 
-.commit { display: flex; flex-direction: column; gap: 5px; padding: 12px 0 0; }
+.commit { display: flex; flex-direction: column; gap: 7px; padding: 14px 0 0; }
 .commit textarea {
-  background: var(--bg-sunken);
+  background: var(--sunken);
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 4px 7px;
+  border-radius: var(--r-md);
+  padding: 6px 8px;
   font: inherit;
+  font-family: var(--font-mono);
+  font-size: 12px;
   resize: vertical;
 }
-.commit textarea:focus { outline: none; border-color: var(--accent); }
-.commit .go {
-  background: var(--accent);
-  border: none;
-  border-radius: 3px;
-  color: #17171d;
-  font: inherit;
-  font-weight: 700;
-  padding: 4px 12px;
-  cursor: pointer;
-}
-.commit .go:disabled { background: var(--dim); cursor: default; }
+.commit textarea:focus { outline: none; border-color: var(--line-strong); }
+.commit textarea:focus-visible { outline: 2px solid var(--ring); outline-offset: 1px; }
 
-/* one file's diff, and the review on it */
+/* The primary action, wherever it appears. Near-white and filled: the loudest
+   thing this palette has, and the only element allowed to be it.
+
+   One unscoped rule rather than one per container. There are five of these in
+   the window -- in the commit box, the connect, create and integrations
+   dialogs, and the first-run screen -- and a list of ancestors here is a list
+   that the sixth will not be on. */
+.go {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: var(--primary);
+  border: none;
+  border-radius: var(--r-sm);
+  color: var(--primary-ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background-color 150ms, opacity 150ms;
+}
+.go:hover:not(:disabled) { background: #ffffff; }
+.go:disabled { background: var(--surface-2); color: var(--dimmer); cursor: default; }
+
+/* ------------------------------------------------------------------------- */
+/* one file's diff, and the review on it                                     */
+/* ------------------------------------------------------------------------- */
+
 .filediff { display: flex; flex-direction: column; height: 100%; }
-.filediff > header { display: flex; gap: 12px; padding: 0 0 6px; flex: none; }
-.filediff .path { overflow-wrap: anywhere; }
-.filediff .sides { color: var(--dim); margin-left: auto; white-space: nowrap; }
-.filediff .monaco { flex: 1; min-height: 220px; }
-/* A commented line, marked where Monaco will let us mark one. */
-.commented-line { background: rgba(233, 196, 106, 0.09); }
-.commented-glyph { background: var(--accent); width: 3px !important; margin-left: 3px; }
-.filediff .composer, .diff .composer { display: flex; gap: 8px; padding: 6px 0 0; }
+.filediff > header {
+  display: flex;
+  gap: 12px;
+  padding: 0 0 8px;
+  flex: none;
+}
+.filediff .path { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
+.filediff .sides { color: var(--dim); margin-left: auto; white-space: nowrap; font-size: 12px; }
+.filediff .monaco { flex: 1; min-height: 220px; border-radius: var(--r-md); overflow: hidden; }
+/* A commented line, marked where Monaco will let us mark one. Neutral now
+   rather than amber: the mark says "there is a comment here", and the comment
+   is not a warning. */
+.commented-line { background: rgb(255 255 255 / 0.06); }
+.commented-glyph { background: var(--dim); width: 3px !important; margin-left: 3px; }
+.filediff .composer, .diff .composer { display: flex; gap: 8px; padding: 8px 0 0; }
 .filediff .composer textarea {
   flex: 1;
-  background: var(--bg-sunken);
+  background: var(--sunken);
   color: var(--text);
   border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 4px 7px;
+  border-radius: var(--r-md);
+  padding: 6px 8px;
   font: inherit;
+  font-size: 12px;
   resize: vertical;
 }
-.filediff .composer textarea:focus { outline: none; border-color: var(--accent); }
+.filediff .composer textarea:focus { outline: none; border-color: var(--line-strong); }
 .filediff .quiet, .diff .quiet {
   background: none;
   border: none;
+  border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
+  font-size: 12px;
   cursor: pointer;
-  padding: 2px 4px;
+  padding: 4px 8px;
+  transition: background-color 150ms, color 150ms;
 }
-.filediff .quiet:hover { color: var(--accent); }
-.filediff .comments { list-style: none; margin: 8px 0 0; padding: 0; flex: none; }
+.filediff .quiet:hover, .diff .quiet:hover { background: var(--hover); color: var(--text); }
+.filediff .comments { list-style: none; margin: 10px 0 0; padding: 0; flex: none; }
 .filediff .comments li {
   display: flex;
   gap: 8px;
-  padding: 3px 6px;
-  border-left: 2px solid var(--accent);
-  background: rgba(233, 196, 106, 0.06);
-  margin-bottom: 3px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--hover);
+  margin-bottom: 4px;
+  font-size: 12px;
 }
-.filediff .comments .at { color: var(--dim); flex: none; }
+.filediff .comments .at { color: var(--dim); flex: none; font-family: var(--font-mono); }
 .filediff .comments .body { flex: 1; white-space: pre-wrap; }
 
-/* starting a session */
-header .new {
-  background: none;
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  color: var(--text);
-  font: inherit;
-  padding: 2px 10px;
-  cursor: pointer;
+/* ------------------------------------------------------------------------- */
+/* the facts, policy and events panes                                        */
+/* ------------------------------------------------------------------------- */
+
+/* A label-and-value grid, used by the facts pane and by the parts of the
+   policy pane that are a list of settings. Previously unstyled, which on a
+   bare `<dl>` means every value starts on its own indented line. */
+.facts {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: 3px 12px;
+  margin: 0;
+  font-size: 12px;
 }
-header .new:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-header .new:disabled { color: var(--dim); cursor: default; }
+.facts dt { color: var(--dim); }
+.facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--font-mono); }
+.facts .none { color: var(--dimmer); font-style: italic; font-family: var(--font-ui); }
+
+.policy { font-size: 12px; }
+.policy .rule { margin: 0 0 16px; }
+/* Not upper-cased, unlike every other small heading in the window, and the
+   exception is on purpose: these headings are `rule.key` -- a value out of the
+   policy, like `git` or `npm` -- and the sections that are genuine labels
+   ("global lists", "filesystem and process") are the same element. Upper-casing
+   reads as a label on both and misreports the value on one, so neither gets it
+   and weight carries the heading instead. */
+.policy h3 {
+  margin: 0 0 5px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+.policy .hint, .policy .notice { color: var(--dimmer); margin: 4px 0 0; max-width: 60ch; }
+/* A caveat about a rule, not a rule. Set in from the list it qualifies. */
+.policy .notice {
+  border-left: 2px solid var(--line-strong);
+  padding-left: 8px;
+  font-size: 11px;
+}
+.policy .endpoints, .policy .binaries { list-style: none; margin: 0; padding: 0; }
+.policy .endpoints > li, .policy .binaries > li { padding: 3px 0; overflow-wrap: anywhere; }
+/* Between items only. On the first one it reads as a rule under the heading,
+   which is a different claim about the layout than the one intended. */
+.policy .endpoints > li + li, .policy .binaries > li + li { border-top: 1px solid var(--line); }
+.policy .host { font-family: var(--font-mono); color: var(--text); margin-right: 6px; }
+/* The rule's human name beside its key, so prose and not an identifier. */
+.policy .alias { color: var(--dim); font-weight: 400; }
+/* A pill per attribute of an endpoint: the protocol, how it is enforced, what
+   class of access it grants. */
+.policy .tag {
+  display: inline-block;
+  margin-right: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--dim);
+  font-size: 10px;
+  line-height: 16px;
+}
+.policy .tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, transparent); }
+.policy .tag.no { color: var(--dimmer); }
+.policy .l7 { list-style: none; margin: 3px 0 0; padding: 0 0 0 14px; }
+.policy .l7 > li { color: var(--dim); font-family: var(--font-mono); font-size: 11px; }
+/* allow and deny, in the two colours the events feed uses for the same two
+   words. One grammar for "the policy permits this" across both panes. */
+.policy .verb, .events .verdict {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+.policy .verb.allow, .events .verdict.allowed { color: var(--ok); }
+.policy .verb.block, .events .verdict.denied { color: var(--bad); }
+.events .verdict.neutral { color: var(--dimmer); }
+.policy .yes { color: var(--ok); }
+.policy .no { color: var(--bad); }
+
+/* The allow/deny feed. A log, so it is monospace and columnar throughout --
+   the point of it is scanning down one column for the denial you are looking
+   for. */
+.events { list-style: none; margin: 0; padding: 0; font-family: var(--font-mono); font-size: 11px; }
+.events > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: var(--r-sm);
+  border-left: 2px solid transparent;
+}
+.events > li.denied { background: color-mix(in srgb, var(--bad) 8%, transparent); border-left-color: var(--bad); }
+.events .clock { color: var(--dimmer); flex: none; font-variant-numeric: tabular-nums; }
+.events .verdict { flex: none; min-width: 4ch; }
+.events .class { color: var(--dim); flex: none; }
+.events .subject { color: var(--text); overflow-wrap: anywhere; }
+.events .policy { color: var(--dimmer); margin-left: auto; }
+/* Why it was denied, which is the part worth reading and the part that is a
+   sentence. Full width under the row, in the UI font. */
+.events .reason {
+  flex-basis: 100%;
+  color: var(--dim);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  padding-left: 2px;
+}
+
+/* What the policy pane and the events feed show for a session that has no
+   isolation. A stated absence, styled as a statement: an empty pane is what a
+   pane that failed to load looks like. */
+.unisolated { color: var(--dim); font-size: 12px; }
+.unisolated h3 {
+  margin: 0 0 6px;
+  color: var(--warn);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.unisolated p { margin: 0; max-width: 46ch; }
+
+/* Shared by every pane that can be waiting or broken. */
+.loading { color: var(--dim); font-size: 12px; }
+.error { color: var(--bad); font-size: 12px; overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------------------- */
+/* dialogs                                                                   */
+/* ------------------------------------------------------------------------- */
 
 .scrim {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgb(0 0 0 / 0.6);
   display: flex;
   align-items: flex-start;
   justify-content: center;
@@ -428,71 +1068,90 @@ header .new:disabled { color: var(--dim); cursor: default; }
 .dialog {
   width: 620px;
   max-width: 100%;
-  background: var(--bg-raised);
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  padding: 14px 16px 16px;
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r);
+  padding: 16px 18px 18px;
+  /* The one real shadow in the window. A dialog is the only thing here that is
+     genuinely above everything else. */
+  box-shadow: 0 16px 48px rgb(0 0 0 / 0.55);
 }
-.dialog-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
-.dialog-head h2 { font-size: 14px; margin: 0; flex: 1; }
+.dialog-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.dialog-head h2 { font-size: 14px; font-weight: 600; margin: 0; flex: 1; }
 .dialog .quiet {
   background: none;
   border: none;
+  border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
+  font-size: 12px;
   cursor: pointer;
-  padding: 0;
+  padding: 3px 7px;
+  transition: background-color 150ms, color 150ms;
 }
-.dialog .quiet:hover { color: var(--text); }
+.dialog .quiet:hover { background: var(--hover); color: var(--text); }
 
 .dialog input, .dialog textarea, .dialog select {
-  background: var(--bg-sunken);
+  background: var(--sunken);
   color: var(--text);
-  border: 1px solid var(--line);
-  border-radius: 3px;
-  padding: 4px 7px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-sm);
+  padding: 5px 8px;
   font: inherit;
+  font-size: 12px;
   width: 100%;
 }
+/* An identifier, so monospace -- a repository URL, a branch, a secret's name.
+   The textareas are prose and stay in the UI font. */
+.dialog input, .dialog select { font-family: var(--font-mono); }
 .dialog input:focus, .dialog textarea:focus, .dialog select:focus {
   outline: none;
-  border-color: var(--accent);
+  border-color: var(--ring);
 }
 .dialog textarea { resize: vertical; }
 
-.dialog > label { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: start; margin: 8px 0; }
-.dialog > label > span:first-child { color: var(--dim); padding-top: 5px; }
+.dialog > label { display: grid; grid-template-columns: 78px 1fr; gap: 10px; align-items: start; margin: 10px 0; }
+.dialog > label > span:first-child { color: var(--dim); padding-top: 6px; font-size: 12px; }
 
-.dialog fieldset { border: none; margin: 12px 0 0; padding: 0; }
-.dialog legend { color: var(--dim); padding: 0; margin-bottom: 4px; }
-.dialog .tick { display: flex; align-items: center; gap: 8px; padding: 2px 0; cursor: pointer; }
-.dialog .tick input { width: auto; }
-.dialog .hint { color: var(--dim); }
+.dialog fieldset { border: none; margin: 14px 0 0; padding: 0; }
+.dialog legend { color: var(--dim); padding: 0; margin-bottom: 5px; font-size: 12px; }
+.dialog .tick {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  cursor: pointer;
+  font-size: 12px;
+}
+.dialog .tick input { width: auto; accent-color: var(--primary); }
+.dialog .hint { color: var(--dimmer); font-size: 12px; }
 
 /* The integrations screen. Wider than the create form because every row is a
    name, a state, a description and buttons -- and because a container's own log
    is the one thing here worth reading in full. */
 .dialog.wide { width: 760px; max-height: 82vh; overflow-y: auto; }
 
-.integration { margin-top: 16px; }
+.integration { margin-top: 18px; }
 .integration h3 {
   margin: 0;
-  font-size: 12px;
+  font-size: 11px;
+  font-weight: 500;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--dim);
 }
-.integration > .hint { margin: 2px 0 8px; max-width: 66ch; }
+.integration > .hint { margin: 3px 0 8px; max-width: 66ch; }
 
 .integration .row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding: 6px 0;
+  padding: 7px 0;
   border-top: 1px solid var(--line);
+  font-size: 12px;
 }
-.integration .row-name { min-width: 130px; }
+.integration .row-name { min-width: 130px; font-family: var(--font-mono); }
 .integration .row .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .integration .row-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 /* Inputs in a row are sized, not stretched: `.dialog input` is 100% wide,
@@ -500,13 +1159,14 @@ header .new:disabled { color: var(--dim); cursor: default; }
    into three lines. */
 .integration .row input { width: 190px; }
 .integration .secret-name { width: 170px; }
-.integration .row.new { border-top: 1px dashed var(--line); }
+.integration .row.new { border-top: 1px dashed var(--line-strong); }
 .integration .row .yes { color: var(--ok); }
 .integration .row .no { color: var(--bad); }
+.integration .row .quiet-icon { margin-left: 4px; }
 
 /* An inbox row: the key, the title, what kind and what state, and where to
    start it. The title takes the slack because it is the part you read. */
-.integration .row.task .row-name a { color: var(--accent); text-decoration: none; }
+.integration .row.task .row-name a { color: var(--text); text-decoration: none; }
 .integration .row.task .row-name a:hover { text-decoration: underline; }
 .integration .task-title {
   flex: 1;
@@ -526,23 +1186,24 @@ header .new:disabled { color: var(--dim); cursor: default; }
    grammar the session list uses. `crashing` is the loud one: it is the state
    that used to read as `running`, because Docker reports a container it is
    restarting as up. */
-.mcp-state { font-size: 11px; min-width: 66px; }
+.mcp-state { font-size: 11px; min-width: 66px; font-family: var(--font-mono); }
 .mcp-state.running { color: var(--ok); }
-.mcp-state.crashing, .mcp-state.detached { color: var(--bad); font-weight: 700; }
-.mcp-state.stopped, .mcp-state.absent { color: var(--accent); }
-.mcp-state.unknown, .mcp-state.external { color: var(--dim); }
+.mcp-state.crashing, .mcp-state.detached { color: var(--bad); font-weight: 600; }
+.mcp-state.stopped, .mcp-state.absent { color: var(--warn); }
+.mcp-state.unknown, .mcp-state.external { color: var(--dimmer); }
 
-.integration .problem { flex-basis: 100%; margin: 2px 0 0; color: var(--bad); max-width: 72ch; }
+.integration .problem { flex-basis: 100%; margin: 3px 0 0; color: var(--bad); max-width: 72ch; }
 .integration .log {
   flex-basis: 100%;
-  margin: 6px 0 0;
-  padding: 6px 8px;
+  margin: 7px 0 0;
+  padding: 7px 9px;
   max-height: 9em;
   overflow: auto;
-  background: var(--bg-sunken);
+  background: var(--sunken);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--r-md);
   color: var(--dim);
+  font-family: var(--font-mono);
   font-size: 11px;
   white-space: pre-wrap;
 }
@@ -558,15 +1219,17 @@ header .new:disabled { color: var(--dim); cursor: default; }
    thing in this dialog that changes what the session promises -- and it is a
    statement about the choice rather than an error with it. */
 .dialog .warn {
-  margin: 10px 0 0;
-  padding: 7px 9px;
-  border: 1px solid var(--accent);
-  border-radius: 4px;
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+  background: color-mix(in srgb, var(--warn) 5%, transparent);
+  border-radius: var(--r-md);
   color: var(--text);
+  font-size: 12px;
   max-width: 60ch;
 }
 
-.repos { list-style: none; margin: 8px 0 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+.repos { list-style: none; margin: 10px 0 0; padding: 0; max-height: 46vh; overflow-y: auto; }
 .repos button {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -576,75 +1239,66 @@ header .new:disabled { color: var(--dim); cursor: default; }
   text-align: left;
   background: none;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: var(--r-md);
   color: inherit;
   font: inherit;
-  padding: 6px 8px;
+  font-size: 12px;
+  padding: 7px 9px;
   cursor: pointer;
+  transition: background-color 150ms, border-color 150ms;
 }
-.repos button:hover:not(:disabled) { background: var(--bg-sunken); border-color: var(--line); }
-.repos button:disabled { cursor: default; opacity: 0.55; }
-.repos .name { grid-area: name; }
-.repos .branch { grid-area: branch; color: var(--dim); }
-.repos .path { grid-area: path; color: var(--dim); }
-.repos .origin { grid-area: origin; color: var(--dim); }
-.dialog .none { color: var(--dim); padding: 10px 2px; }
-.dialog > .origin { color: var(--dim); margin: 0 0 8px; overflow-wrap: anywhere; }
+.repos button:hover:not(:disabled) { background: var(--hover); border-color: var(--line); }
+.repos button:disabled { cursor: default; opacity: 0.5; }
+.repos .name { grid-area: name; font-weight: 500; }
+.repos .branch { grid-area: branch; color: var(--dim); font-family: var(--font-mono); font-size: 11px; }
+.repos .path { grid-area: path; color: var(--dim); font-family: var(--font-mono); font-size: 11px; }
+.repos .origin { grid-area: origin; color: var(--dimmer); font-family: var(--font-mono); font-size: 11px; }
+.dialog .none { color: var(--dim); padding: 10px 2px; font-size: 12px; }
+.dialog > .origin { color: var(--dim); margin: 0 0 8px; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
 
-.carried { display: grid; grid-template-columns: 72px 1fr; gap: 2px 10px; margin: 14px 0 0; }
+.carried { display: grid; grid-template-columns: 78px 1fr; gap: 3px 10px; margin: 16px 0 0; font-size: 12px; }
 .carried dt { color: var(--dim); }
-.carried dd { margin: 0; }
+.carried dd { margin: 0; overflow-wrap: anywhere; }
 
 /* The servers this machine is paired with, in the connect dialog. A token is
    not among them: it is a credential, and the webview has no use for one it can
    never present. */
 .paired { list-style: none; margin: 0; padding: 0; }
-.paired li { display: flex; align-items: baseline; gap: 10px; padding: 2px 0; }
-.paired .name { min-width: 110px; }
-.paired .address { color: var(--dim); flex: 1; overflow-wrap: anywhere; }
+.paired li { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 12px; }
+.paired .name { min-width: 110px; font-family: var(--font-mono); }
+.paired .address { color: var(--dim); flex: 1; overflow-wrap: anywhere; font-family: var(--font-mono); }
 .paired .quiet:hover { color: var(--bad); }
 
 /* Nothing selected, or nothing paired yet -- the first thing a new install
    shows, so it is the one screen that has to read as instructions. */
-.empty { margin: auto; max-width: 52ch; padding: 24px; }
-.empty h1 { font-size: 15px; margin: 0 0 10px; }
+.empty { margin: auto; max-width: 54ch; padding: 24px; }
+.empty h1 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
 .empty p { color: var(--dim); }
 .empty pre {
-  background: var(--bg-sunken);
+  background: var(--sunken);
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: var(--r-md);
   color: var(--text);
-  padding: 8px 10px;
+  padding: 10px 12px;
   overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
-.empty code { color: var(--accent); }
-.empty .go {
-  background: var(--accent);
-  border: none;
-  border-radius: 3px;
-  color: #17171d;
-  font: inherit;
-  font-weight: 700;
-  padding: 5px 14px;
-  cursor: pointer;
-}
-.empty .hint { color: var(--dim); }
+.empty code { color: var(--text); font-family: var(--font-mono); background: var(--line); padding: 0 4px; border-radius: 4px; }
+.empty pre code { background: none; padding: 0; }
+.empty .hint { color: var(--dimmer); }
 
-.actions { display: flex; justify-content: flex-end; margin-top: 16px; }
-.actions .go {
-  background: var(--accent);
-  border: none;
-  border-radius: 3px;
-  color: #17171d;
-  font: inherit;
-  font-weight: 700;
-  padding: 5px 14px;
-  cursor: pointer;
-}
-.actions .go:disabled { background: var(--dim); cursor: default; }
+.actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
-/* the icons */
-.icon { flex: none; vertical-align: -2px; }
+/* ------------------------------------------------------------------------- */
+/* icons                                                                     */
+/* ------------------------------------------------------------------------- */
+
+/* `lucide` is the class the library puts on every icon it renders, and the
+   hand-drawn glyphs in icons.tsx take it too so that one rule reaches both.
+   Never shrink and never stretch: an icon in a flex row with a long filename
+   beside it is the first thing the browser will squash. */
+.lucide { flex: none; }
 /* Colour by what the file is, dim enough that the name is still the thing you
    read. The page outline stays neutral so a directory of mixed kinds does not
    look like a paint chart. */
@@ -652,14 +1306,17 @@ header .new:disabled { color: var(--dim); cursor: default; }
 .kind-code { color: #61afef; }
 .kind-shell { color: #98c379; }
 .kind-config { color: #c586c0; }
-.kind-lock { color: #7d7d8a; }
+.kind-lock { color: #6f6f7c; }
 .kind-doc { color: #9aa4b8; }
 .kind-style { color: #56b6c2; }
 .kind-image { color: #e5c07b; }
 .kind-plain { color: #6f6f7c; }
 
-/* the terminal */
-.terminal { height: 100%; width: 100%; background: var(--bg-sunken); }
+/* ------------------------------------------------------------------------- */
+/* the terminal                                                              */
+/* ------------------------------------------------------------------------- */
+
+.terminal { height: 100%; width: 100%; background: var(--sunken); }
 .terminal .xterm { height: 100%; padding: 6px 8px; }
 
 /* Where the engine could not measure the font, xterm's rows are drawn two

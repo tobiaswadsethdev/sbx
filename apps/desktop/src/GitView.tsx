@@ -99,7 +99,7 @@ export function GitView({
           {status.upstream ? "push" : "publish"}
         </button>
         <button className="quiet" disabled={busy} onClick={load} title="refresh">
-          <Refresh title="refresh" />
+          <Refresh aria-label="refresh" />
         </button>
       </div>
 
@@ -111,14 +111,14 @@ export function GitView({
         entries={status.staged}
         busy={busy}
         onOpen={(p) => onOpenDiff(p, "staged")}
-        action={{ icon: <Minus title="unstage" />, title: "unstage", run: (path) => void act({ do: "unstage", path }) }}
+        action={{ icon: <Minus aria-label="unstage" />, title: "unstage", run: (path) => void act({ do: "unstage", path }) }}
       />
       <Section
         title="changes"
         entries={status.unstaged}
         busy={busy}
         onOpen={(p) => onOpenDiff(p, "worktree")}
-        action={{ icon: <Plus title="stage" />, title: "stage", run: (path) => void act({ do: "stage", path }) }}
+        action={{ icon: <Plus aria-label="stage" />, title: "stage", run: (path) => void act({ do: "stage", path }) }}
         discard={(path) =>
           void act(
             { do: "discard", path },
@@ -180,7 +180,7 @@ function Section({
           </button>
           {discard && (
             <button className="act" disabled={busy} title="discard" onClick={() => discard(e.path)}>
-              <Revert title="discard" />
+              <Revert aria-label="discard" />
             </button>
           )}
           <button className="act" disabled={busy} title={action.title} onClick={() => action.run(e.path)}>

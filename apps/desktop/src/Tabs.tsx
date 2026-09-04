@@ -88,19 +88,19 @@ export function Tabs({
                   title="close this shell, and whatever is running in it"
                   onClick={() => onCloseShell(shell)}
                 >
-                  <Close title="close" />
+                  <Close aria-label="close" />
                 </button>
               )}
               {file && (
                 <button className="close" title="close" onClick={() => onCloseFile(file)}>
-                  <Close title="close" />
+                  <Close aria-label="close" />
                 </button>
               )}
             </span>
           );
         })}
         <button className="add" title="another shell in this sandbox" onClick={onNewShell}>
-          <Plus title="new shell" />
+          <Plus aria-label="new shell" />
         </button>
       </nav>
 

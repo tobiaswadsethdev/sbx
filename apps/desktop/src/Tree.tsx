@@ -10,10 +10,23 @@
 // terminal, which has none -- are grouped by their clone URL at the bottom
 // rather than hidden or forced into one. `sbx new` is not going away, and a
 // worktree started from it should still be reachable here.
+//
+// The shape of a row is Orca's, and deliberately: a card rather than a line,
+// inset from the edge, with the agent's state in a fixed column to the left of
+// the name and the facts about the branch on a second line under it. A line
+// per session is the right thing when a session is a name; it stops being
+// right once a session is a name, a state, a branch, a diff and an age, which
+// on one line is five columns fighting over 240 pixels. What the card buys is
+// that the state and the name are the only things at full contrast, so the list
+// is scannable without being read -- see `style.css`, where every surface
+// treatment on it lives.
 
+import { useState } from "react";
+
+import type { DiffStat } from "./gen/DiffStat";
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
-import { Close, Plus } from "./icons";
+import { Branch, Chevron, Forget, Plus, StateDot, Unsandboxed } from "./icons";
 
 export type Group = {
   /// The project, or `null` for the by-repository groups at the bottom.
@@ -56,82 +69,192 @@ function shortRepo(repo: string): string {
   return parts.slice(-2).join("/") || repo;
 }
 
+/// A group's key, and the identity the collapsed set is kept under. The same
+/// expression the `key` prop uses, named because two places must agree on it.
+function keyOf(g: Group): string {
+  return g.project?.name ?? `repo:${g.hint}`;
+}
+
 export function Tree({
   groups,
+  stats,
   selected,
   onSelect,
   onNewWorktree,
   onForget,
 }: {
   groups: Group[];
+  /// Each worktree's diff against its base, by session name, as the last poll
+  /// reported it. Absent for a session that has not been polled yet, which is
+  /// a different thing from a session with no changes and is why the row shows
+  /// nothing rather than `+0/-0`.
+  stats: Record<string, DiffStat | null>;
   selected: string | null;
   onSelect: (name: string) => void;
   onNewWorktree: (project: Project) => void;
   onForget: (project: Project) => void;
 }) {
-  return (
-    <nav className="tree">
-      {groups.map((g) => (
-        <section key={g.project?.name ?? `repo:${g.hint}`} className="group">
-          <header title={g.hint}>
-            <span className={`label${g.project ? "" : " loose"}`}>{g.label}</span>
-            {g.project ? (
-              <>
-                <button
-                  className="add"
-                  title="new worktree in this project"
-                  onClick={() => onNewWorktree(g.project!)}
-                >
-                  <Plus title="new worktree" />
-                </button>
-                <button
-                  className="add"
-                  title="forget this project (its worktrees stay)"
-                  onClick={() => onForget(g.project!)}
-                >
-                  <Close title="forget project" />
-                </button>
-              </>
-            ) : (
-              // No `+` here on purpose: there is no project to start one in.
-              // Making one from this group would guess which checkout on the
-              // server the URL meant, and there may be several.
-              <span className="add none" title="not a project — created outside the workspace">
-                ·
-              </span>
-            )}
-          </header>
+  // Which groups are shut. Held as the collapsed set rather than the open one
+  // so a project that appears while the window is open -- created here, or by
+  // someone else against the same server -- comes in expanded: the reason it
+  // just appeared is usually that you asked for it.
+  const [shut, setShut] = useState<ReadonlySet<string>>(new Set());
+  const toggle = (key: string) =>
+    setShut((all) => {
+      const next = new Set(all);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
 
-          {g.worktrees.length === 0 ? (
-            <p className="empty-group">no worktrees yet</p>
-          ) : (
-            g.worktrees.map((s) => (
+  return (
+    <nav className="tree scrollbar-sleek" aria-label="projects and worktrees">
+      {groups.map((g) => {
+        const key = keyOf(g);
+        const open = !shut.has(key);
+        return (
+          <section key={key} className="group">
+            {/* The toggle and the actions are siblings rather than nested: a
+                button inside a button is not markup a browser will honour, and
+                the alternative -- a div with a click handler -- gives up the
+                keyboard and the focus ring that make the reveal below safe. */}
+            <header className="group-head">
               <button
-                key={s.name}
-                className={`worktree${s.name === selected ? " on" : ""}`}
-                onClick={() => onSelect(s.name)}
+                className="group-toggle"
+                aria-expanded={open}
+                title={g.hint}
+                onClick={() => toggle(key)}
               >
-                <span className="name">
-                  {s.name}
-                  {/* A worktree session runs on the server with the server's
-                      own rights, and the list is the first place that has to
-                      say so: a product whose pitch is isolation cannot have a
-                      kind of session that looks like every other row. */}
-                  {s.backend === "worktree" && (
-                    <span className="badge" title="no sandbox: runs on the server with its rights">
-                      worktree
-                    </span>
-                  )}
-                </span>
-                <span className={`state ${s.state}`}>{s.state}</span>
-                <span className="branch">{s.work_branch}</span>
-                <span className="age">{age(s.created_at)}</span>
+                <Chevron open={open} className="group-twist" />
+                <span className={`group-label${g.project ? "" : " loose"}`}>{g.label}</span>
+                <span className="group-count">{g.worktrees.length}</span>
               </button>
-            ))
-          )}
-        </section>
-      ))}
+
+              {g.project ? (
+                // Hidden until the group is hovered or something inside it has
+                // focus -- see `style.css`. A row of controls beside every
+                // project is a row of controls you read past; the ones here
+                // are for the moment you have decided to act on *this* project
+                // and are already pointing at it.
+                <span className="group-actions">
+                  <button
+                    className="quiet-icon"
+                    title="new worktree in this project"
+                    onClick={() => onNewWorktree(g.project!)}
+                  >
+                    <Plus aria-label="new worktree" />
+                  </button>
+                  <button
+                    className="quiet-icon danger"
+                    title="forget this project (its worktrees stay)"
+                    onClick={() => onForget(g.project!)}
+                  >
+                    <Forget aria-label="forget project" />
+                  </button>
+                </span>
+              ) : (
+                // No `+` here on purpose: there is no project to start one in.
+                // Making one from this group would guess which checkout on the
+                // server the URL meant, and there may be several.
+                <span
+                  className="group-note"
+                  title="not a project — created outside the workspace"
+                >
+                  external
+                </span>
+              )}
+            </header>
+
+            {open &&
+              (g.worktrees.length === 0 ? (
+                <p className="empty-group">no worktrees yet</p>
+              ) : (
+                g.worktrees.map((s) => (
+                  <Worktree
+                    key={s.name}
+                    session={s}
+                    stat={stats[s.name] ?? null}
+                    on={s.name === selected}
+                    onSelect={onSelect}
+                  />
+                ))
+              ))}
+          </section>
+        );
+      })}
     </nav>
+  );
+}
+
+function Worktree({
+  session: s,
+  stat,
+  on,
+  onSelect,
+}: {
+  session: Session;
+  stat: DiffStat | null;
+  on: boolean;
+  onSelect: (name: string) => void;
+}) {
+  return (
+    <button
+      className={`worktree${on ? " on" : ""}`}
+      // `aria-current` rather than `aria-pressed`: this is which of several
+      // things is being shown, not a control that is held down.
+      aria-current={on ? "page" : undefined}
+      onClick={() => onSelect(s.name)}
+    >
+      <span className="wt-state">
+        <StateDot state={s.state} />
+      </span>
+
+      <span className="wt-body">
+        <span className="wt-head">
+          <span className="wt-name">{s.name}</span>
+          {/* A worktree session runs on the server with the server's own
+              rights, and the list is the first place that has to say so: a
+              product whose pitch is isolation cannot have a kind of session
+              that looks like every other row. Spelled out rather than reduced
+              to the icon beside it, which would be a mark you have to have
+              been taught. */}
+          {s.backend === "worktree" && (
+            <span className="wt-bare" title="no sandbox: runs on the server with its rights">
+              <Unsandboxed />
+              unsandboxed
+            </span>
+          )}
+        </span>
+
+        <span className="wt-meta">
+          <Branch className="wt-branch-icon" />
+          <span className="wt-branch">{s.work_branch}</span>
+          {stat && <Stat stat={stat} />}
+          <span className="wt-age" title="how long this worktree has existed">
+            {age(s.created_at)}
+          </span>
+        </span>
+      </span>
+    </button>
+  );
+}
+
+/// How far this worktree has diverged, in the three numbers the poll already
+/// pays for. Rendered as spans rather than one string so the added and removed
+/// counts can be coloured the way they are everywhere else in the window, and
+/// suppressed entirely when all three are zero: `+0/-0` is a fact nobody needs
+/// on eleven rows at once.
+function Stat({ stat }: { stat: DiffStat }) {
+  if (stat.added === 0 && stat.removed === 0 && stat.untracked === 0) return null;
+  return (
+    <span className="wt-stat" title="against the base branch">
+      {stat.added > 0 && <span className="added">+{stat.added}</span>}
+      {stat.removed > 0 && <span className="removed">−{stat.removed}</span>}
+      {stat.untracked > 0 && (
+        <span className="untracked" title={`${stat.untracked} untracked`}>
+          ?{stat.untracked}
+        </span>
+      )}
+    </span>
   );
 }
 

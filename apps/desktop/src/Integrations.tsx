@@ -167,7 +167,7 @@ export function IntegrationsDialog({
                         void act(`skill:${s.name}`, () => api.forgetSkill(server, s.name))
                       }
                     >
-                      <Close title="forget" />
+                      <Close aria-label="forget" />
                     </button>
                   </div>
                 ))
@@ -309,7 +309,7 @@ function SecretRow({
         </button>
         {secret.set && (
           <button className="quiet" disabled={working} onClick={onForget} title="forget it">
-            <Close title="forget" />
+            <Close aria-label="forget" />
           </button>
         )}
       </span>

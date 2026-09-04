@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, messageOf, type Paired, type ServerSummary } from "./api";
 import { ConnectDialog } from "./Connect";
 import { Dock } from "./Dock";
+import { Inbox, Integrations, NewProject, Servers } from "./icons";
 import { InboxDialog } from "./Inbox";
 import { IntegrationsDialog } from "./Integrations";
 import type { Project } from "./gen/Project";
@@ -199,6 +200,18 @@ export default function App() {
   }, [live]);
 
   const groups = useMemo(() => group(projects, live), [projects, live]);
+
+  // The diff each worktree carries, lifted out of the polls for the tree.
+  //
+  // A projection rather than the whole record: `Poll` also carries the agent's
+  // captured screen, and handing the tree a prop it does not read would make
+  // the tree's own types claim it might. `polls` is a new object on every
+  // status frame, so this recomputes about as often either way -- the point is
+  // the narrower prop, not a saved comparison.
+  const stats = useMemo(
+    () => Object.fromEntries(Object.entries(polls).map(([name, poll]) => [name, poll.stat])),
+    [polls],
+  );
   const session = sessions.find((s) => s.name === selected) ?? null;
 
   // Asked once per worktree as it is selected. Not polled: a shell appears
@@ -306,9 +319,11 @@ export default function App() {
           </span>
         ))}
         <button className="new" disabled={!server} onClick={() => setShowingInbox(true)}>
+          <Inbox />
           inbox
         </button>
         <button className="new" disabled={!server} onClick={() => setCreatingProject(true)}>
+          <NewProject />
           new project
         </button>
         <button
@@ -316,9 +331,11 @@ export default function App() {
           disabled={!server}
           onClick={() => setShowingIntegrations(true)}
         >
+          <Integrations />
           integrations
         </button>
         <button className="new" onClick={() => setConnecting(true)}>
+          <Servers />
           servers
         </button>
         {error && <span className="error">{error}</span>}
@@ -327,6 +344,7 @@ export default function App() {
       <main>
         <Tree
           groups={groups}
+          stats={stats}
           selected={selected}
           onSelect={setSelected}
           onNewWorktree={setCreatingIn}
