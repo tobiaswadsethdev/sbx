@@ -1,32 +1,184 @@
-// The icons, as inline SVG.
+// The icons: lucide, pinned to one grid, plus the file-kind glyphs it has no
+// equivalent for.
 //
-// Drawn here rather than pulled in, for the reason most of this repository
-// avoids a dependency: an icon set is a font or a package of a thousand glyphs
-// to use fifteen, and each one arrives with its own idea of stroke weight and
-// optical size. These are one grid, one stroke, and they inherit `currentColor`
-// so a state colour on the parent is the icon's colour too.
+// This file used to argue against an icon set, and the argument was really
+// about consistency rather than about packages: a set arrives with its own idea
+// of optical size and stroke weight, and fifteen icons from it beside fifteen
+// drawn here would read as two families. `LucideProvider` in `main.tsx`
+// settles that centrally -- every lucide icon in the window renders at one size
+// and one stroke, whatever the library's own defaults are -- so the objection
+// is answered rather than accepted. What is left of the old argument is the
+// bottom half of this file, which stays hand-drawn because it has to.
 //
-// Monaco does bundle codicons, and reusing them was the obvious alternative.
-// It would tie the window's chrome to a version of an editor it happens to
-// embed, and the file tree would change shape the day Monaco is swapped.
+// `absoluteStrokeWidth` is the part that makes the pinning work. lucide draws
+// on a 24-grid and scales the stroke with the icon, so one `strokeWidth` at
+// 14px and at 20px are two different weights on screen; with it set, the number
+// *is* the rendered width in pixels, and an icon can be resized without
+// changing weight. See `ICON_STROKE` below.
+//
+// Monaco does bundle codicons, and reusing them was still the wrong
+// alternative: it would tie the window's chrome to a version of an editor it
+// happens to embed, and the file tree would change shape the day Monaco is
+// swapped.
+
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  CircleCheck,
+  CircleQuestionMark,
+  Folder as FolderClosed,
+  FolderOpen,
+  FolderPlus,
+  GitBranch,
+  Inbox as InboxGlyph,
+  Plug,
+  Plus as PlusGlyph,
+  Minus as MinusGlyph,
+  RefreshCw,
+  Server as ServerGlyph,
+  ShieldOff,
+  Trash,
+  Undo2,
+  X,
+} from "lucide-react";
+
+import type { State } from "./gen/State";
+
+/// The grid every icon in this window is on: 14 pixels across, with a stroke
+/// of `ICON_STROKE` *actual* pixels. Applied to lucide through its provider in
+/// `main.tsx` and to the hand-drawn glyphs below by hand, which is the whole
+/// reason both numbers are named here rather than written twice.
+export const ICON_SIZE = 14;
+/// 1.25 rather than lucide's 2. The window's text is 12 and 13 pixels, and a
+/// two-pixel stroke beside it reads as bold -- which is what an icon set at its
+/// default weight looks like dropped into an interface built at this scale.
+export const ICON_STROKE = 1.25;
+
+// The chrome, renamed for what it does here rather than what lucide calls it.
+// A rename per icon is worth it: `Forget` says which button it is on and
+// `Trash` does not, and the day one is swapped for a better glyph the change is
+// one line in this file instead of a find-and-replace across the app.
+export const Plus = PlusGlyph;
+export const Minus = MinusGlyph;
+export const Close = X;
+export const Revert = Undo2;
+export const Refresh = RefreshCw;
+export const Branch = GitBranch;
+export const Inbox = InboxGlyph;
+export const Integrations = Plug;
+export const Servers = ServerGlyph;
+export const NewProject = FolderPlus;
+export const Forget = Trash;
+/// A session with no sandbox around it. There is no `Sandboxed` beside it on
+/// purpose: sandboxed is what every session is, and a mark on the rule as well
+/// as on the exception is a mark that says nothing. See `Tree.tsx`.
+export const Unsandboxed = ShieldOff;
 
 type Props = { className?: string; title?: string };
 
-/// One 16-grid, 1.4 stroke, round caps. Every icon below is this frame.
+/// A directory, open or shut. Two glyphs behind one prop, because the caller
+/// has a boolean and not a choice of icon.
+export const Folder = ({ open, ...p }: Props & { open: boolean }) =>
+  open ? <FolderOpen {...p} /> : <FolderClosed {...p} />;
+
+/// The file tree's twisty. Down when expanded, right when not -- the rotation
+/// is two glyphs rather than a CSS transform so the stroke ends stay on the
+/// pixel grid at 14px.
+export const Chevron = ({ open, ...p }: Props & { open: boolean }) =>
+  open ? <ChevronDown {...p} /> : <ChevronRight {...p} />;
+
+/// What the agent in a session is doing, as one fixed-size mark.
+///
+/// Fixed-size is the requirement, not a detail: this sits in a column to the
+/// left of every worktree's name, and a mark that changed size with the state
+/// would shuffle the name of every row each time an agent started or stopped.
+/// Every branch below therefore renders into the same 14-pixel box.
+///
+/// The colours are in `style.css`, keyed on the state name, for the same reason
+/// the palette is: one place to change what `waiting` looks like.
+export function StateDot({ state, className }: { state: State; className?: string }) {
+  const box = `state-dot ${state} ${className ?? ""}`;
+
+  switch (state) {
+    // In progress, and the two are worth telling apart: `running` is an agent
+    // working, `creating`/`seeding` is the sandbox not being there yet. Same
+    // spinner, different hue, because the thing you do about them is the same
+    // -- wait -- and the thing they mean is not.
+    case "running":
+    case "creating":
+    case "seeding":
+      return (
+        <span className={box} role="img" aria-label={state}>
+          <span className="spinner" />
+        </span>
+      );
+
+    // The one state the window exists to tell you about, so it gets a glyph
+    // rather than a dot: a shape is findable in a list of twelve rows in a way
+    // that a colour is not, and it is the row you are *not* looking at.
+    case "waiting":
+      return (
+        <span className={box} role="img" aria-label="waiting for input">
+          <CircleQuestionMark />
+        </span>
+      );
+
+    case "published":
+      return (
+        <span className={box} role="img" aria-label="published">
+          <CircleCheck />
+        </span>
+      );
+
+    case "failed":
+    case "dead":
+      return (
+        <span className={box} role="img" aria-label={state}>
+          <CircleAlert />
+        </span>
+      );
+
+    // Healthy and doing nothing. A plain dot, and deliberately the quietest
+    // mark here: it is what most rows are most of the time, and a list where
+    // every row draws attention has none left for the row that should.
+    default:
+      return (
+        <span className={box} role="img" aria-label={state}>
+          <span className="dot" />
+        </span>
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The file-kind glyphs, still drawn by hand.
+//
+// Not stubbornness: what these encode is "rust", "lock file", "config", which
+// is a judgement about a filename rather than a picture, and no set ships it.
+// lucide has a page and a folder; it does not have "this is the lock file, do
+// not read it". They are on the same 14-pixel grid and the same stroke as
+// everything above, taken from the constants rather than repeated, so a page
+// from here beside a chevron from lucide is one family.
+// ---------------------------------------------------------------------------
+
+/// The frame the glyphs below are drawn in: a 16 viewBox rendered at
+/// `ICON_SIZE`, with the stroke pre-divided so it lands on `ICON_STROKE`
+/// actual pixels -- the same arithmetic lucide's `absoluteStrokeWidth` does.
 function Svg({ children, className, title }: Props & { children: React.ReactNode }) {
   return (
     <svg
-      className={`icon ${className ?? ""}`}
+      className={`lucide ${className ?? ""}`}
       viewBox="0 0 16 16"
-      width="14"
-      height="14"
+      width={ICON_SIZE}
+      height={ICON_SIZE}
       fill="none"
       stroke="currentColor"
-      strokeWidth="1.4"
+      strokeWidth={(ICON_STROKE * 16) / ICON_SIZE}
       strokeLinecap="round"
       strokeLinejoin="round"
-      // Decorative by default: the label beside it is the name. A title is set
-      // only where the icon is the whole control.
+      // Decorative by default: the filename beside it is the name. A title is
+      // set only where the icon is the whole control.
       aria-hidden={title ? undefined : true}
       role={title ? "img" : undefined}
     >
@@ -35,55 +187,6 @@ function Svg({ children, className, title }: Props & { children: React.ReactNode
     </svg>
   );
 }
-
-export const Plus = (p: Props) => (
-  <Svg {...p}>
-    <path d="M8 3.5v9M3.5 8h9" />
-  </Svg>
-);
-
-export const Minus = (p: Props) => (
-  <Svg {...p}>
-    <path d="M3.5 8h9" />
-  </Svg>
-);
-
-export const Close = (p: Props) => (
-  <Svg {...p}>
-    <path d="M4 4l8 8M12 4l-8 8" />
-  </Svg>
-);
-
-/// Discard: an arrow going back on itself.
-export const Revert = (p: Props) => (
-  <Svg {...p}>
-    <path d="M3 8a5 5 0 1 1 1.7 3.8" />
-    <path d="M3 4.5V8h3.5" />
-  </Svg>
-);
-
-export const Refresh = (p: Props) => (
-  <Svg {...p}>
-    <path d="M13 8a5 5 0 1 1-1.7-3.8" />
-    <path d="M13 3v3.5H9.5" />
-  </Svg>
-);
-
-export const Chevron = ({ open, ...p }: Props & { open: boolean }) => (
-  <Svg {...p}>{open ? <path d="M4 6.5l4 4 4-4" /> : <path d="M6.5 4l4 4-4 4" />}</Svg>
-);
-
-export const Folder = ({ open, ...p }: Props & { open: boolean }) =>
-  open ? (
-    <Svg {...p}>
-      <path d="M2 12.5V4a1 1 0 0 1 1-1h3l1.5 2H12a1 1 0 0 1 1 1v1" />
-      <path d="M2 12.5L3.8 7.5H14.5L12.7 12.5z" />
-    </Svg>
-  ) : (
-    <Svg {...p}>
-      <path d="M2 12.5V4a1 1 0 0 1 1-1h3l1.5 2H13a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" />
-    </Svg>
-  );
 
 /// A page with a folded corner. The base every file icon is drawn on, so an
 /// unknown extension is the same shape as a known one rather than nothing.
