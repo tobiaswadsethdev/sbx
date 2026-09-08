@@ -27,8 +27,8 @@ cargo build
 cargo test --workspace                                    # 539 tests
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
-cargo run -- doctor                                       # the CLI, from the tree
-cargo run                                                 # the TUI, from the tree
+cargo run -p sbxd -- doctor                               # the CLI, from the tree
+cargo run -p sbxd -- serve                                # the server, from the tree
 ```
 
 CI runs exactly those last three checks on the **newest stable**, so
@@ -56,9 +56,10 @@ The code has a voice, and matching it is most of what review here is about.
   behind `#[ignore]`. Pane classification is tested against captured specimens
   in `crates/sbx-core/tests/panes/`; add a specimen rather than a mock when you are
   teaching it a new agent state.
-* **No I/O on the render thread.** Gateway calls belong to `tui/worker.rs`; the
-  UI sends a `Request` and drains an `Update`.
-* **Failures name their fix.** `sbx doctor` checks and error messages both say
+* **No I/O on a render path.** Gateway calls are subprocess round trips costing
+  hundreds of milliseconds. They belong behind `sbx-core`, reached over `/rpc`;
+  nothing that paints may make one.
+* **Failures name their fix.** `sbxd doctor` checks and error messages both say
   what to do about the problem, not just that there is one. A misspelled config
   key is named back at the user; a stale provider is reported before it becomes
   a clone failure three steps later.
@@ -88,7 +89,7 @@ increments.
 
 ## Releasing
 
-Releases are what `install.sh` and `sbx update` install, and both find them by
+Releases are what `install.sh` and `sbxd update` install, and both find them by
 name. Cutting one is a dispatch of **Tag a release**
 (`.github/workflows/tag.yml`) from the Actions tab, with `patch`, `minor` or
 `major` -- or an exact version if the increment is not the point. It works out
@@ -108,7 +109,7 @@ cargo workspaces:
 | `apps/desktop/src-tauri/tauri.conf.json` | what Windows shows in Add or Remove Programs |
 
 Bumping them by hand is the reason this is a workflow. `v0.3.0` was tagged with
-all seven still reading `0.2.0`, and `sbx update` refuses a release whose binary
+all seven still reading `0.2.0`, and `sbxd update` refuses a release whose binary
 reports a different version than the tag claims -- so the current `latest` is
 one no installed copy can update to. The workflow writes all seven from one
 number and refuses to tag if the diff touches anything else.
@@ -128,11 +129,20 @@ to do it.
 
 `.github/workflows/release.yml` builds a static musl binary for
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, packs each as
-`sbx-<tag>-<target>.tar.gz` with `sbx` and `sbxd` flat at the root, and publishes them
-with one `SHA256SUMS` covering both. Three files have to agree about those names
--- the workflow, `install.sh` and `crates/sbx-core/src/update.rs` -- and a test in
-`update.rs` fails if they ever stop agreeing, so a rename in one of them is
-caught locally rather than by someone's broken install.
+`sbxd-<tag>-<target>.tar.gz` with `sbxd` flat at the root, and publishes them
+with one `SHA256SUMS` covering both. Three files have to agree about that name
+and about what is inside the archive -- the workflow, `install.sh` and
+`crates/sbx-core/src/update.rs` -- and a test in `update.rs` fails if they ever
+stop agreeing, so a rename in one of them is caught locally rather than by
+someone's broken install.
+
+The asset was `sbx-<tag>-<target>.tar.gz` until v0.4.0, and carried `sbx`.
+Nothing installed before then can update across that rename: `sbx update`
+replaces the binary it is running, and there is no longer an `sbx` to replace
+it with. It fails saying the release has no asset by the name it wants, which
+is true, and the way across is one `install.sh`. v0.3.1 is the last release the
+old updater can reach, and it puts `sbxd` on the machine, so there is a working
+`sbxd update` waiting on the other side.
 
 Until the first tag exists there is nothing to download, and both installers
 say so and fall back to building from source. That is the intended behaviour,
@@ -140,7 +150,7 @@ not a gap to work around.
 
 ## Reporting bugs
 
-The single most useful thing to include is `sbx doctor` output -- it captures
+The single most useful thing to include is `sbxd doctor` output -- it captures
 the versions and half the environment problems at once. The issue templates ask
 for that, plus what you expected and what happened instead.
 

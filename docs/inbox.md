@@ -57,11 +57,11 @@ Then store the credentials:
 
 ```sh
 printf %s "$JIRA_API_TOKEN" | sbxd secret JIRA_API_TOKEN
-sbx tasks                                 # the inbox, from a terminal
+sbxd tasks                                 # the inbox, from a terminal
 sbx --server=<name> tasks                 # ... or from a client
 ```
 
-`sbx doctor` says when a tracker names a secret the store does not have, because
+`sbxd doctor` says when a tracker names a secret the store does not have, because
 that produces an inbox **silently missing its rows** — which looks exactly like
 having nothing assigned to you.
 

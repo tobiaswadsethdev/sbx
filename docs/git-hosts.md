@@ -1,13 +1,13 @@
 # Git hosts
 
 GitHub and Azure DevOps, detected from the repo URL rather than configured.
-`sbx publish` pushes the work branch and opens a pull request from *inside* the
+`sbxd publish` pushes the work branch and opens a pull request from *inside* the
 sandbox, so the host never holds the credential:
 
 ```sh
-sbx new --repo 'https://dev.azure.com/org/project/_git/repo' \
+sbxd new --repo 'https://dev.azure.com/org/project/_git/repo' \
         --task "..." --provider azure-pat --provider claude-oauth
-sbx publish <name>          # -> https://dev.azure.com/org/project/_git/repo/pullrequest/10
+sbxd publish <name>          # -> https://dev.azure.com/org/project/_git/repo/pullrequest/10
 ```
 
 Credentials come from OpenShell providers, and the sandbox never sees them: the

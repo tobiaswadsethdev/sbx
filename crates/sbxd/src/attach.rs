@@ -1,9 +1,10 @@
 //! Handing the local terminal to the agent, and taking it back.
 //!
-//! Shared by `sbx attach` and the TUI rather than living in the core, because
-//! it is the one part of attaching that is about *this* terminal: a client
-//! driving a session from somewhere else has its own pty to manage and no use
-//! for raw mode here. What the core keeps is
+//! Kept out of the core because it is the one part of attaching that is about
+//! *this* terminal: a client driving a session from somewhere else has its own
+//! pty to manage and no use for raw mode here. It was shared with the terminal
+//! interface until that went in v0.4.0; `sbxd attach` is the only caller now,
+//! and `crossterm` is a direct dependency because `ratatui` used to supply it. What the core keeps is
 //! [`sbx_core::ops::attach_argv`] -- the command that attaches, which the
 //! session's backend decides and which is the same wherever it is run from.
 
@@ -30,8 +31,7 @@ use sbx_core::session::Session;
 ///
 /// The symptom is an agent that echoes what you type and ignores every key that
 /// matters, which reads as the agent being stuck rather than as the terminal
-/// being wrong. `sbx attach` and the TUI's attach share this for that reason:
-/// two copies would be one fixed and one not.
+/// being wrong.
 ///
 /// The guard restores the terminal on every path out, including a panic, and a
 /// terminal that cannot be put into raw mode -- output redirected, no tty --
@@ -54,14 +54,12 @@ struct RawMode(());
 
 impl RawMode {
     fn enter() -> Option<Self> {
-        ratatui::crossterm::terminal::enable_raw_mode()
-            .ok()
-            .map(RawMode)
+        crossterm::terminal::enable_raw_mode().ok().map(RawMode)
     }
 }
 
 impl Drop for RawMode {
     fn drop(&mut self) {
-        let _ = ratatui::crossterm::terminal::disable_raw_mode();
+        let _ = crossterm::terminal::disable_raw_mode();
     }
 }

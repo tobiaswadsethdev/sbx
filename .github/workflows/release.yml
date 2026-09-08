@@ -1,6 +1,6 @@
 name: Release
 
-# Tag a version and this publishes the binaries `install.sh` and `sbx update`
+# Tag a version and this publishes the binary `install.sh` and `sbxd update`
 # download, plus the Windows desktop installer.
 #
 # The tag is normally not made by hand: `tag.yml` bumps the seven files that
@@ -83,45 +83,44 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Both halves of the Linux side. `docs/server.md` has people running
-      # `~/.local/bin/sbxd` under systemd, and until now the only way to get
-      # that file was `cargo install --path crates/sbxd` -- a Rust toolchain, on
-      # the box whose whole job is to not need one.
+      # The whole Linux side, in one binary. `sbx` was a second one until
+      # v0.4.0, when it folded into this: two front ends onto one set of
+      # sessions cost more than the terminal one was worth.
       - name: Build
-        run: cargo build --release --locked --bin sbx --bin sbxd --target ${{ matrix.target }}
+        run: cargo build --release --locked --bin sbxd --target ${{ matrix.target }}
 
       - name: Package
         run: |
           set -eu
           bin="target/${{ matrix.target }}/release"
-          # Ask each one what it is. A binary built from the wrong commit
-          # answers the wrong version, and that is cheaper to find out here
-          # than in `sbx update`, which refuses the swap over exactly this.
-          "$bin/sbx" --version
+          # Ask it what it is. A binary built from the wrong commit answers the
+          # wrong version, and that is cheaper to find out here than in
+          # `sbxd update`, which refuses the swap over exactly this.
           "$bin/sbxd" --version
-          # Flat at the root of the archive, both of them. One tarball and not
-          # two: it is one download to verify, and `sbx` and `sbxd` are the same
-          # build of the same protocol -- shipping them separately invites a
-          # machine that has one of each.
+          # Flat, one file at the root of the archive: install.sh and
+          # `sbxd update` both expect to find `sbxd` and nothing else.
           #
-          # Adding `sbxd` beside `sbx` does not break the installers that came
-          # before it. Both look the extracted `sbx` up by name and neither
-          # minds a second file being there, so an `sbx update` from v0.3.0
-          # reads this archive exactly as it read the last one.
-          tar -czf "sbx-${TAG}-${{ matrix.target }}.tar.gz" -C "$bin" sbx sbxd
-          sha256sum "sbx-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
+          # The asset is named after what it holds, so it changed name in
+          # v0.4.0 along with the binary. Nothing older can follow that -- an
+          # `sbx update` replaces the binary it is running and there is no
+          # longer an `sbx` to replace it with -- so it fails saying this
+          # release has no `sbx-...tar.gz`, which is true. v0.3.1 is the last
+          # release the old updater can reach, and it installs `sbxd`, so the
+          # way across is one `install.sh` and never again.
+          tar -czf "sbxd-${TAG}-${{ matrix.target }}.tar.gz" -C "$bin" sbxd
+          sha256sum "sbxd-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sbx-${{ matrix.target }}
+          name: sbxd-${{ matrix.target }}
           path: |
-            sbx-${{ env.TAG }}-${{ matrix.target }}.tar.gz
+            sbxd-${{ env.TAG }}-${{ matrix.target }}.tar.gz
             ${{ matrix.target }}.sha256
           if-no-files-found: error
 
   # The desktop application for Windows, which is the one platform where there
-  # is nothing else to install: `sbx` and `sbxd` need a gateway, a Docker daemon
-  # and tmux, so the Windows side is the window and nothing but the window. It
+  # is nothing else to install: `sbxd` needs a gateway, a Docker daemon and
+  # tmux, so the Windows side is the window and nothing but the window. It
   # pairs with a server from its own connect dialog rather than from a CLI --
   # see docs/desktop.md -- which is what makes an installer on its own useful.
   #

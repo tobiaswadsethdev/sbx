@@ -15,10 +15,10 @@ isolation is the product.
 account. It reads that account's files, uses its git credentials, and reaches
 whatever the network allows it to reach. There is no gateway in the path, so:
 
-* **no policy.** `sbx policy <name>` says so rather than printing rules, and the
+* **no policy.** `sbxd policy <name>` says so rather than printing rules, and the
   window's policy pane says so where the rules would be.
 * **no allow/deny feed.** Nothing is deciding anything, so there is nothing to
-  report. `sbx events` and the events pane say that too.
+  report. `sbxd events` and the events pane say that too.
 * **no credential swap.** A provider is a secret the *gateway* substitutes into
   an outgoing request, which is what keeps a token off the sandbox filesystem.
   A worktree session pushes with the server's own git credentials, and its agent
@@ -30,7 +30,7 @@ fills in; on a worktree session it is a plain `git push` as the server's user.
 Same outcome, materially different guarantee.
 
 Everything that shows a session says which kind it is: a `worktree` badge in the
-window's tree and beside the branch in the TUI, a `KIND` column in `sbx ls`, and
+window's tree, a `KIND` column in `sbxd ls`, and
 an `isolation` row in the facts pane.
 
 ## What you get
@@ -58,7 +58,7 @@ involved.
 From the terminal:
 
 ```sh
-sbx new --worktree --repo ~/dev/thing --task "add the changelog"
+sbxd new --worktree --repo ~/dev/thing --task "add the changelog"
 ```
 
 `--repo` has to be a checkout **on the machine that will run the session**,
@@ -96,7 +96,7 @@ your own tmux sessions showing up as a session's shells.
 
 ## Ending one
 
-`sbx rm <name>`, or the window. It kills the agent and its shells, runs
+`sbxd rm <name>`, or the window. It kills the agent and its shells, runs
 `git worktree remove --force`, prunes, and drops the record.
 
 `--force`, because the point of removing a session is removing it: git refuses a
@@ -106,7 +106,7 @@ commits are, and this is not the command for deleting work.
 
 A session whose record the cache has lost cannot be removed this way — unlike a
 sandbox, whose name is derived from the session's, a worktree's directory is not
-recoverable from the name once a root has been reconfigured. `sbx rm` drops the
+recoverable from the name once a root has been reconfigured. `sbxd rm` drops the
 record and says so; the directory is yours to remove.
 
 ## What is missing

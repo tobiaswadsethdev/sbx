@@ -21,18 +21,20 @@ already shown, deduplicated and trimmed to the last few thousand, so the feed is
 record rather than a peephole -- and closing the tool no longer looks like it wiped
 the log. Destroying a session takes its history with it.
 
-In the policy pane, `w` widens egress to the package registries and `t`
-tightens it back, without restarting the agent -- for the task that turns out
-to need a dependency installed. Only the network section: the filesystem and
-process sections are fixed when the sandbox is created, and the gateway will
-accept a change to them, report it as effective, and never enforce it, so the
-pane labels them and declines to offer it.
+`sbxd policy <name> --widen` opens egress to the package registries and
+`--tighten` closes it back, without restarting the agent -- for the task that
+turns out to need a dependency installed.
 
-`w` offers npm and PyPI and not crates.io or nuget, which is not an oversight:
+Only the network section. The filesystem and process sections are fixed when
+the sandbox is created, and the gateway will accept a change to them, report it
+as effective, and never enforce it -- so nothing here offers one, and the policy
+view labels those sections rather than pretending they are live.
+
+The preset offers npm and PyPI and not crates.io or nuget, which is not an oversight:
 it grants them to `/usr/bin/node` and `/usr/local/bin/uv`, and those are in every
 sandbox because the base image has them. A rule for cargo in a sandbox with no
 cargo in it would be decoration -- the same argument `net-open.yaml` makes. A
-toolchain is what brings both halves: `sbx new --toolchain rust` runs the session
+toolchain is what brings both halves: `sbxd new --toolchain rust` runs the session
 on an image carrying cargo *and* opens crates.io for it, so a rule like
 
 ```
@@ -46,21 +48,23 @@ nothing else in the sandbox. See [toolchains.md](toolchains.md).
 
 ## Acting on a denial
 
-`w` and `t` are one preset. The events feed is where the *specific* answer lives:
-`j`/`k` move a cursor over the events, and `e` on the one you are looking at asks
-what to do about the endpoint it names.
+`--widen` and `--tighten` are one preset, all or nothing. The events feed is
+where the *specific* answer lives -- `sbxd events <name>` names the endpoint and
+the binary of each denial, and the global lists are what turn one into a
+standing rule.
 
-```
- endpoint  pastebin.com:443 for /usr/bin/curl  -- denied now
-           a allow here · b block here  │  A allow always · B block always  │  esc cancel
+A session-level change goes through the same live `policy update` that
+`--widen` uses. Recording the endpoint in a global list applies it to every
+`sbxd new` from then on:
+
+```sh
+sbxd endpoints                                     # what is on them
+sbxd endpoints --allow crates.io:443 --binary /usr/bin/cargo
+sbxd endpoints --block pastebin.com:443
 ```
 
-Lowercase changes this session, through the same live `policy update` that `w`
-uses; uppercase does that *and* records the endpoint in a global list applied to
-every `sbx new` from then on. Nothing else on the keyboard responds while the
-question is up -- `a` is attach everywhere else in the TUI, and answering a
-question about egress must not also hand over the terminal. Any other key
-cancels.
+That writes the same file under the same lock, and applies to sandboxes started
+from then on rather than to one already running.
 
 An allow binds the endpoint to **the binary the event named**, not to the
 sandbox: allowing `github.com:443` off a denied `curl` grants it to curl and

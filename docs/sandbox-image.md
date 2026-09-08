@@ -30,14 +30,14 @@ traffic behind them, and a denial with nothing worth investigating behind it is
 noise in the events pane. With them set, a session that clones, edits and answers
 produces a feed with no denials in it at all.
 
-`sbx image build` installs the newest Claude Code release rather than whatever
+`sbxd image build` installs the newest Claude Code release rather than whatever
 the community base image happens to have frozen -- it shipped 2.1.143 while
 2.1.246 was current, and an agent cannot upgrade itself from inside a sandbox
 with no writable install path and no route to the download service. The version
 is resolved on the host and passed in as a build arg, so a rebuild really does
 fetch what is newest instead of being answered from a cached layer, and the
 download is checked against the release manifest's SHA-256.
-`--build-arg CLAUDE_VERSION=2.1.246` pins a specific one. `sbx doctor` reports
+`--build-arg CLAUDE_VERSION=2.1.246` pins a specific one. `sbxd doctor` reports
 what the built image carries and warns when a newer release is out.
 
 ## Toolchains

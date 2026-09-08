@@ -84,7 +84,7 @@ on the right.
   servers run on the host, holding their own credentials, and are granted
   per-binary like everything else; `sbxd` can own their containers and their
   secrets, with a screen that says what each one is doing.
-- **Publish from inside.** `sbx publish` pushes the branch and opens a pull
+- **Publish from inside.** `sbxd publish` pushes the branch and opens a pull
   request on GitHub or Azure DevOps without the token ever reaching your host.
 - **An inbox, and the loop back to it.** What GitHub, Azure DevOps and Jira say
   is assigned to you, read by the server; one button turns a ticket into a
@@ -110,31 +110,30 @@ through all of it, including the providers that hold your credentials.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.sh | sh
 
-sbx doctor                           # every prerequisite, and what to do about the missing ones
-sbx image build                      # the sandbox image (also happens on first `sbx new`)
-sbx new --repo <url> --task "fix the readme typo"
-sbx                                  # the TUI
+sbxd doctor                           # every prerequisite, and what to do about the missing ones
+sbxd image build                      # the sandbox image (also happens on first `sbxd new`)
+sbxd new --repo <url> --task "fix the readme typo"
 ```
 
 The script needs no checkout and no Rust toolchain: it fetches the newest
 release for your machine, checks it against the published `SHA256SUMS`, and
-puts the binary in `~/.local/bin` -- then runs `sbx doctor` to say what is still
+puts the binary in `~/.local/bin` -- then runs `sbxd doctor` to say what is still
 missing. It falls back to building with `cargo` when no release matches your
 machine, and `--bin-dir`, `--version` and `--from-source` are there when you
 want to decide those yourself. From a checkout, `cargo install --path
-crates/sbx` does the same job.
+crates/sbxd` does the same job.
 
-`sbx update` later fetches, verifies and replaces the binary the same way.
-Nothing updates itself in the background; `sbx doctor` is what mentions that a
+`sbxd update` later fetches, verifies and replaces the binary the same way.
+Nothing updates itself in the background; `sbxd doctor` is what mentions that a
 newer release is out.
 
 **The window is installed separately, and can be on another machine.** On Linux
 it is built from the tree; on Windows it is an installer from the [releases
 page](https://github.com/tobiaswadsethdev/sbx/releases) and is all that side
-needs -- it pairs with a server from its own dialog, so there is no `sbx` to
+needs -- it pairs with a server from its own dialog, so there is no `sbxd` to
 install there. Both are [docs/install.md](docs/install.md#the-desktop-application).
 
-`sbx doctor` is the one to run when something looks wrong -- it checks the
+`sbxd doctor` is the one to run when something looks wrong -- it checks the
 gateway, Docker, tmux, lingering, the image and the Claude Code version in it,
 plus the providers, skills and MCP servers your config names and the toolchain
 variants you have built:
@@ -152,34 +151,33 @@ variants you have built:
 ## Commands
 
 ```sh
-sbx doctor                                    # check gateway, docker, tmux, image
-sbx image build                               # build the sandbox image (automatic on first use)
-sbx image build --toolchain dotnet,rust       # ... plus toolchains, as their own image variant
-sbx new --repo <url> --task "what to do"      # sandbox + clone + branch + agent
-sbx new --worktree --repo <path> --task "..."  # ... or a git worktree here, with no isolation
-sbx ls                                        # sessions, reconciled with the gateway
-sbx attach <name>                             # attach to the agent; Ctrl-b d to detach
-sbx diff <name>                               # what the agent has changed so far
-sbx policy <name>                             # the policy the gateway is enforcing
-sbx events <name>                             # recent allow/deny decisions
-sbx tasks                                     # the task inbox: what is assigned to you
-sbx policies                                  # the policy templates shipped in the binary
-sbx toolchains                                # the toolchains a sandbox image can be built with
-sbx config                                    # the defaults in force, and where they came from
-sbx config --init                             # write a commented ~/.config/sbx/config.toml
-sbx publish <name>                            # push the branch and open a pull request
-sbx update                                    # fetch and verify the newest release of sbx itself
-sbx rm <name>                                 # delete session and sandbox
-sbx                                           # the TUI: n starts a session, no shell needed
+sbxd doctor                                    # check gateway, docker, tmux, image
+sbxd image build                               # build the sandbox image (automatic on first use)
+sbxd image build --toolchain dotnet,rust       # ... plus toolchains, as their own image variant
+sbxd new --repo <url> --task "what to do"      # sandbox + clone + branch + agent
+sbxd new --worktree --repo <path> --task "..."  # ... or a git worktree here, with no isolation
+sbxd ls                                        # sessions, reconciled with the gateway
+sbxd attach <name>                             # attach to the agent; Ctrl-b d to detach
+sbxd diff <name>                               # what the agent has changed so far
+sbxd policy <name>                             # the policy the gateway is enforcing
+sbxd events <name>                             # recent allow/deny decisions
+sbxd tasks                                     # the task inbox: what is assigned to you
+sbxd policies                                  # the policy templates shipped in the binary
+sbxd toolchains                                # the toolchains a sandbox image can be built with
+sbxd config                                    # the defaults in force, and where they came from
+sbxd config --init                             # write a commented ~/.config/sbx/config.toml
+sbxd publish <name>                            # push the branch and open a pull request
+sbxd update                                    # fetch and verify the newest release
+sbxd rm <name>                                 # delete session and sandbox
 
 sbxd serve                                    # serve this machine's sessions over one TLS port
 sbxd pair <client>                            # a string that pairs a client with this machine
 sbxd mcp                                      # the MCP catalog, and what each managed one is doing
 printf %s "$TOKEN" | sbxd secret <NAME>       # store a secret a managed MCP server needs
 sbxd skills                                   # the skills a client has uploaded here
-sbx connect <string>                          # pair with a server
+sbxd connect <string>                          # pair with a server
 sbx --server=<name> ls                        # ... and ask it instead of the local gateway
-sbx watch <name> --server=<name>              # follow a session's events and state as they happen
+sbxd watch <name> --server=<name>              # follow a session's events and state as they happen
 ```
 
 `--policy` takes a template name or a path to a YAML file. Three templates ship
@@ -199,8 +197,7 @@ else. See [docs/toolchains.md](docs/toolchains.md).
 
 |                                            |                                                                       |
 | ------------------------------------------ | --------------------------------------------------------------------- |
-| [Install](docs/install.md)                 | prerequisites, the gateway, providers, `sbx`, and the window on Linux and Windows |
-| [The TUI](docs/tui.md)                     | the list, the panes, starting and ending sessions, names and branches |
+| [Install](docs/install.md)                 | prerequisites, the gateway, providers, `sbxd`, and the window on Linux and Windows |
 | [The desktop app](docs/desktop.md)         | projects and worktrees, files, git, the editor, and the review        |
 | [The server](docs/server.md)               | `sbxd`, pairing a client on another machine, WSL, what a token is worth |
 | [Configuration](docs/configuration.md)     | `~/.config/sbx/config.toml`, and which default wins                   |

@@ -1,18 +1,22 @@
 #!/bin/sh
-# Install sbx, without a checkout and without a Rust toolchain.
+# Install sbxd, without a checkout and without a Rust toolchain.
 #
 #   curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.sh | sh
 #
 # It fetches the newest release for this machine, checks it against the
-# published SHA256SUMS, and puts `sbx` and the `sbxd` server somewhere on PATH.
-# Nothing else:
-# the prerequisites sbx needs at runtime -- OpenShell, its gateway, Docker,
-# tmux -- are what `sbx doctor` is for, and it is run at the end to say which
-# of them are missing.
+# published SHA256SUMS, and puts `sbxd` somewhere on PATH. Nothing else: the
+# prerequisites it needs at runtime -- OpenShell, its gateway, Docker, tmux --
+# are what `sbxd doctor` is for, and it is run at the end to say which of them
+# are missing.
+#
+# `sbx` was a second binary here until v0.4.0, when it folded into this one.
+# An `sbx` still on the PATH is not upgraded and not removed: it is left where
+# it is, because deleting a binary somebody may still be running is not an
+# installer's decision. `sbxd` is what to run.
 #
 # Options, as flags or as environment variables:
 #
-#   --version v0.2.0   SBX_VERSION    a specific release; default the newest
+#   --version v0.4.0   SBX_VERSION    a specific release; default the newest
 #   --bin-dir DIR      SBX_BIN_DIR    where to install; default ~/.local/bin
 #   --from-source      SBX_FROM_SOURCE=1
 #                                     build with cargo instead of downloading
@@ -38,13 +42,13 @@ die() {
 # there is no script file to read the comments back out of.
 usage() {
     cat <<'USAGE'
-install.sh -- install sbx and sbxd without a checkout or a Rust toolchain
+install.sh -- install sbxd without a checkout or a Rust toolchain
 
   curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.sh | sh
 
 Options, as flags or as environment variables:
 
-  --version v0.2.0   SBX_VERSION       a specific release; default the newest
+  --version v0.4.0   SBX_VERSION       a specific release; default the newest
   --bin-dir DIR      SBX_BIN_DIR       where to install; default ~/.local/bin
   --from-source      SBX_FROM_SOURCE=1 build with cargo instead of downloading
 
@@ -87,11 +91,8 @@ build_from_source() {
     have cargo || die "no releases to install and no cargo to build with.
      fix: install Rust from https://rustup.rs, then re-run this script"
     say "==> building from source with cargo (this takes a few minutes)"
-    # Both crates in one invocation: two would clone and resolve the same tree
-    # twice. `--locked` so it builds against the versions the tree was tested
-    # with.
-    cargo install --git "https://github.com/${REPO}" sbx sbxd --locked
-    say "==> installed to $(cargo_bin)/sbx and $(cargo_bin)/sbxd"
+    cargo install --git "https://github.com/${REPO}" sbxd --locked
+    say "==> installed to $(cargo_bin)/sbxd"
     finish "$(cargo_bin)"
 }
 
@@ -143,7 +144,7 @@ install_release() {
         return
     fi
 
-    asset="sbx-${tag}-${target}.tar.gz"
+    asset="sbxd-${tag}-${target}.tar.gz"
     base="https://github.com/${REPO}/releases/download/${tag}"
 
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/sbx-install.XXXXXX")"
@@ -164,26 +165,12 @@ install_release() {
      fix: report this at https://github.com/${REPO}/security/advisories/new"
 
     tar -xzf "${tmp}/${asset}" -C "$tmp" || die "could not unpack ${asset}"
-    [ -f "${tmp}/sbx" ] || die "${asset} does not contain an sbx binary"
+    [ -f "${tmp}/sbxd" ] || die "${asset} does not contain an sbxd binary"
 
     mkdir -p "$BIN_DIR" || die "cannot create ${BIN_DIR}"
+    install_binary "${tmp}/sbxd" sbxd
 
-    install_binary "${tmp}/sbx" sbx
-    installed="${BIN_DIR}/sbx"
-
-    # `sbxd` is the server half -- the one the desktop application dials -- and
-    # it rides in the same archive. Releases up to and including v0.3.0 do not
-    # carry it, and `--version v0.2.0` is a supported thing to ask for, so its
-    # absence is reported and stepped over rather than treated as a broken
-    # download.
-    if [ -f "${tmp}/sbxd" ]; then
-        install_binary "${tmp}/sbxd" sbxd
-        installed="${installed} and ${BIN_DIR}/sbxd"
-    else
-        say "    (${tag} predates the sbxd binary; installing sbx only)"
-    fi
-
-    say "==> installed ${tag} to ${installed}"
+    say "==> installed ${tag} to ${BIN_DIR}/sbxd"
     finish "$BIN_DIR"
 }
 
@@ -223,13 +210,13 @@ finish() {
             ;;
     esac
 
-    if [ -x "${dir}/sbx" ]; then
+    if [ -x "${dir}/sbxd" ]; then
         say ""
-        say "==> sbx doctor"
+        say "==> sbxd doctor"
         # Never fatal: doctor exits non-zero when a prerequisite is missing,
         # which is the normal state of a machine that has just installed this
         # and is exactly what the output is for.
-        "${dir}/sbx" doctor || true
+        "${dir}/sbxd" doctor || true
         say ""
         say "Prerequisites and what to do about them:"
         say "    https://github.com/${REPO}/blob/main/docs/install.md"

@@ -6,12 +6,12 @@ community image does. Anything else -- the .NET SDK, a Rust toolchain -- is aske
 for per session:
 
 ```sh
-sbx new --repo <url> --task "fix the failing test" --toolchain dotnet
-sbx new --repo <url> --task "..."                  --toolchain dotnet,rust
-sbx toolchains                                     # what is available
+sbxd new --repo <url> --task "fix the failing test" --toolchain dotnet
+sbxd new --repo <url> --task "..."                  --toolchain dotnet,rust
+sbxd toolchains                                     # what is available
 ```
 
-In the TUI it is a field on the create form, beside the policy, and it usually
+In the window it is a field on the create form, beside the policy, and it usually
 arrives filled in: a checkout with a `Cargo.toml` in it comes up with `rust`
 ticked, one with a `.csproj` a level down comes up with `dotnet`. `space`
 toggles, and an answer you change by hand stays changed.
@@ -54,22 +54,22 @@ and `--toolchain dotnet,rust` name one image rather than building two identical
 ones. It is built on first use, or ahead of time:
 
 ```sh
-sbx image build --toolchain dotnet,rust
+sbxd image build --toolchain dotnet,rust
 ```
 
-The TUI will not build one -- the build streams docker's output, which would tear
+The window will not build one -- the build streams docker's output, which would tear
 the interface apart mid-frame -- so a create asking for a toolchain nobody has
 built yet fails with the command that builds it.
 
 A variant is `FROM sbx-base:latest`, which means rebuilding the base for a newer
 agent leaves the variants behind on the old one. Nothing about that looks wrong
 from outside: sessions start, the toolchain works, and the agent is whatever
-version it was. `sbx doctor` is what says so:
+version it was. `sbxd doctor` is what says so:
 
 ```
 [  ok  ] image        sbx-base:latest built, claude 2.1.246
 [ warn ] toolchains   sbx-base:dotnet older than sbx-base:latest, so still on its previous agent
-         → sbx image build --toolchain dotnet
+         → sbxd image build --toolchain dotnet
 ```
 
 When they are current it reports what each one actually carries, read from a

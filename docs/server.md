@@ -1,8 +1,9 @@
 # The server
 
-`sbx` drives the sandboxes on the machine it runs on. `sbxd` lets something else
-drive them: another machine on the network, a cloud box, or -- the case this was
-built for -- a Linux server inside WSL with the client out on Windows.
+`sbxd` drives the sandboxes on the machine it runs on, and serving is what lets
+something else drive them: another machine on the network, a cloud box, or --
+the case this was built for -- a Linux server inside WSL with the window out on
+Windows. One binary does both, which is why `sbxd` with no subcommand listens.
 
 The sessions are the same sessions. One gateway, one cache, one set of
 sandboxes, whether the thing asking is a terminal on that machine or a client
@@ -35,7 +36,7 @@ That is the address, a token, and the fingerprint of the certificate the server
 will present. On the client:
 
 ```sh
-sbx connect 'sbx://box.lan:17671/8f3c...e21a#d8faa48b...e140' --name work
+sbxd connect 'sbx://box.lan:17671/8f3c...e21a#d8faa48b...e140' --name work
 sbx --server=work ls
 ```
 
@@ -44,8 +45,8 @@ attached with `=`, because `sbx --server work ls` cannot be told apart from a
 server called `work`.
 
 ```sh
-sbx remotes                  # what this machine is paired with
-sbx remotes --forget work    # stop being
+sbxd remotes                  # what this machine is paired with
+sbxd remotes --forget work    # stop being
 sbxd tokens                  # what the server accepts
 sbxd revoke desktop          # stop accepting one, immediately
 ```
@@ -61,11 +62,11 @@ policy and the event feed; the working copy's files; git, including staging,
 commit, push, pull and fetch; the diff and the review comments that go back to
 the agent; and the agent's terminal and any shells beside it, streamed.
 
-Two things are still the local machine's. **Attaching** with `sbx attach` hands
+Two things are still the local machine's. **Attaching** with `sbxd attach` hands
 *this* terminal to the agent, which is a thing about the process you are
 sitting in rather than a request; the desktop application's terminal is the
 remote equivalent and it works over the connection. **Publishing** with
-`sbx publish` has no remote half yet.
+`sbxd publish` has no remote half yet.
 
 Reading is `/rpc`, one request and one answer. The three things a client wants
 *told* -- the agent's screen, the gateway's decisions as it makes them, and the
@@ -92,7 +93,7 @@ sbxd pair laptop --host box.lan
 On the client, paste the string it printed:
 
 ```sh
-sbx connect 'sbx://box.lan:17671/8f3c...#d8fa...' --name work
+sbxd connect 'sbx://box.lan:17671/8f3c...#d8fa...' --name work
 sbx --server=work ls
 ```
 
@@ -110,7 +111,7 @@ sbxd pair laptop --host box.lan       # over the network by name
 sbxd pair laptop --host 10.0.0.7      # ... or by address
 ```
 
-**The certificate's names do not matter to `sbx`.** The client judges a server
+**The certificate's names do not matter to the client.** The client judges a server
 by the fingerprint in the pairing string and by nothing else -- `verify_server_cert`
 ignores the name it was given -- so there is no "certificate is not valid for
 this host" to run into, whatever address you dial. That is the point of pinning:
@@ -136,15 +137,15 @@ Two more things that are not sbx's to fix but look exactly like it:
 * **The port has to be open.** 17671/tcp on the server's firewall.
 * **Both ends need the same protocol version.** `GET /version` answers without a
   token, so a client says "this server speaks 2, I speak 1" rather than failing
-  in the middle of a request. `sbx doctor` on the client checks every paired
+  in the middle of a request. `sbxd doctor` on the client checks every paired
   server, which is where a moved address, a revoked token or a version skew
   shows up.
 
 The desktop application reads the same paired servers as the CLI: pair once with
-`sbx connect` and the window lists that server without being told again. It can
+`sbxd connect` and the window lists that server without being told again. It can
 also *be* the thing that pairs -- paste the string into its **servers** dialog,
 which runs the same checks and writes the same file. That is what a Windows
-client does, having no `sbx` to run:
+client does, having no `sbxd` to run:
 [desktop.md](desktop.md#connecting-it-to-a-server).
 
 ## The WSL case
@@ -158,11 +159,11 @@ firewall problem:
 * **NAT**, the default -- the client uses the address of the WSL VM, *which
   changes every time WSL restarts*. Every restart then needs pairing again.
 
-Only the window goes on the Windows side -- there is no `sbx` there, and the
+Only the window goes on the Windows side -- there is no `sbxd` there, and the
 pairing is done from the window itself. [install.md](install.md#windows) is the
 installer.
 
-`sbx doctor`, on the Linux side, says which one is in force and what to dial:
+`sbxd doctor`, on the Linux side, says which one is in force and what to dial:
 
 ```
 [  ok  ] wsl          mirrored networking: a client on Windows uses localhost:17671
@@ -175,13 +176,13 @@ Mirrored is worth turning on for this, in `%USERPROFILE%\.wslconfig`:
 networkingMode=mirrored
 ```
 
-`sbx doctor` also checks every paired server, which is where an address that has
+`sbxd doctor` also checks every paired server, which is where an address that has
 moved or a token that was revoked shows up:
 
 ```
 [ FAIL ] servers      work: could not reach the server: box.lan:17671: Connection refused
          fix: check it is running, and that `box.lan:17671` is the address this
-              machine should dial. `sbx remotes --forget work` drops it
+              machine should dial. `sbxd remotes --forget work` drops it
 ```
 
 ## What this costs

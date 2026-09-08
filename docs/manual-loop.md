@@ -201,7 +201,7 @@ The **sandbox is the source of truth**, not the local cache:
   label values cannot hold a URL or a branch
 * `~/.config/sbx/sessions.json` is a cache and can be deleted at any time
 
-Verified: deleting the cache and running `sbx ls` re-adopts every live session
+Verified: deleting the cache and running `sbxd ls` re-adopts every live session
 by reading the record back out of each sandbox.
 
 ## Running the agent inside the sandbox
@@ -242,7 +242,7 @@ an orphaned `tmux: client` is left behind. Other sandboxes are unaffected, so
 the blast radius is one session.
 
 A clean detach (`Ctrl-b d`) never triggers it: the exec exits 0 and the next
-exec works immediately. So `sbx` never kills the attach child -- it waits for
+exec works immediately. So `sbxd` never kills the attach child -- it waits for
 the user to detach -- and attaches with `-d` so a client stranded by an earlier
 crash is evicted rather than shared.
 
