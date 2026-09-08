@@ -1,4 +1,4 @@
-//! Updating `sbx` itself.
+//! Updating `sbx` itself, and the `sbxd` beside it.
 //!
 //! The tool that installs it is `install.sh`, which needs no checkout and no
 //! Rust toolchain: it fetches the newest release, checks it against the
@@ -18,9 +18,12 @@
 //! gives: the whole project is built on subprocesses, and this is the only place
 //! that would want a TLS stack.
 //!
-//! The three files that have to agree about what a release is called --
-//! `install.sh`, `.github/workflows/release.yml` and this one -- are kept in
-//! step by tests at the bottom rather than by anyone remembering.
+//! The three files that have to agree about what a release is called, and
+//! about what is inside it -- `install.sh`, `.github/workflows/release.yml`
+//! and this one -- are kept in step by tests at the bottom rather than by
+//! anyone remembering. From v0.3.1 the archive carries `sbx` *and* `sbxd`,
+//! because the server used to be reachable only through `cargo install`, on
+//! the machine whose whole point is not needing a Rust toolchain.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +63,12 @@ fn asset_name(tag: &str, target: &str) -> String {
 
 /// The checksum file covering every asset in a release.
 const SUMS: &str = "SHA256SUMS";
+
+/// The client, and the binary this module is usually replacing.
+const CLIENT: &str = "sbx";
+
+/// The server, which rides in the same archive from v0.3.1 on.
+const SERVER: &str = "sbxd";
 
 /// A published release, as much of one as this needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,6 +202,10 @@ pub enum Outcome {
         from: String,
         to: String,
         at: PathBuf,
+        /// Where the `sbxd` beside it was replaced, if there was one. A
+        /// running server keeps the old inode until it is restarted, so a
+        /// caller that reports this should say so.
+        sbxd: Option<PathBuf>,
     },
 }
 
@@ -284,9 +297,9 @@ fn stage_and_swap(
     if !status.success() {
         return Err(format!("could not unpack {name}"));
     }
-    let fresh = dir.join("sbx");
+    let fresh = dir.join(CLIENT);
     if !fresh.is_file() {
-        return Err(format!("{name} does not contain an `sbx` binary"));
+        return Err(format!("{name} does not contain an `{CLIENT}` binary"));
     }
     make_executable(&fresh)?;
 
@@ -309,11 +322,41 @@ fn stage_and_swap(
 
     let at = std::env::current_exe().map_err(|e| format!("cannot find the running binary: {e}"))?;
     swap(&fresh, &at)?;
+    // The server half, after the client and not before it: if replacing `sbxd`
+    // fails, the failure is reported against an `sbx` that is already the new
+    // version, which is a state worth having rather than one to unpick.
+    let sbxd = swap_server(dir, &at)?;
     Ok(Outcome::Updated {
         from: current().to_string(),
         to: release.version.clone(),
         at,
+        sbxd,
     })
+}
+
+/// Replace the `sbxd` beside `sbx`, when there is one to replace.
+///
+/// Only when it is *already* installed there. `sbx update` is asked to update
+/// what this machine has, and putting a server binary on a machine whose
+/// operator never installed one is a decision they did not make -- on a laptop
+/// that only ever drives local sandboxes, `sbxd` is a listening socket nobody
+/// asked for.
+///
+/// Skipped without complaint when the archive has no `sbxd` in it, which is
+/// every release up to v0.3.0. Going back to one of those with
+/// `sbx update --tag` leaves the newer server in place, and that is survivable:
+/// compatibility between the two is decided by the protocol number in
+/// `sbx-proto`, which moves far more slowly than the crate version, so a
+/// version skew between them is usually no skew at all.
+fn swap_server(dir: &Path, client_at: &Path) -> Result<Option<PathBuf>, String> {
+    let fresh = dir.join(SERVER);
+    let at = client_at.with_file_name(SERVER);
+    if !fresh.is_file() || !at.is_file() {
+        return Ok(None);
+    }
+    make_executable(&fresh)?;
+    swap(&fresh, &at)?;
+    Ok(Some(at))
 }
 
 /// Put `fresh` where `at` is, atomically.
@@ -326,7 +369,11 @@ fn stage_and_swap(
 /// that is currently executing, which is what makes this possible at all.
 fn swap(fresh: &Path, at: &Path) -> Result<(), String> {
     let dir = at.parent().unwrap_or(Path::new("."));
-    let staged = dir.join(format!(".sbx-update-{}", std::process::id()));
+    // Named after the target, because this now stages two different binaries
+    // into the same directory and a shared name would make a half-finished
+    // update of one look like a half-finished update of the other.
+    let name = at.file_name().map_or("sbx".into(), |n| n.to_string_lossy());
+    let staged = dir.join(format!(".{name}-update-{}", std::process::id()));
     std::fs::copy(fresh, &staged).map_err(|e| {
         let _ = std::fs::remove_file(&staged);
         format!(
@@ -520,6 +567,21 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
             INSTALL_SH.contains(SUMS) && RELEASE_WORKFLOW.contains(SUMS),
             "both must publish and read {SUMS}"
         );
+
+        // ... and what is *inside* the archive, which is the half that used to
+        // be nowhere: the server shipped only through `cargo install`.
+        assert!(
+            RELEASE_WORKFLOW.contains(&format!("--bin {CLIENT} --bin {SERVER}")),
+            "the release workflow no longer builds both binaries"
+        );
+        assert!(
+            RELEASE_WORKFLOW.contains(&format!(r#"-C "$bin" {CLIENT} {SERVER}"#)),
+            "the release workflow no longer packs both binaries flat in the archive"
+        );
+        assert!(
+            INSTALL_SH.contains(&format!("${{tmp}}/{SERVER}")),
+            "install.sh no longer installs the server out of the archive"
+        );
     }
 
     /// Everything points at one repository, and a fork that changes it has one
@@ -532,7 +594,7 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
         );
     }
 
-    /// Only the swap tests need a scratch directory, and both are unix-only.
+    /// Only the swap tests need a scratch directory, and they are unix-only.
     #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
         let dir =
@@ -610,5 +672,76 @@ bbbb *sbx-v0.2.0-aarch64-unknown-linux-musl.tar.gz
         let _ = std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755));
         let _ = std::fs::remove_dir_all(&downloaded);
         let _ = std::fs::remove_dir_all(&installed);
+    }
+
+    /// `sbx update` updates what is installed. A machine that drives only its
+    /// own sandboxes has no `sbxd`, and an archive that happens to carry one
+    /// is not a reason to give it a server it never asked to run.
+    #[test]
+    #[cfg(unix)]
+    fn a_server_that_is_not_installed_is_not_installed_by_an_update() {
+        let unpacked = scratch("no-server-src");
+        let bin = scratch("no-server-dst");
+        std::fs::write(unpacked.join(SERVER), "fresh").unwrap();
+        std::fs::write(bin.join(CLIENT), "old sbx").unwrap();
+
+        assert_eq!(swap_server(&unpacked, &bin.join(CLIENT)), Ok(None));
+        assert!(
+            !bin.join(SERVER).exists(),
+            "an update must not conjure up a server binary"
+        );
+
+        let _ = std::fs::remove_dir_all(&unpacked);
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    /// When it *is* installed, it moves with the client -- beside it, because
+    /// that is where `install.sh` put it.
+    #[test]
+    #[cfg(unix)]
+    fn an_installed_server_is_replaced_beside_the_client() {
+        let unpacked = scratch("with-server-src");
+        let bin = scratch("with-server-dst");
+        std::fs::write(unpacked.join(SERVER), "fresh sbxd").unwrap();
+        std::fs::write(bin.join(CLIENT), "old sbx").unwrap();
+        std::fs::write(bin.join(SERVER), "old sbxd").unwrap();
+
+        let swapped = swap_server(&unpacked, &bin.join(CLIENT)).expect("swaps");
+        assert_eq!(swapped.as_deref(), Some(bin.join(SERVER).as_path()));
+        assert_eq!(
+            std::fs::read_to_string(bin.join(SERVER)).unwrap(),
+            "fresh sbxd"
+        );
+        // Nothing staged is left lying about next to the real thing.
+        let stray: Vec<_> = std::fs::read_dir(&bin)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with('.'))
+            .collect();
+        assert!(stray.is_empty(), "left staging files behind: {stray:?}");
+
+        let _ = std::fs::remove_dir_all(&unpacked);
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    /// Every release up to v0.3.0 packs `sbx` alone, and `sbx update --tag`
+    /// may still be pointed at one. That is a client update, not a failure.
+    #[test]
+    #[cfg(unix)]
+    fn an_archive_with_no_server_in_it_is_not_an_error() {
+        let unpacked = scratch("old-archive-src");
+        let bin = scratch("old-archive-dst");
+        std::fs::write(bin.join(CLIENT), "old sbx").unwrap();
+        std::fs::write(bin.join(SERVER), "installed sbxd").unwrap();
+
+        assert_eq!(swap_server(&unpacked, &bin.join(CLIENT)), Ok(None));
+        assert_eq!(
+            std::fs::read_to_string(bin.join(SERVER)).unwrap(),
+            "installed sbxd",
+            "an archive without a server must leave the installed one alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&unpacked);
+        let _ = std::fs::remove_dir_all(&bin);
     }
 }

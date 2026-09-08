@@ -1,0 +1,222 @@
+name: Tag a release
+
+# Cutting a release is one dispatch from the Actions tab. This works out the
+# next version, rewrites the *seven* files that carry it, commits, tags, pushes,
+# and hands the tag to `release.yml` -- which is the one that builds and
+# publishes.
+#
+# It exists because doing it by hand does not survive contact with a busy
+# afternoon. `v0.3.0` was tagged at 4e37ca1 with every version file in the tree
+# still reading `0.2.0`, and the numbers are the whole contract: that release's
+# binary answers `sbx 0.2.0` to `--version`, so `sbx update` downloads it, asks
+# it what it is, sees it disagree with the release, and refuses the swap. The
+# published `latest` release is one no installed copy can update to.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Which part of the version to increment"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      version:
+        description: "An exact version instead, without the v -- e.g. 0.4.0"
+        required: false
+      dry_run:
+        description: "Work out the version and rewrite the files, but push nothing"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write # the release commit and the tag
+  actions: write # dispatching release.yml
+
+jobs:
+  tag:
+    name: ${{ inputs.version || inputs.bump }}
+    runs-on: ubuntu-latest
+    steps:
+      # Every tag, so the "does this one already exist" check below can see the
+      # ones cut before today. A shallow clone fetches none of them and would
+      # cheerfully re-tag a version that is already published.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The dispatch form offers every branch, and a release cut from one would
+      # tag a commit that is not on `main` -- reachable only from the tag, and
+      # invisible to anyone reading the history for what shipped.
+      - name: Refuse to release from anywhere but main
+        run: |
+          set -eu
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::dispatched from ${{ github.ref_name }}; releases are cut from main"
+            exit 1
+          fi
+
+      # The workspace `Cargo.toml` is the source of truth for the current
+      # version and the other six are made to agree with it below. Not the
+      # newest tag: the two have already disagreed once, and believing the tag
+      # would have papered over exactly the bug this workflow is here to stop.
+      - name: Work out the version
+        id: version
+        run: |
+          set -eu
+          current=$(sed -n '/^\[workspace\.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml)
+          case "$current" in
+            [0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "::error::cannot read a version out of Cargo.toml (got '$current')"; exit 1 ;;
+          esac
+
+          requested="${{ inputs.version }}"
+          if [ -n "$requested" ]; then
+            # Typed by a human into a text box, and it ends up in a git tag, an
+            # asset name and an installer's idea of what is newest.
+            next="${requested#v}"
+            case "$next" in
+              [0-9]*.[0-9]*.[0-9]*) ;;
+              *) echo "::error::'$requested' is not an X.Y.Z version"; exit 1 ;;
+            esac
+          else
+            major=$(echo "$current" | cut -d. -f1)
+            minor=$(echo "$current" | cut -d. -f2)
+            patch=$(echo "$current" | cut -d. -f3)
+            case "${{ inputs.bump }}" in
+              major) next="$((major + 1)).0.0" ;;
+              minor) next="${major}.$((minor + 1)).0" ;;
+              patch) next="${major}.${minor}.$((patch + 1))" ;;
+            esac
+          fi
+
+          # A tag is the one thing here that is meant to be immutable: it is
+          # what `sbx update` resolves and what an installed binary was built
+          # from, so moving one silently changes what a version *means*.
+          if git rev-parse -q --verify "refs/tags/v${next}" >/dev/null; then
+            echo "::error::v${next} already exists; pick another version"
+            exit 1
+          fi
+
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "next=$next" >> "$GITHUB_OUTPUT"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+          echo "$current -> $next" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Seven files, in four formats, in two cargo workspaces. Writing them by
+      # hand is the failure mode; writing them one at a time here is merely
+      # tedious, and tedium that a machine does is free.
+      - name: Rewrite the version everywhere it appears
+        env:
+          NEXT: ${{ steps.version.outputs.next }}
+        run: |
+          set -eu
+
+          # The workspace package version, which every crate inherits with
+          # `version.workspace = true` -- so this one line moves `sbx`, `sbxd`
+          # and the four libraries at once.
+          sed -i '/^\[workspace\.package\]/,/^\[/s/^version = ".*"/version = "'"$NEXT"'"/' Cargo.toml
+
+          # `[package]` is the first table in the desktop crate's manifest --
+          # it is its own workspace -- so the first `version = ` at the start of
+          # a line is its own and not a dependency's.
+          sed -i '0,/^version = ".*"/s//version = "'"$NEXT"'"/' apps/desktop/src-tauri/Cargo.toml
+
+          # The version Windows shows in Add or Remove Programs, and the one an
+          # upgrade compares against. `release.yml` also patches this from the
+          # tag at build time; that stays, because a release cut by hand still
+          # has to produce a correctly versioned installer -- but with this
+          # written down, the two now agree instead of one covering for the
+          # other.
+          conf=apps/desktop/src-tauri/tauri.conf.json
+          jq --arg v "$NEXT" '.version = $v' "$conf" > "$conf.new" && mv "$conf.new" "$conf"
+
+          # `npm version` and not `jq`, because the version lives in three
+          # places across these two files and npm knows all three.
+          npm --prefix apps/desktop version "$NEXT" --no-git-tag-version --allow-same-version
+
+          # Both lockfiles name their workspace members and their versions.
+          # `--workspace` re-resolves those and leaves every dependency where it
+          # is, so this cannot quietly ship a release built against different
+          # crates than the last CI run checked.
+          cargo update --workspace --quiet
+          cargo update --workspace --quiet --manifest-path apps/desktop/src-tauri/Cargo.toml
+
+          # Cheap proof that the lockfiles came out consistent with the
+          # manifests: `--locked` fails rather than fixing one up, and
+          # `metadata` resolves without compiling anything.
+          cargo metadata --locked --format-version 1 > /dev/null
+          cargo metadata --locked --format-version 1 \
+            --manifest-path apps/desktop/src-tauri/Cargo.toml > /dev/null
+
+          git --no-pager diff --stat
+
+      # A version that half-landed is worse than one that did not land at all,
+      # so the guard is that these are exactly the files a bump may touch.
+      - name: Check nothing else changed
+        run: |
+          set -eu
+          cat > /tmp/expected <<'EOF'
+          Cargo.lock
+          Cargo.toml
+          apps/desktop/package-lock.json
+          apps/desktop/package.json
+          apps/desktop/src-tauri/Cargo.lock
+          apps/desktop/src-tauri/Cargo.toml
+          apps/desktop/src-tauri/tauri.conf.json
+          EOF
+          # `LC_ALL=C` on both sides. Under a locale that folds punctuation,
+          # `package.json` sorts before `package-lock.json` and this comparison
+          # fails on a bump that was perfectly correct.
+          LC_ALL=C sort -o /tmp/expected /tmp/expected
+          git diff --name-only | LC_ALL=C sort > /tmp/actual
+          if ! diff -u /tmp/expected /tmp/actual; then
+            echo "::error::a version bump touched files it should not have"
+            exit 1
+          fi
+
+      - name: Commit and tag
+        if: ${{ !inputs.dry_run }}
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -am "Release $TAG"
+          # Annotated, so `git describe` and the release page have a date and an
+          # author rather than just a pointer.
+          git tag -a "$TAG" -m "$TAG"
+          # The commit and the tag in one push: a tag pushed without the
+          # commit that bears its version is the bug at the top of this file,
+          # and one push either lands both or lands neither.
+          #
+          # `HEAD:refs/heads/main` and not `HEAD`, because whether checkout
+          # leaves a branch checked out or a detached head is its business and
+          # not something to bet a release on.
+          git push origin HEAD:refs/heads/main "refs/tags/$TAG"
+
+      # `release.yml` is not started by that push. GitHub does not run workflows
+      # on events raised with the built-in `GITHUB_TOKEN`, which is what stops a
+      # workflow that pushes from triggering itself forever -- and a tag push is
+      # exactly such an event. `workflow_dispatch` is the documented exception,
+      # so asking for the run explicitly works, and works without a personal
+      # access token that somebody would have to own and rotate.
+      - name: Hand the tag to the release workflow
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -eu
+          gh workflow run release.yml --ref main -f tag="$TAG"
+          echo "[release.yml](${{ github.server_url }}/${{ github.repository }}/actions/workflows/release.yml) dispatched for $TAG" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Say what a dry run would have done
+        if: ${{ inputs.dry_run }}
+        run: |
+          set -eu
+          echo "dry run: nothing pushed, nothing tagged" >> "$GITHUB_STEP_SUMMARY"
+          git --no-pager diff

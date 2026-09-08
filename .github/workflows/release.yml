@@ -1,11 +1,18 @@
 name: Release
 
 # Tag a version and this publishes the binaries `install.sh` and `sbx update`
-# download:
+# download, plus the Windows desktop installer.
+#
+# The tag is normally not made by hand: `tag.yml` bumps the seven files that
+# carry the version, tags the commit that holds them, and dispatches this. Doing
+# it the short way still works --
 #
 #     git tag v0.2.0 && git push origin v0.2.0
 #
-# The asset names are part of the contract with both of them, and a test in
+# -- but then remember the bump, because nothing here checks that the tag and
+# the tree agree, and once they did not.
+#
+# The asset names are part of the contract with both installers, and a test in
 # `crates/sbx-core/src/update.rs` fails if the three ever disagree.
 on:
   push:
@@ -42,7 +49,15 @@ jobs:
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
     steps:
+      # The tag, explicitly, and not whatever ref the run was started from. On
+      # a tag push those are the same thing; on a `workflow_dispatch` they are
+      # not -- the dispatch carries a branch, so this used to build `main` and
+      # label the result with a tag it had never been at. Naming the tag also
+      # means a dispatch for a tag that does not exist fails here, loudly,
+      # instead of publishing whatever `main` happened to be.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       # A dispatch takes the tag as free text, and a junk one would be baked
       # into an asset name and a git tag that outlives the mistake.
@@ -68,17 +83,32 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
+      # Both halves of the Linux side. `docs/server.md` has people running
+      # `~/.local/bin/sbxd` under systemd, and until now the only way to get
+      # that file was `cargo install --path crates/sbxd` -- a Rust toolchain, on
+      # the box whose whole job is to not need one.
       - name: Build
-        run: cargo build --release --locked --bin sbx --target ${{ matrix.target }}
+        run: cargo build --release --locked --bin sbx --bin sbxd --target ${{ matrix.target }}
 
       - name: Package
         run: |
           set -eu
-          bin="target/${{ matrix.target }}/release/sbx"
-          "$bin" --version
-          # Flat, one file at the root of the archive: install.sh and
-          # `sbx update` both expect to find `sbx` and nothing else.
-          tar -czf "sbx-${TAG}-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" sbx
+          bin="target/${{ matrix.target }}/release"
+          # Ask each one what it is. A binary built from the wrong commit
+          # answers the wrong version, and that is cheaper to find out here
+          # than in `sbx update`, which refuses the swap over exactly this.
+          "$bin/sbx" --version
+          "$bin/sbxd" --version
+          # Flat at the root of the archive, both of them. One tarball and not
+          # two: it is one download to verify, and `sbx` and `sbxd` are the same
+          # build of the same protocol -- shipping them separately invites a
+          # machine that has one of each.
+          #
+          # Adding `sbxd` beside `sbx` does not break the installers that came
+          # before it. Both look the extracted `sbx` up by name and neither
+          # minds a second file being there, so an `sbx update` from v0.3.0
+          # reads this archive exactly as it read the last one.
+          tar -czf "sbx-${TAG}-${{ matrix.target }}.tar.gz" -C "$bin" sbx sbxd
           sha256sum "sbx-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 
       - uses: actions/upload-artifact@v4
@@ -108,7 +138,15 @@ jobs:
     env:
       HAS_SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
     steps:
+      # The tag, explicitly, and not whatever ref the run was started from. On
+      # a tag push those are the same thing; on a `workflow_dispatch` they are
+      # not -- the dispatch carries a branch, so this used to build `main` and
+      # label the result with a tag it had never been at. Naming the tag also
+      # means a dispatch for a tag that does not exist fails here, loudly,
+      # instead of publishing whatever `main` happened to be.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
 
       - name: Check the tag looks like a version
         shell: bash

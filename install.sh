@@ -4,7 +4,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.sh | sh
 #
 # It fetches the newest release for this machine, checks it against the
-# published SHA256SUMS, and puts the binary somewhere on PATH. Nothing else:
+# published SHA256SUMS, and puts `sbx` and the `sbxd` server somewhere on PATH.
+# Nothing else:
 # the prerequisites sbx needs at runtime -- OpenShell, its gateway, Docker,
 # tmux -- are what `sbx doctor` is for, and it is run at the end to say which
 # of them are missing.
@@ -37,7 +38,7 @@ die() {
 # there is no script file to read the comments back out of.
 usage() {
     cat <<'USAGE'
-install.sh -- install sbx without a checkout and without a Rust toolchain
+install.sh -- install sbx and sbxd without a checkout or a Rust toolchain
 
   curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.sh | sh
 
@@ -86,8 +87,11 @@ build_from_source() {
     have cargo || die "no releases to install and no cargo to build with.
      fix: install Rust from https://rustup.rs, then re-run this script"
     say "==> building from source with cargo (this takes a few minutes)"
-    cargo install --git "https://github.com/${REPO}" sbx --locked
-    say "==> installed to $(cargo_bin)/sbx"
+    # Both crates in one invocation: two would clone and resolve the same tree
+    # twice. `--locked` so it builds against the versions the tree was tested
+    # with.
+    cargo install --git "https://github.com/${REPO}" sbx sbxd --locked
+    say "==> installed to $(cargo_bin)/sbx and $(cargo_bin)/sbxd"
     finish "$(cargo_bin)"
 }
 
@@ -163,24 +167,45 @@ install_release() {
     [ -f "${tmp}/sbx" ] || die "${asset} does not contain an sbx binary"
 
     mkdir -p "$BIN_DIR" || die "cannot create ${BIN_DIR}"
-    # Copy next door and rename, rather than writing over the target: `install`
-    # and `cp` both write in place, which fails with ETXTBSY when the binary
-    # they are overwriting is one a TUI in another terminal is running. A
-    # rename inside one directory replaces it atomically instead, and Linux is
-    # content to rename over an executing binary.
-    staged="${BIN_DIR}/.sbx-install.$$"
-    cp "${tmp}/sbx" "$staged" 2>/dev/null && chmod 755 "$staged" || {
+
+    install_binary "${tmp}/sbx" sbx
+    installed="${BIN_DIR}/sbx"
+
+    # `sbxd` is the server half -- the one the desktop application dials -- and
+    # it rides in the same archive. Releases up to and including v0.3.0 do not
+    # carry it, and `--version v0.2.0` is a supported thing to ask for, so its
+    # absence is reported and stepped over rather than treated as a broken
+    # download.
+    if [ -f "${tmp}/sbxd" ]; then
+        install_binary "${tmp}/sbxd" sbxd
+        installed="${installed} and ${BIN_DIR}/sbxd"
+    else
+        say "    (${tag} predates the sbxd binary; installing sbx only)"
+    fi
+
+    say "==> installed ${tag} to ${installed}"
+    finish "$BIN_DIR"
+}
+
+# Copy next door and rename, rather than writing over the target: `install` and
+# `cp` both write in place, which fails with ETXTBSY when the binary they are
+# overwriting is one a TUI in another terminal is running -- or, for `sbxd`, one
+# that systemd has running as a user service. A rename inside one directory
+# replaces it atomically instead, and Linux is content to rename over an
+# executing binary.
+install_binary() {
+    from="$1"
+    name="$2"
+    staged="${BIN_DIR}/.${name}-install.$$"
+    cp "$from" "$staged" 2>/dev/null && chmod 755 "$staged" || {
         rm -f "$staged"
         die "cannot write to ${BIN_DIR}
      fix: --bin-dir DIR for somewhere you own, or re-run with sudo"
     }
-    mv -f "$staged" "${BIN_DIR}/sbx" || {
+    mv -f "$staged" "${BIN_DIR}/${name}" || {
         rm -f "$staged"
-        die "cannot replace ${BIN_DIR}/sbx"
+        die "cannot replace ${BIN_DIR}/${name}"
     }
-
-    say "==> installed ${tag} to ${BIN_DIR}/sbx"
-    finish "$BIN_DIR"
 }
 
 # What to do next, and the one thing that silently goes wrong: a binary in a

@@ -78,8 +78,14 @@ curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.s
 
 It works out which release fits this machine, downloads it, **checks it against
 the release's published `SHA256SUMS` and installs nothing if that does not
-match**, puts the binary in `~/.local/bin`, and finishes by running `sbx doctor`
-so the prerequisites above are named rather than discovered one at a time. Read
+match**, puts `sbx` and `sbxd` in `~/.local/bin`, and finishes by running
+`sbx doctor` so the prerequisites above are named rather than discovered one at
+a time. Both binaries, because both belong on this machine -- the server is
+what [the desktop application](#the-desktop-application) and
+[server.md](server.md) dial, and until v0.3.1 the only way to get it was to
+build it, on the box whose whole point is not needing a Rust toolchain.
+Releases up to v0.3.0 carry `sbx` alone, and asking for one of those with
+`--version` installs what it has and says so. Read
 it first if you would rather not pipe a script into a shell -- it is
 [install.sh](../install.sh) in this repository, and downloading it and running
 it separately works exactly the same.
@@ -97,7 +103,8 @@ is also the automatic fallback when no release is built for your architecture:
 
 ```sh
 cargo install --path crates/sbx                                   # from a checkout
-cargo install --git https://github.com/tobiaswadsethdev/sbx sbx --locked   # without one
+cargo install --path crates/sbxd                                  # ... and the server
+cargo install --git https://github.com/tobiaswadsethdev/sbx sbx sbxd --locked   # without one
 ```
 
 Then:
