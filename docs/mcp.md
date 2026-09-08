@@ -167,7 +167,7 @@ them. A session records the servers it was created with, and the facts pane
 lists them by name; changing the file changes the next session, not a running
 one.
 
-`sbx doctor` checks each of them, because a container that is not running -- or
+`sbxd doctor` checks each of them, because a container that is not running -- or
 one running but not attached to the gateway's network -- produces a session whose
 agent reports its tools as **needing authentication**, which sends you looking in
 entirely the wrong direction:

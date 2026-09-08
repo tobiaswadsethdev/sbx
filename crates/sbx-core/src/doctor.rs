@@ -164,17 +164,17 @@ fn check_version() -> Check {
     match crate::update::check() {
         crate::update::Status::Newer { running, latest } => Check::warn(
             "version",
-            format!("sbx {running}; {latest} is out"),
-            "sbx update",
+            format!("sbxd {running}; {latest} is out"),
+            "sbxd update",
         ),
-        crate::update::Status::Current(v) => Check::ok("version", format!("sbx {v}, newest")),
+        crate::update::Status::Current(v) => Check::ok("version", format!("sbxd {v}, newest")),
         crate::update::Status::Ahead(v) => {
-            Check::ok("version", format!("sbx {v}, ahead of the newest release"))
+            Check::ok("version", format!("sbxd {v}, ahead of the newest release"))
         }
         crate::update::Status::Unknown => Check::ok(
             "version",
             format!(
-                "sbx {} (no release list to compare against)",
+                "sbxd {} (no release list to compare against)",
                 crate::update::current()
             ),
         ),
@@ -193,7 +193,7 @@ fn check_image() -> Check {
                     "{} predates status reporting: the state column will stay `ready`",
                     crate::session::IMAGE
                 ),
-                "sbx image build",
+                "sbxd image build",
             );
         }
         // The agent's own version. The base image freezes whatever Claude Code
@@ -210,7 +210,7 @@ fn check_image() -> Check {
                     "{} carries claude {built}; {latest} is out",
                     crate::session::IMAGE
                 ),
-                "sbx image build",
+                "sbxd image build",
             ),
             (Some(built), _) => Check::ok(
                 "image",
@@ -227,7 +227,7 @@ fn check_image() -> Check {
                 "{} missing: it will be built on first use",
                 crate::session::IMAGE
             ),
-            "sbx image build",
+            "sbxd image build",
         )
     }
 }
@@ -247,7 +247,7 @@ fn rebuild_commands(tags: &[String]) -> Vec<String> {
         .filter_map(|tag| tag.split_once(':'))
         .map(|(_, toolchains)| {
             format!(
-                "sbx image build --toolchain {}",
+                "sbxd image build --toolchain {}",
                 toolchains.replace('-', ",")
             )
         })
@@ -747,12 +747,12 @@ mod toolchain_tests {
     fn a_stale_variant_is_told_how_to_rebuild_itself() {
         assert_eq!(
             rebuild_commands(&["sbx-base:dotnet".to_string()]),
-            ["sbx image build --toolchain dotnet"]
+            ["sbxd image build --toolchain dotnet"]
         );
         // The tag joins with `-`, the flag takes `,`.
         assert_eq!(
             rebuild_commands(&["sbx-base:dotnet-rust".to_string()]),
-            ["sbx image build --toolchain dotnet,rust"]
+            ["sbxd image build --toolchain dotnet,rust"]
         );
         // One command each, since each is its own build.
         assert_eq!(

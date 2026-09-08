@@ -52,14 +52,14 @@ something is paired. The name is optional and defaults to the host.
    +-------------------------------------------------------+
 ```
 
-`sbx connect 'sbx://…'` in a terminal does the same thing, and a server paired
+`sbxd connect 'sbx://…'` in a terminal does the same thing, and a server paired
 either way appears in both -- they are one saved list (`~/.local/state/sbx/remotes.json`,
 or `%LOCALAPPDATA%\sbx\remotes.json` on Windows) and one implementation:
 `sbx_client::pair`, called by the command and by the dialog. Two implementations of "is this a
 server I can talk to" would be one implementation and one place a mistake is
 silent.
 
-**The dialog is there because the machine holding the window may have no `sbx`
+**The dialog is there because the machine holding the window may have no `sbxd`
 on it.** On Windows there is none to install: the CLI drives Docker, tmux and a
 gateway, which are on the Linux side. Requiring a terminal to pair would have
 made the Windows client depend on a program that cannot run there.
@@ -163,11 +163,11 @@ never represent it.
 A worktree records the project it was started in rather than being matched back
 to one by URL, because two projects may share a URL: two checkouts of one
 repository is a normal thing to have, and the worktree would otherwise belong to
-both. Anything with no project -- everything `sbx new` creates, since the
+both. Anything with no project -- everything `sbxd new` creates, since the
 terminal has none -- is grouped by clone URL at the bottom of the tree rather
 than hidden. Forgetting a project leaves its worktrees alive and moves them
 there; a sandbox is a real thing with an agent in it, and removing one is
-`sbx rm`'s job, said out loud.
+`sbxd rm`'s job, said out loud.
 
 **A worktree with no sandbox around it says so on its row.** The `worktree`
 badge beside the name means the session runs on the server with the server's own
@@ -315,7 +315,7 @@ chooser suggests a choice that has been taken away when the truth is there is
 nothing to apply one to. The command line refuses those flags outright for the
 same reason.
 
-Nothing in the form decides anything `sbx new` decides differently, and that is
+Nothing in the form decides anything `sbxd new` decides differently, and that is
 enforced by where the decisions live rather than by care:
 
 * **The name is derived by the server** when the field is left blank, by the
@@ -325,7 +325,7 @@ enforced by where the decisions live rather than by care:
   it has already answered that question. All of them are listed anyway: a form
   that hid `dotnet` because there is no `.csproj` yet would be one you cannot
   use to start writing one.
-* **The credentials arrive ticked too**, by the same rule the TUI uses --
+* **The credentials arrive ticked too**, by the same rule the CLI uses --
   `ops::preselect_providers`, which moved into the core when this form needed
   it. A session without the agent's credential comes up to a login prompt and
   one without the repository host's cannot clone a private repository, so both
@@ -352,8 +352,9 @@ say what the tree was about to say anyway. Everything that can be judged from
 the request is judged before it returns: an unknown toolchain and a name that is
 not a name come back as errors against the request that caused them.
 
-One difference from the TUI worth naming rather than hiding: the picker's filter
-is a substring match, where the TUI ranks with the fuzzy score in
+One difference from the terminal interface that preceded it, worth naming
+rather than hiding: the picker's filter is a substring match, where that ranked
+with the fuzzy score in
 `repos::score`. The alternative to a second copy of that scorer in TypeScript is
 a request per keystroke, and of the three a plainer match on the same list is
 the one that cannot go quietly wrong. If they ever need to agree exactly, the

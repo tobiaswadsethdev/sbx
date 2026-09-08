@@ -27,7 +27,7 @@ fail on an over-long command line -- at that size something has a virtualenv in
 it by accident.
 
 A skill that is missing at create time costs the skill, not the session: it is a
-warning, and `sbx doctor` says so beforehand, since a session that quietly comes
+warning, and `sbxd doctor` says so beforehand, since a session that quietly comes
 up without one looks like the agent forgetting how to do something it used to
 know.
 

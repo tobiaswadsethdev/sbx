@@ -73,7 +73,9 @@ pub struct Config {
     /// machine that adds the worktree is the one that has the checkout. `None`
     /// means [`crate::backend::Worktree::default_root`].
     pub worktree_root: Option<PathBuf>,
-    /// How often the TUI reads the sandboxes. See its `Intervals`:
+    /// How often the terminal interface read the sandboxes. Nothing reads it
+    /// since that went in v0.4.0; it is still parsed so existing config files
+    /// keep loading. See:
     /// this is one number scaling a set of measured ones, because they are
     /// related to each other and a single absolute interval would break the
     /// relationships.

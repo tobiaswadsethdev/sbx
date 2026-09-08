@@ -1,19 +1,19 @@
 # Configuration
 
-Every default `sbx` takes is a flag, and `sbx config --init` writes a file that
+Every default `sbxd` takes is a flag, and `sbxd config --init` writes a file that
 stops them being typed. `~/.config/sbx/config.toml`, beside the session cache,
 all keys optional:
 
 ```toml
 gateway    = "openshell"                              # unset: the active one
-repo       = "https://github.com/octocat/Hello-World" # `sbx new` with no --repo
+repo       = "https://github.com/octocat/Hello-World" # `sbxd new` with no --repo
 base       = "develop"                                # unset: the remote's default
 policy     = "feature-work"                           # a template, or a path to a YAML file
 providers  = ["claude-oauth", "azure-pat"]            # credentials for a new session
 repo_roots = ["~/dev", "~/work"]                      # where the picker looks
 worktree_root = "~/.local/share/sbx/worktrees"        # where worktree sessions go
 branch_prefix = "tobias"                              # <prefix>/<name> for a work branch
-refresh    = "1s"                                     # how often the TUI reads the sandboxes
+refresh    = "1s"                                     # unused since v0.4.0; still parsed
 
 skills     = ["ship-pr"]                               # copied into every session
 
@@ -35,7 +35,7 @@ secret  = "JIRA_API_TOKEN"
 ```
 
 Everything in it is a *default*: a flag on the command line wins, and so does an
-explicit choice in the create form. `sbx config` prints what is in force with
+explicit choice in the create form. `sbxd config` prints what is in force with
 `*` for the file's answers and `-` for the built-in ones.
 
 **A file that cannot be read stops the command**, rather than being quietly
@@ -50,7 +50,7 @@ sbx: ~/.config/sbx/config.toml: TOML parse error at line 1, column 1
 unknown field `polciy`, expected one of `gateway`, `repo`, `base`, `policy`, ...
 ```
 
-The one exception is `sbx doctor`, which is the command you reach for when
+The one exception is `sbxd doctor`, which is the command you reach for when
 something is wrong: it reports the error as a failed check and carries on with
 the defaults. It also checks the `providers` you named still exist at the
 gateway, since a stale name is the quietest failure here -- the form does not
@@ -60,7 +60,7 @@ what looks like an authentication problem several steps later.
 `refresh` is one number rather than six because the intervals underneath it are
 measured and related to each other; it scales all of them, so `"4s"` polls a
 quarter as often (41 execs in a 30 second window became 13) and `"500ms"` twice
-as often. 250ms to 60s -- below that the TUI's 100ms input tick becomes the
+as often. 250ms to 60s -- below that the terminal interface's 100ms input tick became the
 limit and the extra `git status` inside every sandbox buys nothing.
 
 Where a default meets something sbx already works out for itself, the more

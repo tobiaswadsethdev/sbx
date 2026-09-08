@@ -2,8 +2,7 @@
 
 | | |
 | --- | --- |
-| [install.md](install.md) | prerequisites, the OpenShell gateway, providers, `sbx` itself, and the desktop application on Linux and Windows |
-| [tui.md](tui.md) | the terminal interface: the list, the panes, starting and ending sessions |
+| [install.md](install.md) | prerequisites, the OpenShell gateway, providers, `sbxd` itself, and the desktop application on Linux and Windows |
 | [desktop.md](desktop.md) | the desktop workspace: projects and worktrees, files, git, the editor, the review |
 | [configuration.md](configuration.md) | `~/.config/sbx/config.toml`, and which default wins |
 | [policy.md](policy.md) | the rules being enforced, the audit feed, and acting on a denial |

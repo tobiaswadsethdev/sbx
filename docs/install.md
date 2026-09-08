@@ -1,10 +1,16 @@
 # Installing sbx
 
-There are two things to install and they do not go in the same place. **`sbx`
-and `sbxd` run where the sandboxes are**, which is Linux, because the isolation
-is kernel-enforced. **The desktop application runs where you are sitting**,
-which may be the same machine or may be Windows -- it makes requests of an
-`sbxd` and needs no gateway, no Docker and no tmux of its own.
+There are two things to install and they do not go in the same place. **`sbxd`
+runs where the sandboxes are**, which is Linux, because the isolation is
+kernel-enforced. **The desktop application runs where you are sitting**, which
+may be the same machine or may be Windows -- it makes requests of an `sbxd` and
+needs no gateway, no Docker and no tmux of its own.
+
+`sbx` was a second Linux binary until v0.4.0, carrying this CLI and a terminal
+interface beside it. It folded into `sbxd`: every command it had, `sbxd` has,
+and the window is the interactive surface now. Upgrading from v0.3.1 or earlier
+means running `install.sh` once -- `sbx update` cannot cross the rename,
+because there is no longer an `sbx` for it to replace itself with.
 
 Most of this page is the first half. [The desktop
 application](#the-desktop-application) at the end is the second, and is all that
@@ -19,14 +25,14 @@ is portable to macOS, because the isolation is kernel-enforced.
 | --- | --- |
 | [OpenShell](https://github.com/NVIDIA/OpenShell) | 0.0.110 -- CLI, gateway and sandbox helper |
 | Docker | server 29.x, reachable by your user |
-| tmux | on the host, for `sbx attach` |
-| Rust | 1.89 or newer -- only to build `sbx` yourself (edition 2024, let-chains, `File::lock`) |
+| tmux | on the host, for `sbxd attach` |
+| Rust | 1.89 or newer -- only to build `sbxd` yourself (edition 2024, let-chains, `File::lock`) |
 
-`sbx doctor` checks every one of them, plus the sandbox image and whether
+`sbxd doctor` checks every one of them, plus the sandbox image and whether
 systemd lingering is enabled, and says what to do about whatever is missing:
 
 ```
-[  ok  ] version      sbx 0.2.0, newest
+[  ok  ] version      sbxd 0.4.0, newest
 [  ok  ] openshell    openshell 0.0.110
 [  ok  ] gateway      https://127.0.0.1:17670 0.0.110 (authenticated)
 [  ok  ] docker       server 29.6.0
@@ -67,7 +73,7 @@ openshell provider create --name claude-oauth \
 `read` needs a TTY, so that has to be a real terminal. For Azure DevOps, do the
 same with `providers/azure-devops-pat.yaml` (see [Git hosts](git-hosts.md)).
 
-**`sbx` itself.** The policy templates and the whole image recipe -- Dockerfile,
+**`sbxd` itself.** The policy templates and the whole image recipe -- Dockerfile,
 status hook, Claude settings -- are compiled into the binary, so it needs
 nothing from this tree at runtime except the provider profiles above, which the
 `openshell` CLI reads directly. That is what makes a one-line install possible:
@@ -78,14 +84,12 @@ curl -fsSL https://raw.githubusercontent.com/tobiaswadsethdev/sbx/main/install.s
 
 It works out which release fits this machine, downloads it, **checks it against
 the release's published `SHA256SUMS` and installs nothing if that does not
-match**, puts `sbx` and `sbxd` in `~/.local/bin`, and finishes by running
-`sbx doctor` so the prerequisites above are named rather than discovered one at
-a time. Both binaries, because both belong on this machine -- the server is
-what [the desktop application](#the-desktop-application) and
-[server.md](server.md) dial, and until v0.3.1 the only way to get it was to
-build it, on the box whose whole point is not needing a Rust toolchain.
-Releases up to v0.3.0 carry `sbx` alone, and asking for one of those with
-`--version` installs what it has and says so. Read
+match**, puts `sbxd` in `~/.local/bin`, and finishes by running `sbxd doctor` so
+the prerequisites above are named rather than discovered one at a time.
+
+It does not remove an `sbx` left over from an earlier install. Deleting a
+binary somebody may still have running is not an installer's decision -- but
+nothing updates it any more, and `sbxd` is what to run. Read
 it first if you would rather not pipe a script into a shell -- it is
 [install.sh](../install.sh) in this repository, and downloading it and running
 it separately works exactly the same.
@@ -102,21 +106,21 @@ Building it yourself is the other way, and the one to use from a checkout. It
 is also the automatic fallback when no release is built for your architecture:
 
 ```sh
-cargo install --path crates/sbx                                   # from a checkout
-cargo install --path crates/sbxd                                  # ... and the server
-cargo install --git https://github.com/tobiaswadsethdev/sbx sbx sbxd --locked   # without one
+cargo install --path crates/sbxd                                  # from a checkout
+cargo install --git https://github.com/tobiaswadsethdev/sbx sbxd --locked   # without one
 ```
 
 Then:
 
 ```sh
-sbx image build                      # also happens on first `sbx new`
-sbx doctor
+sbxd image build                      # also happens on first `sbxd new`
+sbxd doctor
 ```
 
-Start something: `sbx new --repo <url> --task "..."`, or `sbx` for the
-terminal interface, where `n` does the same thing with a picker and a form --
-[tui.md](tui.md).
+Start something: `sbxd new --repo <url> --task "..."`. For a picker and a form
+instead of flags, that is [the desktop application](#the-desktop-application),
+which is the interactive surface -- there was a terminal interface here until
+v0.4.0, and [desktop.md](desktop.md) is what replaced it.
 
 There is a desktop workspace as well, and it talks to a server rather than to
 the gateway directly -- so it works whether the sandboxes are on this machine or
@@ -177,7 +181,7 @@ the frontend from Vite's dev server, and that is what starts it; running
 
 ### Windows
 
-There is no `sbx` for Windows and there is not meant to be. The CLI drives
+There is no `sbxd` for Windows and there is not meant to be. The CLI drives
 Docker, tmux and a gateway, and none of those are on that side; what runs there
 is the window, which pairs itself. This is the arrangement the server was built
 for: Linux in WSL doing the work, the window out on Windows.
@@ -212,9 +216,9 @@ WebView2 is the only runtime it needs, and Windows 11 ships with it; on Windows
 Building it there instead needs Rust, Node 22 or newer, and the MSVC build tools
 (the *Desktop development with C++* workload), then the same two commands as on
 Linux. Only the client half of this repository compiles for Windows, which CI
-checks on every change; `sbx` and `sbxd` do not, and are not asked to.
+checks on every change; `sbxd` does not, and is not asked to.
 
-**Updating is downloading the newer installer.** `sbx update` replaces a Linux
+**Updating is downloading the newer installer.** `sbxd update` replaces a Linux
 binary in place and has no Windows half; a `.msi` installed over an older one
 upgrades it. There is no background check on either platform.
 
@@ -226,21 +230,21 @@ case](server.md#the-wsl-case).
 
 ## Updating
 
-`sbx update` is the install script's three steps performed by the binary that
+`sbxd update` is the install script's three steps performed by the binary that
 is already there: read the release list, verify the download against
 `SHA256SUMS`, and replace itself.
 
 ```sh
-sbx update                 # to the newest release
-sbx update --check         # say what that would do, and do none of it
-sbx update --tag v0.1.0    # to one named release, to get back to one that worked
-sbx update --force         # reinstall the version already running
+sbxd update                 # to the newest release
+sbxd update --check         # say what that would do, and do none of it
+sbxd update --tag v0.1.0    # to one named release, to get back to one that worked
+sbxd update --force         # reinstall the version already running
 ```
 
 The replacement is a rename over the running binary, which Linux allows and
-which means a torn download cannot leave half an `sbx` on your `PATH`. A
+which means a torn download cannot leave half an `sbxd` on your `PATH`. A
 session already running is untouched -- its agent lives in a sandbox, not in
-this binary -- but the sandbox image is versioned separately, so `sbx image
+this binary -- but the sandbox image is versioned separately, so `sbxd image
 build` after an update is what picks up a change to the image recipe.
 
 **Nothing updates itself.** There is no background check and no timer: `sbx
@@ -248,12 +252,12 @@ doctor` reports when a newer release is out, and that is the whole of it.
 
 ```
 [ warn ] version      sbx 0.2.0; 0.3.0 is out
-         fix: sbx update
+         fix: sbxd update
 ```
 
 A binary installed with `cargo install` can still be updated this way, since it
 is replaced where it stands. Going the other way -- back to a build from the
-tree -- is `cargo install --path crates/sbx` again.
+tree -- is `cargo install --path crates/sbxd` again.
 
 ---
 

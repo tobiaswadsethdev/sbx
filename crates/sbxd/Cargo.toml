@@ -13,9 +13,13 @@ path = "src/main.rs"
 
 [dependencies]
 sbx-core = { path = "../sbx-core" }
+sbx-client = { path = "../sbx-client" }
 sbx-proto = { path = "../sbx-proto" }
 openshell-client = { path = "../openshell-client" }
 clap = { version = "4", features = ["derive"] }
+# Raw mode for `attach`, and nothing else. It arrived through `ratatui` until
+# the terminal interface went; this is the same crate, named directly.
+crossterm = "0.29"
 serde.workspace = true
 serde_json.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "process", "io-util", "sync", "time"] }
