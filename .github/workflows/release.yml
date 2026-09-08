@@ -138,6 +138,14 @@ jobs:
     # step below. Job-level `env` is, and it may read `secrets`.
     env:
       HAS_SIGNING_CERT: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+      # And whether there is an *updater* key, which is a different key for a
+      # different job: the certificate above is what stops SmartScreen warning
+      # about the installer, this is what the installed window checks before it
+      # will replace itself. Same reasoning for making it conditional -- and one
+      # extra reason, which is that `createUpdaterArtifacts` makes `tauri build`
+      # *fail* without a key rather than skip the signing. A fork would not be
+      # able to cut a release at all.
+      HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
     steps:
       # The tag, explicitly, and not whatever ref the run was started from. On
       # a tag push those are the same thing; on a `workflow_dispatch` they are
@@ -227,19 +235,37 @@ jobs:
         shell: bash
         env:
           THUMBPRINT: ${{ steps.cert.outputs.thumbprint }}
+          # Read by `tauri build` itself to sign the updater manifest. Empty
+          # when there is no key, which is what the override below is for.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -eu
           npm --prefix apps/desktop ci
+
+          # Built up as one `--config` object because `tauri build` takes one.
+          # `jq -n` rather than string concatenation: this ends up as JSON on a
+          # command line inside a shell inside YAML, and hand-quoting it is how
+          # the last three bugs in this file happened.
+          overrides='{}'
           if [ -n "${THUMBPRINT:-}" ]; then
-            # A timestamp is what keeps a signature valid after the
-            # certificate expires; without one the installer stops verifying
-            # the day the certificate does.
-            npm --prefix apps/desktop run tauri -- build --config \
-              "{\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$THUMBPRINT\",\"digestAlgorithm\":\"sha256\",\"timestampUrl\":\"http://timestamp.digicert.com\"}}}"
+            # A timestamp is what keeps a signature valid after the certificate
+            # expires; without one the installer stops verifying the day the
+            # certificate does.
+            overrides=$(jq -n --arg t "$THUMBPRINT" \
+              '{bundle:{windows:{certificateThumbprint:$t,digestAlgorithm:"sha256",timestampUrl:"http://timestamp.digicert.com"}}}')
           else
             echo "no signing certificate; building unsigned"
-            npm --prefix apps/desktop run tauri -- build
           fi
+          if [ "${HAS_UPDATER_KEY}" != "true" ]; then
+            # No key, so no signed manifest -- and `createUpdaterArtifacts` is
+            # turned back off rather than left to fail the build. The installer
+            # still works; it just will not offer to update itself.
+            echo "no updater key; building without updater artifacts"
+            overrides=$(printf '%s' "$overrides" | jq '.bundle.createUpdaterArtifacts = false')
+          fi
+          echo "$overrides"
+          npm --prefix apps/desktop run tauri -- build --config "$overrides"
 
       # Renamed to carry the tag and the target, like the tarballs, and
       # checksummed into the same SHA256SUMS -- an installer downloaded from a
@@ -260,6 +286,41 @@ jobs:
           sha256sum *.msi *.exe > desktop-windows.sha256
           cat desktop-windows.sha256
 
+      # The manifest the installed window reads to find out it is behind.
+      #
+      # `latest.json` and not a name with the tag in it: the updater is
+      # configured with one fixed URL --
+      # `/releases/latest/download/latest.json` -- so the file has to be called
+      # the same thing in every release for that URL to keep resolving. It is
+      # the one asset here whose name is deliberately not versioned.
+      #
+      # The signature covers the installer's *bytes*, so renaming the file
+      # below does not invalidate it. The `url` therefore points at the renamed
+      # asset, which is where it actually ends up.
+      - name: Write the update manifest
+        if: env.HAS_UPDATER_KEY == 'true'
+        shell: bash
+        run: |
+          set -eu
+          bundle=apps/desktop/src-tauri/target/release/bundle
+          # Discovered rather than spelled out: the bundle carries the version
+          # in its filename, and a pattern that has to be kept in step with
+          # `tauri.conf.json` is a pattern that will not be.
+          sig=$(ls "$bundle"/nsis/*-setup.exe.sig)
+          asset="sbx-desktop-${TAG}-x86_64-pc-windows-msvc-setup.exe"
+          jq -n \
+            --arg version "${TAG#v}" \
+            --arg pub_date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg signature "$(cat "$sig")" \
+            --arg url "${{ github.server_url }}/${{ github.repository }}/releases/download/${TAG}/${asset}" \
+            '{version: $version,
+              pub_date: $pub_date,
+              platforms: {"windows-x86_64": {signature: $signature, url: $url}}}' \
+            > dist/latest.json
+          # Without the signature, which is long and is not the interesting
+          # part of a log line.
+          jq 'del(.platforms."windows-x86_64".signature)' dist/latest.json
+
       - uses: actions/upload-artifact@v4
         with:
           name: sbx-desktop-windows
@@ -267,7 +328,12 @@ jobs:
             dist/sbx-desktop-${{ env.TAG }}-x86_64-pc-windows-msvc.msi
             dist/sbx-desktop-${{ env.TAG }}-x86_64-pc-windows-msvc-setup.exe
             dist/desktop-windows.sha256
-          if-no-files-found: error
+            dist/latest.json
+          # `warn` and not `error`, because `latest.json` is written only when
+          # there is an updater key and the other three are not conditional on
+          # anything. A missing manifest is a release without self-update, not
+          # a broken release.
+          if-no-files-found: warn
 
   publish:
     name: Publish the release
@@ -290,14 +356,31 @@ jobs:
           rm -f ./*.sha256
           cat SHA256SUMS
 
+      # `fail_on_unmatched_files` below is worth keeping, so the list it is
+      # checking has to be the list that actually exists. `latest.json` is the
+      # one conditional asset -- there is no manifest without an updater key --
+      # and naming it unconditionally would turn "this fork has no key" into a
+      # failed release rather than a release without self-update.
+      - name: What to publish
+        id: files
+        run: |
+          set -eu
+          {
+            echo "list<<MANIFEST"
+            echo "dist/*.tar.gz"
+            echo "dist/*.msi"
+            echo "dist/*.exe"
+            echo "dist/SHA256SUMS"
+            # `|| true` because `set -e` would take the false branch of a `&&`
+            # as a failed step, which is a very silly way to lose a release.
+            [ -f dist/latest.json ] && echo "dist/latest.json" || true
+            echo "MANIFEST"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
           generate_release_notes: true
           fail_on_unmatched_files: true
-          files: |
-            dist/*.tar.gz
-            dist/*.msi
-            dist/*.exe
-            dist/SHA256SUMS
+          files: ${{ steps.files.outputs.list }}

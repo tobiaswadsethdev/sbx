@@ -245,6 +245,29 @@ deliberate: a rate-limit window belongs to the *account*, so two sessions report
 the same percentages and showing them per session would be a lie about what is
 being measured.
 
+## Keeping it current
+
+At launch the window asks github whether there is a newer release, and puts a
+bar above the header when there is. *Install and restart* downloads it, checks
+it, runs the installer and relaunches; *later* dismisses the bar for this run.
+
+**It asks rather than acting.** What arrives is verified against a signature
+made when the release was built, so the risk was never what gets installed --
+it is *when*. A window watching four agents is a window somebody is using, and
+replacing it mid-session is the same mistake [`sbxd` refuses to make with its
+own binary](install.md#updating-without-being-asked). The difference between
+the two is only that a window has somebody in front of it to ask, and a server
+does not.
+
+One request, at launch, and never again. A window left open for a week is not
+something to poll github about, and the next launch is soon enough for a
+release that has been out for hours.
+
+Windows only, and not an oversight: the release page carries a Windows
+installer and no Linux one, because a Tauri bundle links against the webkit2gtk
+of the distribution that built it. On Linux the window is built from the tree,
+so there is nothing for an updater to fetch and no bar ever appears.
+
 ## The inbox
 
 **inbox** in the header is what your trackers say is assigned to you, read on

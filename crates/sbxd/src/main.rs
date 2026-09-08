@@ -387,6 +387,26 @@ enum ImageAction {
 }
 
 fn main() -> ExitCode {
+    // Before the arguments are even parsed. A release downloaded by an earlier
+    // run is put in place here and nowhere else, so the swap can never land
+    // halfway through a command -- and `exec` rather than carrying on, because
+    // this process is still the old binary and a caller who restarted to pick
+    // up an update should not have to restart twice.
+    //
+    // `exec` replaces this process image, so nothing below runs on that path.
+    // If it returns at all it failed, and carrying on as the version we already
+    // are is the right answer: the update is not worth refusing to start over.
+    if let Some(at) = update::apply_staged() {
+        use std::os::unix::process::CommandExt;
+        let err = std::process::Command::new(&at)
+            .args(std::env::args_os().skip(1))
+            .exec();
+        eprintln!(
+            "sbxd: updated to {}, but could not restart: {err}",
+            at.display()
+        );
+    }
+
     let cli = Cli::parse();
 
     // Before anything else, because a file that cannot be read has to stop the
@@ -1539,11 +1559,23 @@ fn serve(opts: Serve) -> Fallible {
         tokens: std::sync::RwLock::new(tokens),
     });
 
+    // Whether to look for new releases while running. On by default: a server
+    // that sits behind a window for months is exactly the thing that goes stale
+    // without anyone noticing.
+    let auto_update = sbx_core::config::Config::load()
+        .ok()
+        .and_then(|c| c.auto_update)
+        .unwrap_or(true);
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
     runtime.block_on(async move {
+        if auto_update {
+            tokio::spawn(watch_for_releases());
+        }
+
         let config = axum_server::tls_rustls::RustlsConfig::from_pem(
             identity.cert_pem.into_bytes(),
             identity.key_pem.into_bytes(),
@@ -1556,6 +1588,41 @@ fn serve(opts: Serve) -> Fallible {
     })?;
 
     Ok(())
+}
+
+/// Ask github for a newer release, and download one if there is.
+///
+/// Downloads only. The staged file sits beside the binary until something
+/// starts `sbxd` again, at which point `main` swaps it in -- so a session
+/// running right now is never interrupted by this, and the server keeps
+/// answering as the version it started as. That is the whole reason this is
+/// two halves rather than one.
+///
+/// Every failure is a log line and nothing more. A server that could not reach
+/// github is a server that is working; the only thing that has not happened is
+/// an update, and `sbxd doctor` says so on demand anyway.
+///
+/// `spawn_blocking` because the work underneath is `curl`, `sha256sum` and
+/// `tar` -- subprocesses, which would otherwise hold a runtime thread that has
+/// requests to serve.
+async fn watch_for_releases() {
+    // Not immediately at startup. A restart is the most likely moment for
+    // several things to want the network at once, and nothing here is urgent
+    // enough to join that.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    loop {
+        match tokio::task::spawn_blocking(update::stage).await {
+            Ok(Ok(Some(v))) => {
+                println!("sbxd {v} downloaded and waiting; it is applied the next time sbxd starts")
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => eprintln!("sbxd: could not check for a new release: {e}"),
+            // The blocking pool cancelled or panicked. Not a reason to stop
+            // checking for the lifetime of the process.
+            Err(e) => eprintln!("sbxd: the update check did not run: {e}"),
+        }
+        tokio::time::sleep(update::CHECK_EVERY).await;
+    }
 }
 
 fn pair(name: &str, host: Option<String>, port: u16) -> Fallible {

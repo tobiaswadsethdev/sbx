@@ -222,10 +222,10 @@ pub enum Outcome {
 pub fn install(tag: Option<&str>, force: bool) -> Result<Outcome, String> {
     let release = match tag {
         Some(t) => tagged(t).ok_or_else(|| {
-            format!("no release tagged `{t}`, or github could not be reached\n     fix: `sbx update` takes the newest; see https://github.com/{REPO}/releases")
+            format!("no release tagged `{t}`, or github could not be reached\n     fix: `sbxd update` takes the newest; see https://github.com/{REPO}/releases")
         })?,
         None => latest().ok_or_else(|| {
-            format!("could not read the release list -- there may be none published yet\n     fix: build from source with `cargo install --git https://github.com/{REPO} sbx --locked`")
+            format!("could not read the release list -- there may be none published yet\n     fix: build from source with `cargo install --git https://github.com/{REPO} sbxd --locked`")
         })?,
     };
 
@@ -235,9 +235,164 @@ pub fn install(tag: Option<&str>, force: bool) -> Result<Outcome, String> {
         });
     }
 
+    let at = std::env::current_exe().map_err(|e| format!("cannot find the running binary: {e}"))?;
+    let scratch = Scratch::new()?;
+    let fresh = fetch_verified(scratch.path(), &release)?;
+    swap(&fresh, &at)?;
+    Ok(Outcome::Updated {
+        from: current().to_string(),
+        to: release.version.clone(),
+        at,
+    })
+}
+
+// -------------------------------------------------------------- auto-updating
+
+/// How often [`serve`] asks whether there is a newer release.
+///
+/// [`serve`]: https://docs.rs/sbxd
+pub const CHECK_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+
+/// Where a downloaded release waits until something restarts.
+///
+/// Beside the binary rather than in `/tmp`: [`swap`] renames it into place, and
+/// a rename across filesystems fails with `EXDEV`. A dotfile, so it does not
+/// appear in a `PATH` completion as a second command.
+fn staged_at(at: &Path) -> PathBuf {
+    at.with_file_name(format!(".{BIN}-staged"))
+}
+
+/// Fetch the newest release and leave it beside the running binary, replacing
+/// nothing.
+///
+/// This is the half of an automatic update that is safe to do while the server
+/// is working: it costs one API call when there is nothing new, and when there
+/// is, the download and the checksum and the version check all happen against a
+/// file nothing is running. [`apply_staged`] is the other half, and it happens
+/// at a process start.
+///
+/// `Ok(None)` means there was nothing newer, which is the ordinary answer and
+/// not a failure. A network that is not answering is `Err`, because a caller
+/// logging "could not check" is telling the truth and a caller told "up to
+/// date" would not be.
+pub fn stage() -> Result<Option<String>, String> {
+    let release = latest().ok_or("could not read the release list")?;
+    if !is_older(current(), &release.version) {
+        return Ok(None);
+    }
+
+    let at = std::env::current_exe().map_err(|e| format!("cannot find the running binary: {e}"))?;
+    let staged = staged_at(&at);
+    // Already waiting, and for this version: downloading it again every six
+    // hours until somebody restarts would be a lot of bandwidth to prove a
+    // point.
+    if version_of(&staged).as_deref() == Some(release.version.as_str()) {
+        return Ok(None);
+    }
+
+    let scratch = Scratch::new()?;
+    let fresh = fetch_verified(scratch.path(), &release)?;
+    // Through the same copy-then-rename as an install, so a torn write cannot
+    // leave a half-file that the next start would try to run.
+    swap(&fresh, &staged)?;
+    Ok(Some(release.version))
+}
+
+/// Move a staged release into place, if one is waiting.
+///
+/// Called at the top of `main`, before anything has happened, so the swap
+/// cannot land halfway through a command. Returns where the new binary is, and
+/// the caller is expected to `exec` into it -- otherwise this process carries
+/// on as the version it already was, and the update would need a second
+/// restart to take effect.
+///
+/// **A running server is not disturbed by this.** Linux keeps an executing
+/// binary on its old inode through a rename, so an `sbxd` serving sessions goes
+/// on serving them as the version it started as, however many times another
+/// invocation swaps the file underneath it. The new one is what the next start
+/// gets, which is the whole point of staging rather than installing.
+pub fn apply_staged() -> Option<PathBuf> {
+    let at = std::env::current_exe().ok()?;
+    let staged = staged_at(&at);
+    if !staged.is_file() {
+        return None;
+    }
+
+    // What the staged file says it is, asked of the file itself rather than
+    // remembered from when it was downloaded: a note beside it could disagree
+    // with it, and the file is the thing that will run.
+    let staged_version = version_of(&staged);
+    let newer = staged_version
+        .as_deref()
+        .is_some_and(|v| is_older(current(), v));
+    if !newer {
+        // Stale, damaged, or a downgrade -- and in every one of those cases the
+        // right move is to stop carrying it around. A staged binary that is not
+        // newer will never become newer.
+        let _ = std::fs::remove_file(&staged);
+        return None;
+    }
+
+    if let Err(e) = swap(&staged, &at) {
+        // Not fatal, and deliberately not loud: the binary that is running is
+        // fine, and a server that refuses to start because it could not update
+        // itself would be a worse failure than the one it is reporting.
+        eprintln!("{BIN}: could not apply the staged update: {e}");
+        return None;
+    }
+    let _ = std::fs::remove_file(&staged);
+    Some(at)
+}
+
+/// What a binary on disk says its version is, or `None` if it will not run.
+fn version_of(bin: &Path) -> Option<String> {
+    if !bin.is_file() {
+        return None;
+    }
+    let out = Command::new(bin).arg("--version").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().nth(1).map(str::to_string)
+}
+
+// ------------------------------------------------------------------ downloads
+
+/// A temporary directory that removes itself, so every path out of a download
+/// cleans up -- including the failures, of which there are several.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new() -> Result<Self, String> {
+        let dir = std::env::temp_dir().join(format!("{BIN}-update-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        Ok(Scratch(dir))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Download a release, check it against the published sum, unpack it, and
+/// confirm the binary inside is the version the release claims.
+///
+/// Everything up to the moment of replacement, and nothing after it: the caller
+/// decides whether the result goes over the running binary ([`install`]) or
+/// beside it ([`stage`]). Shared so an automatic update cannot end up with
+/// weaker checks than a manual one -- which is the failure this arrangement
+/// exists to prevent.
+fn fetch_verified(dir: &Path, release: &Release) -> Result<PathBuf, String> {
     let target = target().ok_or_else(|| {
         format!(
-            "no release is built for {} {}\n     fix: build from source with `cargo install --git https://github.com/{REPO} sbx --locked`",
+            "no release is built for {} {}\n     fix: build from source with `cargo install --git https://github.com/{REPO} sbxd --locked`",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
@@ -256,25 +411,7 @@ pub fn install(tag: Option<&str>, force: bool) -> Result<Outcome, String> {
         )
     })?;
 
-    let dir = std::env::temp_dir().join(format!("sbx-update-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let result = stage_and_swap(&dir, asset, sums, &name, &release);
-    let _ = std::fs::remove_dir_all(&dir);
-    result
-}
-
-/// Download, verify, unpack, and put the new binary in place.
-///
-/// Split out so the temporary directory is cleaned up on every path out,
-/// including the failures.
-fn stage_and_swap(
-    dir: &Path,
-    asset: &Asset,
-    sums: &Asset,
-    name: &str,
-    release: &Release,
-) -> Result<Outcome, String> {
-    let tarball = dir.join(name);
+    let tarball = dir.join(&name);
     download(&asset.url, &tarball)?;
     let sums_path = dir.join(SUMS);
     download(&sums.url, &sums_path)?;
@@ -282,7 +419,7 @@ fn stage_and_swap(
     let published =
         std::fs::read_to_string(&sums_path).map_err(|e| format!("{}: {e}", sums_path.display()))?;
     let expected =
-        expected_sha(&published, name).ok_or_else(|| format!("{SUMS} does not cover {name}"))?;
+        expected_sha(&published, &name).ok_or_else(|| format!("{SUMS} does not cover {name}"))?;
     let actual = sha256(&tarball)?;
     if actual != expected {
         // Not a retry: a mismatch is either a corrupted download or a swapped
@@ -311,27 +448,15 @@ fn stage_and_swap(
     // Ask the downloaded binary what it is before trusting it with the path the
     // running one occupies. A release whose asset was built from the wrong
     // commit answers the wrong version here, which is cheaper to find out now
-    // than after the swap.
-    let reported = Command::new(&fresh)
-        .arg("--version")
-        .output()
-        .map_err(|e| format!("the downloaded binary does not run: {e}"))?;
-    let reported = String::from_utf8_lossy(&reported.stdout);
-    let reported = reported.split_whitespace().nth(1).unwrap_or("");
-    if reported != release.version {
-        return Err(format!(
-            "the downloaded binary reports {reported}, not {}",
+    // than after the swap -- and is exactly what went wrong in v0.3.0.
+    match version_of(&fresh).as_deref() {
+        Some(v) if v == release.version => Ok(fresh),
+        Some(v) => Err(format!(
+            "the downloaded binary reports {v}, not {}",
             release.version
-        ));
+        )),
+        None => Err("the downloaded binary does not run".into()),
     }
-
-    let at = std::env::current_exe().map_err(|e| format!("cannot find the running binary: {e}"))?;
-    swap(&fresh, &at)?;
-    Ok(Outcome::Updated {
-        from: current().to_string(),
-        to: release.version.clone(),
-        at,
-    })
 }
 
 /// Put `fresh` where `at` is, atomically.
@@ -647,5 +772,79 @@ bbbb *sbxd-v0.2.0-aarch64-unknown-linux-musl.tar.gz
         let _ = std::fs::set_permissions(&installed, std::fs::Permissions::from_mode(0o755));
         let _ = std::fs::remove_dir_all(&downloaded);
         let _ = std::fs::remove_dir_all(&installed);
+    }
+
+    /// A stand-in for a released binary: something that runs and answers
+    /// `--version`, which is all [`version_of`] and [`apply_staged`] ask of one.
+    #[cfg(unix)]
+    fn fake_binary(at: &Path, version: &str) {
+        std::fs::write(at, format!("#!/bin/sh\necho '{BIN} {version}'\n")).unwrap();
+        make_executable(at).unwrap();
+    }
+
+    /// The ordinary case, and the cheap one: nothing downloaded, nothing to do,
+    /// and this runs at the top of every single command.
+    #[test]
+    #[cfg(unix)]
+    fn nothing_staged_is_nothing_to_apply() {
+        let bin = scratch("apply-none");
+        fake_binary(&bin.join(BIN), "0.4.0");
+        assert!(!staged_at(&bin.join(BIN)).exists());
+        // `apply_staged` reads `current_exe`, so the unit under test here is
+        // the decision, driven directly.
+        assert_eq!(version_of(&staged_at(&bin.join(BIN))), None);
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    /// What a staged file is asked, and what it answers when it is not a
+    /// binary at all -- a truncated download, or a half-written swap.
+    #[test]
+    #[cfg(unix)]
+    fn a_staged_file_that_will_not_run_has_no_version() {
+        let bin = scratch("apply-junk");
+        let staged = bin.join("staged");
+        std::fs::write(&staged, "not a binary").unwrap();
+        make_executable(&staged).unwrap();
+        assert_eq!(version_of(&staged), None, "junk must not report a version");
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_staged_binary_reports_the_version_it_will_run_as() {
+        let bin = scratch("apply-version");
+        let staged = bin.join("staged");
+        fake_binary(&staged, "0.5.0");
+        assert_eq!(version_of(&staged).as_deref(), Some("0.5.0"));
+        let _ = std::fs::remove_dir_all(&bin);
+    }
+
+    /// The staged path is beside the binary and not in `/tmp`, because the swap
+    /// is a rename and a rename across filesystems fails with `EXDEV`. A
+    /// dotfile, so it is not a second command in a `PATH` completion.
+    #[test]
+    fn a_staged_release_waits_beside_the_binary_it_will_replace() {
+        let at = Path::new("/home/someone/.local/bin").join(BIN);
+        let staged = staged_at(&at);
+        assert_eq!(staged.parent(), at.parent(), "a rename must not cross /tmp");
+        assert!(
+            staged
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with('.'),
+            "the staged file must not look like a command"
+        );
+        assert_ne!(staged, at);
+    }
+
+    /// Only forwards. A staged file that is not newer than what is running --
+    /// stale after a manual `sbxd update`, or a downgrade -- must not be
+    /// applied, and must not be kept either: it will never become newer.
+    #[test]
+    fn only_a_newer_staged_release_is_worth_applying() {
+        assert!(is_older("0.4.0", "0.4.1"), "newer is applied");
+        assert!(!is_older("0.4.1", "0.4.0"), "a downgrade is not");
+        assert!(!is_older("0.4.0", "0.4.0"), "the same version is not");
     }
 }

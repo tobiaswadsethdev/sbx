@@ -218,9 +218,15 @@ Building it there instead needs Rust, Node 22 or newer, and the MSVC build tools
 Linux. Only the client half of this repository compiles for Windows, which CI
 checks on every change; `sbxd` does not, and is not asked to.
 
-**Updating is downloading the newer installer.** `sbxd update` replaces a Linux
-binary in place and has no Windows half; a `.msi` installed over an older one
-upgrades it. There is no background check on either platform.
+**The window updates itself, once you say so.** It checks for a newer release
+at launch and puts a bar across the top when there is one; *install and
+restart* downloads it, checks it against a signature made when the release was
+built, runs the installer and relaunches. It never does that without being
+clicked -- see [desktop.md](desktop.md#keeping-it-current).
+
+Windows only, because Windows is the only platform with an installer to
+replace: the Linux window is built from the tree, so there is nothing for an
+updater to fetch.
 
 **If the server is in WSL**, which is the case this was built for, the address
 the window dials depends on how WSL is networked -- mirrored means
@@ -247,13 +253,40 @@ session already running is untouched -- its agent lives in a sandbox, not in
 this binary -- but the sandbox image is versioned separately, so `sbxd image
 build` after an update is what picks up a change to the image recipe.
 
-**Nothing updates itself.** There is no background check and no timer: `sbx
-doctor` reports when a newer release is out, and that is the whole of it.
+`sbxd doctor` reports when a newer release is out, whether or not anything is
+going to act on it:
 
 ```
-[ warn ] version      sbx 0.2.0; 0.3.0 is out
+[ warn ] version      sbxd 0.4.0; 0.4.1 is out
          fix: sbxd update
 ```
+
+### Updating without being asked
+
+`sbxd serve` looks for a newer release every six hours, and **downloads one
+without installing it**. The verified binary waits beside the running one as
+`.sbxd-staged`, and the swap happens the next time `sbxd` starts -- any start,
+whether that is a `systemctl --user restart sbxd` or your next `sbxd ls`.
+
+That split is the point. Replacing a binary is safe; replacing it *now* is not,
+because a server driving four agents is a server somebody is using. Staging
+costs one API call when there is nothing new, and when there is, the download,
+the checksum and the version check all happen against a file nothing is
+running.
+
+A server that is already serving is never disturbed by the swap. Linux keeps a
+running program on its old inode through a rename, so the process goes on as
+the version it started as however many times the file underneath it changes;
+what the new one is, is what the next start gets.
+
+```toml
+auto_update = false      # never reach github; `sbxd update` still works by hand
+```
+
+The staged file is discarded rather than applied if it is not newer than what
+is running -- stale after a manual `sbxd update`, a downgrade, or a truncated
+download that will not run. It never becomes newer, so carrying it around is
+not worth the stat.
 
 A binary installed with `cargo install` can still be updated this way, since it
 is replaced where it stands. Going the other way -- back to a build from the

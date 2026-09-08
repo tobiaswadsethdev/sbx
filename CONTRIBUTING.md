@@ -153,6 +153,27 @@ Until the first tag exists there is nothing to download, and both installers
 say so and fall back to building from source. That is the intended behaviour,
 not a gap to work around.
 
+### The signing keys
+
+Two, for two different jobs, and both optional in the sense that a release
+without them still builds:
+
+| secret | what it is for | without it |
+| --- | --- | --- |
+| `WINDOWS_CERTIFICATE`, `WINDOWS_CERTIFICATE_PASSWORD` | code-signing the installer, so SmartScreen does not warn about it | the installer is unsigned; the checksums are still the integrity story |
+| `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | signing `latest.json`, which is what an installed window checks before replacing itself | no `latest.json` is published and the window never offers to update |
+
+The updater key is the one to be careful with. Its public half is compiled into
+every window ever shipped (`plugins.updater.pubkey` in `tauri.conf.json`), and
+a window will not install an update signed by anything else -- so **losing the
+private key means no already-installed window can ever be updated again**,
+whatever is published. Changing it has the same effect on every copy already
+out there. Back it up somewhere that is not this repository.
+
+`createUpdaterArtifacts` makes `tauri build` *fail* without the key rather than
+skip the signing, so `release.yml` turns that option back off when the secret
+is absent. That is what lets a fork cut a release at all.
+
 ## Reporting bugs
 
 The single most useful thing to include is `sbxd doctor` output -- it captures

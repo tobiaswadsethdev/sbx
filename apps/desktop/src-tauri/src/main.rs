@@ -621,7 +621,7 @@ fn main() {
     // Wayland is left alone: WSLg is a Wayland compositor and the window is a
     // Wayland client there. `GDK_BACKEND=x11` is a way to make X11 screenshot
     // tooling see the surface, not a way to run.
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(Streaming::default())
         // An OS notification when a session starts waiting on a permission
         // prompt is the single largest quality-of-life gain this window has
@@ -630,7 +630,22 @@ fn main() {
         // at is a badge nobody sees. The window decides *when* -- see
         // `App.tsx` -- because it is the thing that knows which states it has
         // already seen.
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+
+    // Replacing itself, on the one platform that ships an installer to replace.
+    // Checking and asking are the window's job -- see `src/Update.tsx`; these
+    // two only make it possible. `capabilities/updater.json` is scoped to the
+    // same platform, because a permission naming a plugin that was not compiled
+    // in fails the build rather than being ignored.
+    //
+    // Rebound rather than chained, because the two arms of a `cfg` inside a
+    // builder chain have different types and inference has nothing to go on.
+    #[cfg(windows)]
+    let builder = builder
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init());
+
+    builder
         .setup(|app| {
             // Debug builds open the inspector. There is no other way to see a
             // console message from inside this window.
