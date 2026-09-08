@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "updater",
+  "description": "Asking whether there is a newer release, fetching it, and restarting into it. Its own file rather than two more lines in `default`, because it is scoped to one platform: the plugins behind these are compiled in on Windows only -- Linux builds the window from the tree and has no installer to replace -- and a permission naming a plugin that is not there fails the build rather than being ignored.",
+  "platforms": [
+    "windows"
+  ],
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "updater:default",
+    "process:allow-restart"
+  ]
+}

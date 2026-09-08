@@ -24,3 +24,9 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-notification = "2.4.0"
+# Windows only: it is the one platform with an installer to replace.
+# On Linux the bundle is built from the tree, so there is nothing for an
+# updater to fetch and the plugin would be dead weight in the binary.
+[target.'cfg(windows)'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"

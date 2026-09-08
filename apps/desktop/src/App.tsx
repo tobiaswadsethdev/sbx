@@ -28,6 +28,7 @@ import { NewWorktreeDialog } from "./NewWorktree";
 import type { Against } from "./gen/Against";
 import { keyOf, Tabs, type Tab } from "./Tabs";
 import { group, Tree } from "./Tree";
+import { UpdateBar } from "./Update";
 
 /// How often the worktree list is re-read. Slower than the terminal's second,
 /// because every refresh is a round trip to a server that may be a continent
@@ -285,6 +286,7 @@ export default function App() {
 
   return (
     <div className="app">
+      <UpdateBar />
       <header>
         <span className="mark">sbx</span>
         {servers && servers.length > 1 ? (

@@ -1326,3 +1326,40 @@ main { display: flex; flex: 1; min-height: 0; }
    back without `!important`. `normal` is the same number of pixels, and the
    number is not the problem: WebKit derives a different baseline from it. */
 .terminal.broken-font-metrics .xterm-rows span { line-height: normal; }
+
+/* The newer-release bar, above the header rather than over it: a window that
+   shifts down by a row is a window you notice, and one that covers its own
+   controls is one you fight. It is gone from the layout entirely when there is
+   nothing to say -- `UpdateBar` renders null, not an empty element.
+
+   Neutral, and not one of the four state hues. Those mean "an agent is
+   working", "an agent wants you", "it passed", "it failed", and the rule at the
+   top of this file is that nothing else may borrow them -- a bar about a
+   *download* wearing the colour that means an agent needs answering would be
+   exactly the confusion the rule exists to stop. A failed install says so in
+   words instead. */
+.update {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-strong);
+}
+.update .what { font-weight: 600; color: var(--text); }
+.update .note { color: var(--dim); }
+.update a { color: var(--dim); }
+.update a:hover { color: var(--text); }
+.update button {
+  font-size: 12px;
+  color: var(--dim);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+/* The first button pushes the group right; the rest sit against it, so a pair
+   ends up together on the right rather than one at each end. */
+.update button:first-of-type { margin-left: auto; }
+.update button:hover { color: var(--text); }
+.update .take { color: var(--text); font-weight: 600; }

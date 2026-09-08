@@ -14,6 +14,7 @@ repo_roots = ["~/dev", "~/work"]                      # where the picker looks
 worktree_root = "~/.local/share/sbx/worktrees"        # where worktree sessions go
 branch_prefix = "tobias"                              # <prefix>/<name> for a work branch
 refresh    = "1s"                                     # unused since v0.4.0; still parsed
+auto_update = true                                    # download new releases ahead of a restart
 
 skills     = ["ship-pr"]                               # copied into every session
 
@@ -61,7 +62,16 @@ what looks like an authentication problem several steps later.
 measured and related to each other; it scales all of them, so `"4s"` polls a
 quarter as often (41 execs in a 30 second window became 13) and `"500ms"` twice
 as often. 250ms to 60s -- below that the terminal interface's 100ms input tick became the
-limit and the extra `git status` inside every sandbox buys nothing.
+limit and the extra `git status` inside every sandbox buys nothing. Nothing has
+read it since that interface went in v0.4.0; the key is still parsed so a file
+written before then still loads.
+
+`auto_update` is on unless it is turned off. What it permits is a *download*:
+`sbxd serve` checks every six hours and leaves a verified binary beside the
+running one, and the swap happens at the next start rather than under a live
+session -- [install.md](install.md#updating-without-being-asked) is the whole
+of it. `false` for a machine that would rather not reach github at all, which
+also turns the check off, not just the install.
 
 Where a default meets something sbx already works out for itself, the more
 specific answer wins:

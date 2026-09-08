@@ -80,6 +80,14 @@ pub struct Config {
     /// related to each other and a single absolute interval would break the
     /// relationships.
     pub refresh: Option<Duration>,
+
+    /// Whether `sbxd serve` may fetch a newer release in the background.
+    ///
+    /// It never replaces a running binary. What it does is download and verify
+    /// ahead of time and leave the result beside the current one; the swap
+    /// happens at the next process start. `false` turns the check off
+    /// altogether, for a machine that would rather not reach github at all.
+    pub auto_update: Option<bool>,
     /// Skills copied into every new session, already resolved to host paths.
     ///
     /// Global for the same reason as [`Self::mcp`]: this is what an agent of
@@ -356,6 +364,7 @@ impl Config {
                 .map(|list| list.iter().map(|p| expand_tilde(p)).collect()),
             worktree_root: raw.worktree_root.as_deref().map(expand_tilde),
             refresh,
+            auto_update: raw.auto_update,
             skills: resolved_skills,
             mcp,
             trackers,
@@ -421,6 +430,7 @@ struct Raw {
     repo_roots: Option<Vec<PathBuf>>,
     worktree_root: Option<PathBuf>,
     refresh: Option<String>,
+    auto_update: Option<bool>,
     skills: Option<Vec<String>>,
     /// `[[mcp]]` tables. An `Option` so `deny_unknown_fields` still rejects a
     /// misspelled `[[mcps]]` rather than reading it as none configured.
