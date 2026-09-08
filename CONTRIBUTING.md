@@ -89,16 +89,46 @@ increments.
 ## Releasing
 
 Releases are what `install.sh` and `sbx update` install, and both find them by
-name. Tagging is the whole process:
+name. Cutting one is a dispatch of **Tag a release**
+(`.github/workflows/tag.yml`) from the Actions tab, with `patch`, `minor` or
+`major` -- or an exact version if the increment is not the point. It works out
+the next version, rewrites the seven files that carry it, commits that as
+`Release vX.Y.Z`, tags it, pushes both, and hands the tag to `release.yml`.
+`dry_run` does everything except the pushing and prints the diff, which is the
+cheap way to check a bump before it is permanent.
+
+Seven files, because the version is written down in four formats across two
+cargo workspaces:
+
+| | |
+| --- | --- |
+| `Cargo.toml`, `Cargo.lock` | the workspace version every crate inherits |
+| `apps/desktop/package.json`, `package-lock.json` | the front end |
+| `apps/desktop/src-tauri/Cargo.toml`, `Cargo.lock` | the desktop crate, its own workspace |
+| `apps/desktop/src-tauri/tauri.conf.json` | what Windows shows in Add or Remove Programs |
+
+Bumping them by hand is the reason this is a workflow. `v0.3.0` was tagged with
+all seven still reading `0.2.0`, and `sbx update` refuses a release whose binary
+reports a different version than the tag claims -- so the current `latest` is
+one no installed copy can update to. The workflow writes all seven from one
+number and refuses to tag if the diff touches anything else.
+
+Doing it by hand still works, and is still the fallback if Actions is down:
 
 ```sh
-# bump `version` in the workspace Cargo.toml, commit it, then:
+# bump the seven files above, commit them, then:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
+A tag pushed from a laptop starts `release.yml` directly. One pushed by
+`tag.yml` does not -- GitHub does not run workflows on events raised with the
+built-in `GITHUB_TOKEN` -- which is why that workflow dispatches this one
+explicitly rather than relying on the push. It needs no personal access token
+to do it.
+
 `.github/workflows/release.yml` builds a static musl binary for
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, packs each as
-`sbx-<tag>-<target>.tar.gz` with the binary flat at the root, and publishes them
+`sbx-<tag>-<target>.tar.gz` with `sbx` and `sbxd` flat at the root, and publishes them
 with one `SHA256SUMS` covering both. Three files have to agree about those names
 -- the workflow, `install.sh` and `crates/sbx-core/src/update.rs` -- and a test in
 `update.rs` fails if they ever stop agreeing, so a rename in one of them is

@@ -841,8 +841,16 @@ fn cmd_update(check: bool, tag: Option<&str>, force: bool) -> Fallible {
             println!("sbx {version} is the newest release; nothing to do");
             println!("  reinstall it anyway with: sbx update --force");
         }
-        update::Outcome::Updated { from, to, at } => {
+        update::Outcome::Updated { from, to, at, sbxd } => {
             println!("sbx {from} -> {to}  ({})", at.display());
+            // Replacing the file does not replace the process: Linux keeps a
+            // running `sbxd` on the old inode until something restarts it, and
+            // a server still answering the previous version is exactly the
+            // confusion this line exists to prevent.
+            if let Some(sbxd) = sbxd {
+                println!("sbxd {from} -> {to}  ({})", sbxd.display());
+                println!("  restart it to pick this up: systemctl --user restart sbxd");
+            }
             // The sandbox image is versioned separately and an update is the
             // moment its recipe most likely changed underneath it.
             println!("  `sbx image build` picks up any change to the sandbox image");
