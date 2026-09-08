@@ -2443,7 +2443,7 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
 name = "openshell-client"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3040,7 +3040,7 @@ dependencies = [
 
 [[package]]
 name = "sbx-client"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "rustls",
  "sbx-core",
@@ -3053,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "sbx-core"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "openshell-client",
  "serde",
@@ -3064,7 +3064,7 @@ dependencies = [
 
 [[package]]
 name = "sbx-desktop"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "sbx-client",
  "sbx-core",
@@ -3078,7 +3078,7 @@ dependencies = [
 
 [[package]]
 name = "sbx-proto"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "sbx-core",
