@@ -28,9 +28,14 @@
 //! older can follow that: `sbx update` replaces the binary it is running, and
 //! from v0.4.0 there is no `sbx` to replace it with. It fails saying the
 //! release has no asset by the name it wants, which is true and is the least
-//! confusing thing it could say -- the way across is to re-run `install.sh`,
-//! once. v0.3.1 is the last release the old updater can reach, and it puts
-//! `sbxd` on the machine, so a `sbxd update` is waiting on the other side.
+//! confusing thing it could say.
+//!
+//! **The way across is one `install.sh`, and there is no update path that
+//! crosses it.** Not even from v0.3.1: the `sbxd` that release installs is the
+//! server alone, since this module did not move into it until v0.4.0, so it
+//! cannot fetch its own successor. v0.3.1 is worth having for a narrower
+//! reason -- it is the last release `sbx update` can reach, so nobody is
+//! stranded on the v0.3.0 that no installed copy could update to.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

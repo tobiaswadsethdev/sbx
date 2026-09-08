@@ -105,8 +105,10 @@ jobs:
           # `sbx update` replaces the binary it is running and there is no
           # longer an `sbx` to replace it with -- so it fails saying this
           # release has no `sbx-...tar.gz`, which is true. v0.3.1 is the last
-          # release the old updater can reach, and it installs `sbxd`, so the
-          # way across is one `install.sh` and never again.
+          # release `sbx update` can reach at all, which is what keeps anyone
+          # from being stranded on v0.3.0 -- but it is not a bridge across this
+          # rename, because the `sbxd` it installs is the server alone and has
+          # no `update` of its own. One `install.sh`, and never again.
           tar -czf "sbxd-${TAG}-${{ matrix.target }}.tar.gz" -C "$bin" sbxd
           sha256sum "sbxd-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 

@@ -140,9 +140,14 @@ The asset was `sbx-<tag>-<target>.tar.gz` until v0.4.0, and carried `sbx`.
 Nothing installed before then can update across that rename: `sbx update`
 replaces the binary it is running, and there is no longer an `sbx` to replace
 it with. It fails saying the release has no asset by the name it wants, which
-is true, and the way across is one `install.sh`. v0.3.1 is the last release the
-old updater can reach, and it puts `sbxd` on the machine, so there is a working
-`sbxd update` waiting on the other side.
+is true.
+
+**The way across is one `install.sh`, from any release before v0.4.0.** There
+is no update path that crosses it. The `sbxd` that v0.3.1 installs is the
+server alone -- `update` did not move into it until v0.4.0 -- so it cannot
+fetch its own successor either. What v0.3.1 is for is narrower and still worth
+having: it is the last release `sbx update` can reach at all, so nobody is left
+sitting on the v0.3.0 that no installed copy could update to.
 
 Until the first tag exists there is nothing to download, and both installers
 say so and fall back to building from source. That is the intended behaviour,
