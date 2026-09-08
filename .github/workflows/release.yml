@@ -145,7 +145,15 @@ jobs:
       # extra reason, which is that `createUpdaterArtifacts` makes `tauri build`
       # *fail* without a key rather than skip the signing. A fork would not be
       # able to cut a release at all.
-      HAS_UPDATER_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+      #
+      # Both halves, because the key is password-protected and half a pair is a
+      # state you can reach by running one `gh secret set` and being
+      # interrupted. Checking only the key would take that half-configured
+      # repository and turn it into a build that fails while trying to sign,
+      # rather than a build that quietly skips signing.
+      HAS_UPDATER_KEY: >-
+        ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != ''
+            && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD != '' }}
     steps:
       # The tag, explicitly, and not whatever ref the run was started from. On
       # a tag push those are the same thing; on a `workflow_dispatch` they are

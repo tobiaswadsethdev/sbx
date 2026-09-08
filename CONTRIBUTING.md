@@ -171,8 +171,14 @@ whatever is published. Changing it has the same effect on every copy already
 out there. Back it up somewhere that is not this repository.
 
 `createUpdaterArtifacts` makes `tauri build` *fail* without the key rather than
-skip the signing, so `release.yml` turns that option back off when the secret
-is absent. That is what lets a fork cut a release at all.
+skip the signing, so `release.yml` turns that option back off when the secrets
+are absent. That is what lets a fork cut a release at all.
+
+Both halves of each pair have to be set. The key is password-protected, so a
+repository with `TAURI_SIGNING_PRIVATE_KEY` and no
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` is a repository where the build tries to
+sign and cannot -- which is why the workflow tests for both and treats one
+without the other as no key at all.
 
 ## Reporting bugs
 
