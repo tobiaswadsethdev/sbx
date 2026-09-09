@@ -868,7 +868,7 @@ mod tests {
             port = 9000
             args = ["--transport", "http"]
             secrets = ["SENTRY_TOKEN"]
-            env = { SENTRY_ORG = "inet" }
+            env = { SENTRY_ORG = "contoso" }
             "#,
         )
         .unwrap();
@@ -879,7 +879,7 @@ mod tests {
         let m = e.managed.as_ref().unwrap();
         assert_eq!(m.image, "ghcr.io/example/mcp-sentry:1.4");
         assert_eq!(m.secrets, ["SENTRY_TOKEN"]);
-        assert_eq!(m.env.get("SENTRY_ORG").unwrap(), "inet");
+        assert_eq!(m.env.get("SENTRY_ORG").unwrap(), "contoso");
         // What a session records is the server, not the recipe: the image and
         // the secret names are the server's business.
         assert_eq!(c.mcp_servers()[0].name, "sentry");

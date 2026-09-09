@@ -966,8 +966,8 @@ mod tests {
             name: kind.label().to_string(),
             secret: "TOKEN".into(),
             repo: None,
-            org: Some("inetse".into()),
-            project: Some("inet".into()),
+            org: Some("contoso".into()),
+            project: Some("tools".into()),
             site: Some("https://example.atlassian.net".into()),
             email: Some("you@example.com".into()),
             query: None,
@@ -1067,7 +1067,7 @@ mod tests {
         // payload for a url whose shape is fixed.
         assert_eq!(
             t.url,
-            "https://dev.azure.com/inetse/inet/_workitems/edit/1234"
+            "https://dev.azure.com/contoso/tools/_workitems/edit/1234"
         );
         assert_eq!(
             t.branch,

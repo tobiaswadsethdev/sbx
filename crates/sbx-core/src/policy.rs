@@ -1002,7 +1002,7 @@ mod tests {
             assert!(y.contains("dev.azure.com"), "{} lost azure devops", t.name);
             // Azure DevOps has the extra project level, but the git paths are
             // tail-anchored and identical -- verified against a real clone of
-            // /inetse/inet/_git/Inet.DotFiles.
+            // /contoso/tools/_git/Contoso.DotFiles.
             assert!(y.contains("/**/info/refs*"), "{}", t.name);
         }
     }

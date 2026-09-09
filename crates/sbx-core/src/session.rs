@@ -223,7 +223,7 @@ pub fn derive_name(task: &str, repo: &str) -> Option<String> {
 /// something else -- and with no task typed yet both derive the repository's own
 /// name. Refusing the second one until the name is edited by hand makes the
 /// common case the one that needs work, so a counter is appended instead:
-/// `inet-server`, `inet-server-2`, `inet-server-3`.
+/// `api-server`, `api-server-2`, `api-server-3`.
 ///
 /// The base is shortened to make room for the suffix rather than the suffix being
 /// dropped, because the gateway's name budget is the hard part and a name that no
@@ -604,16 +604,16 @@ mod tests {
     /// both derive the repository's name. The second must not need hand-editing.
     #[test]
     fn a_taken_name_gets_a_counter() {
-        let taken = vec!["inet-server".to_string()];
-        assert_eq!(unique_name("inet-server", &taken), "inet-server-2");
+        let taken = vec!["api-server".to_string()];
+        assert_eq!(unique_name("api-server", &taken), "api-server-2");
         assert_eq!(
             unique_name("other", &taken),
             "other",
             "free names are left be"
         );
 
-        let taken = vec!["inet-server".into(), "inet-server-2".into()];
-        assert_eq!(unique_name("inet-server", &taken), "inet-server-3");
+        let taken = vec!["api-server".into(), "api-server-2".into()];
+        assert_eq!(unique_name("api-server", &taken), "api-server-3");
     }
 
     /// The suffix has to fit inside the gateway's budget, or the name it produces

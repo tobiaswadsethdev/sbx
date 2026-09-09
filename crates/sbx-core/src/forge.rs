@@ -304,13 +304,14 @@ mod tests {
     fn parses_the_url_the_azure_devops_clone_button_gives_you() {
         // Note the organisation in the userinfo position: this is the default
         // the web UI offers, and the form most likely to be pasted in.
-        let r = Remote::parse("https://inetse@dev.azure.com/inetse/MyProject/_git/MyRepo").unwrap();
+        let r =
+            Remote::parse("https://contoso@dev.azure.com/contoso/MyProject/_git/MyRepo").unwrap();
         assert_eq!(r.forge, Forge::AzureDevOps);
         assert_eq!(r.host, "dev.azure.com");
-        assert_eq!(r.org, "inetse");
+        assert_eq!(r.org, "contoso");
         assert_eq!(r.project.as_deref(), Some("MyProject"));
         assert_eq!(r.repo, "MyRepo");
-        assert_eq!(r.slug(), "inetse/MyProject/MyRepo");
+        assert_eq!(r.slug(), "contoso/MyProject/MyRepo");
     }
 
     /// The userinfo has to go. With a username in the URL git asks for that
@@ -320,23 +321,23 @@ mod tests {
     #[test]
     fn userinfo_is_stripped_from_the_clone_url() {
         for url in [
-            "https://inetse@dev.azure.com/inetse/P/_git/R",
-            "https://anything@dev.azure.com/inetse/P/_git/R",
+            "https://contoso@dev.azure.com/contoso/P/_git/R",
+            "https://anything@dev.azure.com/contoso/P/_git/R",
         ] {
             let r = Remote::parse(url).unwrap();
-            assert_eq!(r.clone_url, "https://dev.azure.com/inetse/P/_git/R");
+            assert_eq!(r.clone_url, "https://dev.azure.com/contoso/P/_git/R");
             assert!(!r.clone_url.contains('@'), "{url}");
         }
         // A URL that never had userinfo must come back unchanged.
-        let r = Remote::parse("https://dev.azure.com/inetse/P/_git/R").unwrap();
-        assert_eq!(r.clone_url, "https://dev.azure.com/inetse/P/_git/R");
+        let r = Remote::parse("https://dev.azure.com/contoso/P/_git/R").unwrap();
+        assert_eq!(r.clone_url, "https://dev.azure.com/contoso/P/_git/R");
     }
 
     #[test]
     fn parses_azure_devops_without_a_project() {
         // A repo named the same as its project is addressable without it.
-        let r = Remote::parse("https://dev.azure.com/inetse/_git/Shared").unwrap();
-        assert_eq!(r.org, "inetse");
+        let r = Remote::parse("https://dev.azure.com/contoso/_git/Shared").unwrap();
+        assert_eq!(r.org, "contoso");
         assert_eq!(r.repo, "Shared");
         assert_eq!(
             r.project.as_deref(),
@@ -349,9 +350,9 @@ mod tests {
     /// organisation is in the host rather than the path.
     #[test]
     fn parses_the_legacy_visualstudio_com_host() {
-        let r = Remote::parse("https://inetse.visualstudio.com/MyProject/_git/MyRepo").unwrap();
+        let r = Remote::parse("https://contoso.visualstudio.com/MyProject/_git/MyRepo").unwrap();
         assert_eq!(r.forge, Forge::AzureDevOps);
-        assert_eq!(r.org, "inetse");
+        assert_eq!(r.org, "contoso");
         assert_eq!(r.project.as_deref(), Some("MyProject"));
         assert_eq!(r.repo, "MyRepo");
     }
@@ -390,10 +391,10 @@ mod tests {
 
     #[test]
     fn builds_the_pull_request_endpoint() {
-        let r = Remote::parse("https://dev.azure.com/inetse/MyProject/_git/MyRepo").unwrap();
+        let r = Remote::parse("https://dev.azure.com/contoso/MyProject/_git/MyRepo").unwrap();
         assert_eq!(
             r.pull_request_url().unwrap(),
-            "https://dev.azure.com/inetse/MyProject/_apis/git/repositories/MyRepo/pullrequests?api-version=7.1"
+            "https://dev.azure.com/contoso/MyProject/_apis/git/repositories/MyRepo/pullrequests?api-version=7.1"
         );
         // GitHub goes through `gh`, so there is no URL to build.
         let gh = Remote::parse("https://github.com/o/r").unwrap();
@@ -406,8 +407,8 @@ mod tests {
     fn ssh_remotes_are_rejected_with_an_explanation() {
         for url in [
             "git@github.com:octocat/Hello-World.git",
-            "git@ssh.dev.azure.com:v3/inetse/MyProject/MyRepo",
-            "ssh://git@ssh.dev.azure.com/v3/inetse/P/R",
+            "git@ssh.dev.azure.com:v3/contoso/MyProject/MyRepo",
+            "ssh://git@ssh.dev.azure.com/v3/contoso/P/R",
         ] {
             let e = Remote::parse(url).unwrap_err();
             assert!(matches!(e, Error::Ssh(_)), "{url} -> {e:?}");
@@ -428,10 +429,10 @@ mod tests {
         // Azure DevOps without the `_git` landmark is not a repository URL --
         // this is what a project's overview page looks like.
         assert!(matches!(
-            Remote::parse("https://dev.azure.com/inetse/MyProject"),
+            Remote::parse("https://dev.azure.com/contoso/MyProject"),
             Err(Error::Incomplete { .. })
         ));
-        let e = Remote::parse("https://dev.azure.com/inetse/MyProject").unwrap_err();
+        let e = Remote::parse("https://dev.azure.com/contoso/MyProject").unwrap_err();
         assert!(e.to_string().contains("_git"), "{e}");
     }
 
