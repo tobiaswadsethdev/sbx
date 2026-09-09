@@ -188,6 +188,20 @@ fn sessions(server: String) -> Result<Vec<Session>, Failed> {
     expect_reply!(reply, Reply::Ls { sessions, .. } => sessions, "a session list")
 }
 
+/// End a session: its sandbox, and its record.
+///
+/// Answers with the refreshed list, so the window redraws from the server's
+/// account rather than dropping the row it had. The confirmation belongs to the
+/// window -- see `Tree.tsx` -- because this is not undoable and the agent
+/// inside may be part-way through something.
+#[tauri::command(async)]
+fn destroy(server: String, name: String) -> Result<Vec<Session>, Failed> {
+    let reply = remote(&server)?
+        .call(Request::Destroy { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Ls { sessions, .. } => sessions, "a session list")
+}
+
 #[tauri::command(async)]
 fn poll(server: String, name: String) -> Result<Poll, Failed> {
     let reply = remote(&server)?
@@ -663,6 +677,7 @@ fn main() {
             connect,
             forget,
             sessions,
+            destroy,
             poll,
             policy,
             events,

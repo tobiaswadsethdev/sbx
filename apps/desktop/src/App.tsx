@@ -357,6 +357,26 @@ export default function App() {
               .then(setProjects)
               .catch((e) => setError(messageOf(e)));
           }}
+          onDestroy={(s) => {
+            if (!server) return;
+            // Asked, and asked with the consequence spelled out, because this
+            // is the one thing in the window that cannot be undone: the
+            // sandbox goes, and with it whatever the agent had not pushed.
+            const what =
+              s.backend === "worktree"
+                ? `Destroy ${s.name}? Its worktree on the server goes too, and anything uncommitted in it is lost.`
+                : `Destroy ${s.name}? Its sandbox and anything the agent has not pushed are lost.`;
+            if (!window.confirm(what)) return;
+            api
+              .destroy(server, s.name)
+              .then((left) => {
+                setSessions(left);
+                // Whatever was showing is gone. Left selected, the panes would
+                // go on asking the server about a session it no longer has.
+                if (selected === s.name) setSelected(null);
+              })
+              .catch((e) => setError(messageOf(e)));
+          }}
         />
 
         {session && server ? (

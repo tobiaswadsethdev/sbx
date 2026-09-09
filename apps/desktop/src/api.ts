@@ -48,6 +48,9 @@ export const api = {
     invoke<Paired>("connect", { pairing, name }),
   forget: (name: string) => invoke<ServerSummary[]>("forget", { name }),
   sessions: (server: string) => invoke<Session[]>("sessions", { server }),
+  /// End a session and delete its sandbox. Answers with the list that is left.
+  destroy: (server: string, name: string) =>
+    invoke<Session[]>("destroy", { server, name }),
   poll: (server: string, name: string) => invoke<Poll>("poll", { server, name }),
   policy: (server: string, name: string) => invoke<PolicyView>("policy", { server, name }),
   events: (server: string, name: string) => invoke<Event[]>("events", { server, name }),

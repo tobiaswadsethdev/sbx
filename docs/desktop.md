@@ -314,6 +314,33 @@ the next session gets the edit, across two machines. The reading and packing
 happen on the Rust side of the bridge, because a webview cannot see your home
 directory. See [skills.md](skills.md).
 
+## Ending work
+
+Two removals, deliberately not the same control and deliberately not next to
+each other.
+
+**Forget a project** -- the icon beside its name -- is bookkeeping. The project
+is a repository someone said they were working on; forgetting it takes the
+grouping away and **leaves every worktree in it alive**, which is why it is
+allowed to be one click with no question. They reappear as an `external` group,
+because a session is a real thing with an agent in it and no amount of
+bookkeeping removes one.
+
+**Destroy a worktree** -- the icon on the row, shown when the row is hovered or
+focused -- is the one that ends something. The sandbox goes, and with it
+anything the agent has not pushed. It asks first, and it says which of the two
+things you are doing: a sandbox session names its sandbox, a worktree session
+names the directory on the server that goes with it.
+
+The row's control is in a gutter the card reserves rather than floating over
+it. Over the card it would cover the age and the diff stat on exactly the rows
+worth acting on; taking width only on hover would reflow the row as the pointer
+arrived, which is how a destroy button gets pressed by accident.
+
+`sbxd rm <name>` is the same operation from the command line, and it is the same
+function underneath -- so a record cannot be left behind by one that the other
+would then report as a session whose sandbox has died.
+
 ## Starting work
 
 **new project** opens the picker; picking a checkout makes the project. Then

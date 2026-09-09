@@ -144,6 +144,15 @@ pub fn dispatch(backends: &Backends, request: Request) -> Outcome {
         },
         Request::Create(new) => create(*new),
 
+        // The list, and not an acknowledgement: `destroy` answers whether it
+        // deleted a sandbox or only a record, and neither is what a client
+        // needs -- what it needs is the row gone. Reconciliation runs inside
+        // `ls`, so anything else that changed underneath comes back too.
+        Request::Destroy { name } => match ops::destroy(backends, &name) {
+            Ok(_) => ls(backends),
+            Err(e) => Failure::failed(e).into(),
+        },
+
         // The integrations screen. Every one of these answers with the whole
         // view rather than an acknowledgement, for the reason the git view does
         // the same: they explain each other, and a client adjusting the list it
