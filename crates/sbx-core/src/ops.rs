@@ -1957,7 +1957,7 @@ mod tests {
         assert_eq!(plain.branch.as_deref(), Some("tobias/readme-fix"));
 
         let ticket = crate::tracker::Ticket {
-            tracker: "inet-jira".into(),
+            tracker: "contoso-jira".into(),
             kind: crate::tracker::Kind::Jira,
             id: "PROJ-123".into(),
             key: "PROJ-123".into(),

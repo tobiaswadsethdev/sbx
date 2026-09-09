@@ -138,7 +138,7 @@ fn publishing_comments_on_the_ticket_and_moves_it() {
     let port = stand_in(tx);
     let source = Source {
         kind: Kind::Jira,
-        name: "inet-jira".into(),
+        name: "contoso-jira".into(),
         secret: "JIRA_TOKEN".into(),
         repo: None,
         org: None,
@@ -149,7 +149,7 @@ fn publishing_comments_on_the_ticket_and_moves_it() {
         on_publish: Some("Ready for Review".into()),
     };
     let ticket = Ticket {
-        tracker: "inet-jira".into(),
+        tracker: "contoso-jira".into(),
         kind: Kind::Jira,
         id: "INET-4821".into(),
         key: "INET-4821".into(),
@@ -209,7 +209,7 @@ fn a_transition_that_does_not_exist_says_what_does() {
     let port = stand_in(tx);
     let source = Source {
         kind: Kind::Jira,
-        name: "inet-jira".into(),
+        name: "contoso-jira".into(),
         secret: "JIRA_TOKEN".into(),
         repo: None,
         org: None,
@@ -220,7 +220,7 @@ fn a_transition_that_does_not_exist_says_what_does() {
         on_publish: Some("In Review".into()),
     };
     let ticket = Ticket {
-        tracker: "inet-jira".into(),
+        tracker: "contoso-jira".into(),
         kind: Kind::Jira,
         id: "INET-4821".into(),
         key: "INET-4821".into(),

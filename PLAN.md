@@ -730,8 +730,8 @@ Increments 0-21 are done. What is left is the unscheduled list below.
   History only breaks ties between the types a session actually wants: an Azure
   PAT used before is not ticked for a GitHub repository.
 
-  Verified against the live store: opening the form on `Inet.Server`, which
-  already had a session, derived `inet-server-2` and ticked `claude-oauth` and
+  Verified against the live store: opening the form on `Contoso.Server`, which
+  already had a session, derived `api-server-2` and ticked `claude-oauth` and
   `azure-pat` -- leaving `azure-pat-personal`, the other PAT of the same type,
   alone.
 

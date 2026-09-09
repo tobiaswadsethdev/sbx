@@ -87,7 +87,7 @@
 # image = "ghcr.io/example/mcp-sentry:1.4"
 # port = 9000
 # args = ["--transport", "http"]
-# env = { SENTRY_ORG = "inet" }
+# env = { SENTRY_ORG = "contoso" }
 # secrets = ["SENTRY_TOKEN"]
 
 # What a work branch is named under: `<prefix>/<name>`. Defaults to `sbx`, which

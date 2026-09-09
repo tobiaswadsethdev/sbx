@@ -5,8 +5,8 @@ turns a ticket into a session — and a publish that comments the pull request
 back onto it.
 
 ```
-   PROJ-123   jira    In Progress   Add the changelog        [ inet ▾ ] start
-   AB#1234    ado     Active        Order backfill throws…   [ inet ▾ ] start
+   PROJ-123   jira    In Progress   Add the changelog        [ tools ▾ ] start
+   AB#1234    ado     Active        Order backfill throws…   [ tools ▾ ] start
    #45        github  open          Readme says the wrong…   [ sbx  ▾ ] start
 ```
 

@@ -79,7 +79,7 @@ network_policies:
   #
   # The paths are the same shapes as GitHub's despite the extra project level,
   # because the patterns are anchored on the tail: verified against
-  # /inetse/inet/_git/Inet.DotFiles/info/refs.
+  # /contoso/tools/_git/Contoso.DotFiles/info/refs.
   #
   # curl is a binary here because a pull request is created with a plain REST
   # POST. The alternative is the Azure CLI plus its devops extension -- a Python

@@ -578,7 +578,7 @@ mod tests {
     fn seeding_an_azure_repo_sends_the_credential() {
         let s = Session::new(
             "x".into(),
-            "https://inetse@dev.azure.com/inetse/proj/_git/repo".into(),
+            "https://contoso@dev.azure.com/contoso/proj/_git/repo".into(),
             "t".into(),
         );
         let script = detached_script(&sandboxed(), &s, true);
@@ -597,7 +597,7 @@ mod tests {
             .expect("a clone");
         assert_eq!(
             clone_line.trim(),
-            "gitc clone --quiet -- 'https://dev.azure.com/inetse/proj/_git/repo' '/sandbox/repo'"
+            "gitc clone --quiet -- 'https://dev.azure.com/contoso/proj/_git/repo' '/sandbox/repo'"
         );
         assert!(!clone_line.contains('@'), "{clone_line}");
         // And the header is persisted so a later push needs no special casing.
