@@ -82,6 +82,7 @@ export function Tree({
   onSelect,
   onNewWorktree,
   onForget,
+  onDestroy,
 }: {
   groups: Group[];
   /// Each worktree's diff against its base, by session name, as the last poll
@@ -93,6 +94,7 @@ export function Tree({
   onSelect: (name: string) => void;
   onNewWorktree: (project: Project) => void;
   onForget: (project: Project) => void;
+  onDestroy: (session: Session) => void;
 }) {
   // Which groups are shut. Held as the collapsed set rather than the open one
   // so a project that appears while the window is open -- created here, or by
@@ -175,6 +177,7 @@ export function Tree({
                     stat={stats[s.name] ?? null}
                     on={s.name === selected}
                     onSelect={onSelect}
+                    onDestroy={onDestroy}
                   />
                 ))
               ))}
@@ -190,13 +193,19 @@ function Worktree({
   stat,
   on,
   onSelect,
+  onDestroy,
 }: {
   session: Session;
   stat: DiffStat | null;
   on: boolean;
   onSelect: (name: string) => void;
+  onDestroy: (session: Session) => void;
 }) {
   return (
+    // A row rather than a button, because it holds two: selecting is the whole
+    // card and destroying is one icon inside it, and a button inside a button
+    // is not something a browser will render.
+    <div className={`worktree-row${on ? " on" : ""}`}>
     <button
       className={`worktree${on ? " on" : ""}`}
       // `aria-current` rather than `aria-pressed`: this is which of several
@@ -235,6 +244,24 @@ function Worktree({
         </span>
       </span>
     </button>
+
+      {/* Hidden until the row is hovered or something in it has focus, like
+          the project's controls above -- an X on every row is an X you stop
+          seeing, and this one ends an agent. */}
+      <span className="wt-actions">
+        <button
+          className="quiet-icon danger"
+          title={
+            s.backend === "worktree"
+              ? "destroy this session (the worktree on the server goes with it)"
+              : "destroy this session and its sandbox"
+          }
+          onClick={() => onDestroy(s)}
+        >
+          <Forget aria-label={`destroy ${s.name}`} />
+        </button>
+      </span>
+    </div>
   );
 }
 

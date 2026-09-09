@@ -388,13 +388,51 @@ main { display: flex; flex: 1; min-height: 0; }
    was already there instead of adding one and moving every row below by a
    pixel. The transition covers exactly the three properties the states differ
    in. */
+/* The row that holds the card and its one control. The card keeps every
+   dimension it had -- this wrapper adds no padding and no background, so a
+   worktree looks exactly as it did before there was anything to press. */
+.worktree-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+/* In a gutter the card already reserves -- see `padding-right` on `.worktree`
+   below -- rather than over the card or beside it. Over it covers the age and
+   the diff stat on exactly the rows worth acting on; beside it makes the row
+   reflow under the pointer as you arrive, which is how you mis-click. Paying
+   ~28px on every row buys a control that neither moves nor hides anything. */
+.wt-actions {
+  display: flex;
+  align-items: center;
+  position: absolute;
+  right: 9px;
+}
+@media (hover: hover) {
+  .wt-actions {
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 150ms;
+  }
+  /* `:focus-within` is not a nicety: without it this is a button the keyboard
+     can reach and the eye cannot find. */
+  /* `:focus-within` is not a nicety: without it this is a button the keyboard
+     can reach and the eye cannot find. */
+  .worktree-row:hover .wt-actions,
+  .worktree-row:focus-within .wt-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
 .worktree {
   display: flex;
   align-items: flex-start;
   gap: 7px;
   width: calc(100% - 8px);
   margin: 1px 4px;
-  padding: 5px 8px 6px 6px;
+  /* The right side is the gutter `.wt-actions` sits in; see there. */
+  padding: 5px 34px 6px 6px;
   text-align: left;
   background: none;
   border: 1px solid transparent;

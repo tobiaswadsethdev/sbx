@@ -203,6 +203,20 @@ pub enum Request {
     /// that big, including the `Poll` that goes out every second.
     Create(Box<NewSession>),
 
+    /// Destroy one: its sandbox, and then its record.
+    ///
+    /// The project it sat in is left alone, which is the mirror of
+    /// [`Request::ForgetProject`] leaving the worktrees alone. The two are
+    /// deliberately not the same button anywhere: forgetting a project is
+    /// bookkeeping and this ends an agent.
+    ///
+    /// Answered with the refreshed list rather than an acknowledgement, for the
+    /// reason the integrations screen gives: a client adjusting the list it
+    /// already had would be inventing an answer, and this is the request most
+    /// likely to disagree with one -- a sandbox that was already gone still
+    /// removes the record, and reconciliation may have more to say besides.
+    Destroy { name: String },
+
     /// What the server holds on a session's behalf: the MCP catalog and what
     /// each managed container is doing, the secret *names* it has, and the
     /// skills a client has uploaded.
@@ -288,6 +302,7 @@ impl Request {
             | Request::Uncomment { name, .. }
             | Request::SendComments { name } => Some(name),
             Request::Create(new) => new.name.as_deref(),
+            Request::Destroy { name } => Some(name),
         }
     }
 }
