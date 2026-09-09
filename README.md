@@ -4,8 +4,8 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 
-A terminal UI and a desktop workspace for running several coding agents in
-parallel, each in its own [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
+A desktop workspace and a CLI for running several coding agents in parallel,
+each in its own [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell)
 sandbox.
 
 Claude Squad's workflow, with real isolation underneath: kernel-enforced
@@ -20,45 +20,22 @@ git clone https://github.com/octocat/Hello-World.git   -> SUCCEEDS
 curl https://github.com                                 -> DENIED
 ```
 
-```
-   sessions 2                           1 waiting     agent · diff · policy · events          readme-fix
+The window is a workspace: projects containing worktrees, the agent's terminal
+and extra shells beside it, the working copy in a file tree, diffs in an editor
+with comments that go back to the agent, and git on the right.
 
-      1. add-tests                      waiting ●     ── committed, vs origin/main
-         sbx/add-tests                   clean 48s    diff --git a/README b/README
-                                                      @@ -1,4 +1,4 @@
-   ▐ 2. readme-fix                      running ●▌    -Hello Wrold!
-   ▐    sbx/readme-fix               +12/-3 ? 52s▌    +Hello World!
-                                                      ── uncommitted
-                                                      ...
-   session readme-fix                                 ── untracked
+![The sbx workspace: projects and their worktrees on the left, the agent's terminal in the middle, the working copy on the right](docs/images/workspace.png)
 
-   task      fix the readme typo                      tests/test_readme.py
-   repo      https://github.com/you/sbx.git
-   branch    sbx/readme-fix
-   sandbox   sbx-readme-fix
-   policy    feature-work
-   agent     claude
-   providers claude-oauth
-   agent at  running  Edit  (screen)
+**The isolation is not a claim, it is a pane.** Every allow and deny the gateway
+made, newest first, each tagged with the rule that decided it. At the top, what
+`curl` gets when it reaches for the very host `git` is cloning from:
 
-   j/k move · 1-9 jump · n new  │  enter open · a attach · P publish · D destroy  │  tab view · q quit
-```
+![The events feed for a session: a denied GET to github.com from /usr/bin/curl at the top, and below it a run of allowed git requests to github.com:443, each tagged with the github_git rule](docs/images/events.png)
 
-The desktop application is the same thing as a workspace: projects containing
-worktrees, the agent's terminal and extra shells beside it, the working copy in
-a file tree, diffs in an editor with comments that go back to the agent, and git
-on the right.
+The rules behind those decisions are what the policy pane shows -- each one an
+endpoint, the binaries it is granted to, and how much of it they get:
 
-```
-  sbx  127.0.0.1:17671  3 worktrees in 1 project   [new project]
-  +--------------+-------------------------------------+----------------------+
-  | sbx          | agent | shell-1 x | main.rs | diff ~ | files git events ... |
-  |   readme-fix |                                     |  branch sbx/readme   |
-  |   add-tests  |   1  -Hello Wrold!                  |  fetch pull push     |
-  | octocat/demo |   1  +Hello World!                  |  CHANGES 2           |
-  |   spike      |                                     |  M README            |
-  +--------------+-------------------------------------+----------------------+
-```
+![The policy pane: the feature-work template's rules, each naming an endpoint such as github.com:443 and the specific binaries allowed to reach it](docs/images/policy.png)
 
 ## What it does
 
@@ -66,10 +43,10 @@ on the right.
   works on `sbx/<name>`; your worktree is never handed over.
 - **Credentials the sandbox never sees.** OpenShell providers hold the tokens
   and the gateway substitutes them into outgoing requests.
-- **Isolation you can look at.** The policy view shows the rules being enforced
-  and the events feed shows every allow and deny -- in both front ends, one key
-  or one click away, and a rule can be widened for a running session from there.
-  This is the part an ADE built on git worktrees has no equivalent for.
+- **Isolation you can look at.** The two panes above are one click away in the
+  window, and `sbxd policy` / `sbxd events` on the command line. A rule can be
+  widened for a running session from either. This is the part an ADE built on
+  git worktrees has no equivalent for.
 - **Several agents at once, without babysitting.** A session blocked on a
   permission prompt says so in the list -- and the window sends an OS
   notification the moment it starts waiting, so watching costs nothing at all.
@@ -90,9 +67,10 @@ on the right.
   is assigned to you, read by the server; one button turns a ticket into a
   session with the task, the name and the branch already right, and publishing
   comments the pull request back onto the ticket and moves it.
-- **Two front ends over one server.** The same sessions from a terminal or from
-  a window, and the window can be on a different machine from the sandboxes --
-  see [docs/server.md](docs/server.md).
+- **The window can be somewhere else.** `sbxd` serves its sessions over one
+  authenticated TLS port, so the machine you sit at needs no gateway, no Docker
+  and no tmux of its own -- a Linux server inside WSL with the window out on
+  Windows is the case it was built for. See [docs/server.md](docs/server.md).
 - **A worktree, when a sandbox is the wrong tool.** `--worktree` starts the
   session as a `git worktree` on the server instead: seconds rather than
   minutes, the machine's own toolchains, and **no isolation whatsoever** -- so
@@ -123,9 +101,12 @@ machine, and `--bin-dir`, `--version` and `--from-source` are there when you
 want to decide those yourself. From a checkout, `cargo install --path
 crates/sbxd` does the same job.
 
-`sbxd update` later fetches, verifies and replaces the binary the same way.
-Nothing updates itself in the background; `sbxd doctor` is what mentions that a
-newer release is out.
+`sbxd update` fetches, verifies and replaces the binary the same way, on
+demand. It also keeps itself current without being asked: `sbxd serve`
+*downloads* a newer release in the background and leaves it beside the running
+binary, and the swap happens at the next start rather than under a live session
+-- `auto_update = false` turns that off. The window checks at launch and offers
+to install; it never installs unasked.
 
 **The window is installed separately, and can be on another machine.** On Linux
 it is built from the tree; on Windows it is an installer from the [releases
@@ -139,7 +120,7 @@ plus the providers, skills and MCP servers your config names and the toolchain
 variants you have built:
 
 ```
-[  ok  ] version      sbx 0.2.0, newest
+[  ok  ] version      sbxd 0.5.0, newest
 [  ok  ] openshell    openshell 0.0.110
 [  ok  ] gateway      https://127.0.0.1:17670 0.0.110 (authenticated)
 [  ok  ] docker       server 29.6.0
@@ -176,7 +157,7 @@ sbxd mcp                                      # the MCP catalog, and what each m
 printf %s "$TOKEN" | sbxd secret <NAME>       # store a secret a managed MCP server needs
 sbxd skills                                   # the skills a client has uploaded here
 sbxd connect <string>                          # pair with a server
-sbx --server=<name> ls                        # ... and ask it instead of the local gateway
+sbxd --server=<name> ls                        # ... and ask it instead of the local gateway
 sbxd watch <name> --server=<name>              # follow a session's events and state as they happen
 ```
 
@@ -219,7 +200,7 @@ Contributions are welcome -- issues, questions and pull requests alike.
 strategy and what a reviewable change looks like here; the short version is:
 
 ```sh
-cargo test --workspace               # 539 tests, no gateway or Docker needed
+cargo test --workspace               # 442 tests, no gateway or Docker needed
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -233,9 +214,10 @@ reports have their own route: [SECURITY.md](SECURITY.md).
 ## Status
 
 Early, and honest about it. [PLAN.md](PLAN.md) is the record of what has been
-built increment by increment and what is still on the list; interfaces are still
-moving, and the version is `0.2.0` for a reason -- the minor bump is toolchains
-being a thing a session now has, not a promise that anything has settled.
+built increment by increment and what is still on the list. Interfaces are still
+moving, and `0.5.0` is not a promise that anything has settled: 0.4.0 folded the
+`sbx` binary into `sbxd` and took the terminal interface out with it, which is
+the size of change this still makes.
 
 ## License
 
