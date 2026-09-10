@@ -496,6 +496,13 @@ pub enum Error {
         key: &'static str,
         message: String,
     },
+    /// The file could not be written. Only [`crate::settings`] produces this
+    /// one: reading a missing config is the normal case and not an error at
+    /// all, but a settings screen that says it saved and did not is a lie.
+    Write {
+        path: PathBuf,
+        source: io::Error,
+    },
 }
 
 impl fmt::Display for Error {
@@ -510,6 +517,9 @@ impl fmt::Display for Error {
             Error::Invalid { path, key, message } => {
                 write!(f, "{}: `{key}` {message}", path.display())
             }
+            Error::Write { path, source } => {
+                write!(f, "could not write {}: {source}", path.display())
+            }
         }
     }
 }
@@ -517,7 +527,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Error::Read { source, .. } => Some(source),
+            Error::Read { source, .. } | Error::Write { source, .. } => Some(source),
             _ => None,
         }
     }

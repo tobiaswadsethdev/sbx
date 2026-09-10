@@ -48,13 +48,20 @@ function permitted(): Promise<boolean> {
 /// Called with every session list. Returns what it notified about, which is
 /// what makes it testable: the decision is `transitions`, and this is the
 /// side effect.
-export function onSessions(sessions: Session[]): string[] {
+///
+/// **`on` gates the notification and not the bookkeeping**, which is the whole
+/// reason it is a parameter here rather than a check at the call site. The
+/// states seen have to keep being recorded while this is turned off, or turning
+/// it back on would find every waiting session to be a fresh transition and
+/// announce a queue of things that have been true for an hour -- the same
+/// mistake the first-list rule above exists to avoid.
+export function onSessions(sessions: Session[], on = true): string[] {
   const now = new Map(sessions.map((s) => [s.name, s.state as string]));
   const first = seen === null;
   const started = first ? [] : transitions(seen!, now);
   seen = now;
 
-  if (started.length > 0) {
+  if (on && started.length > 0) {
     void notify(started, sessions);
   }
   return started;

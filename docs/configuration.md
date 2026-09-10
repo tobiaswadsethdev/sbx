@@ -39,6 +39,31 @@ Everything in it is a *default*: a flag on the command line wins, and so does an
 explicit choice in the create form. `sbxd config` prints what is in force with
 `*` for the file's answers and `-` for the built-in ones.
 
+## Editing it from the window
+
+**settings** in the desktop application's header writes the five keys that are
+about what a new session starts with -- `branch_prefix`, `base`, `policy`,
+`providers` and `auto_update`. The server's file, not the client's: a work
+branch is named the same way whether the session was started from the window or
+from `sbxd new`, and a window keeping its own prefix would be a second
+convention that disagrees with the first. See [desktop.md](desktop.md#settings).
+
+The rest of the file is not editable from there, and the omissions are the
+point. `repo_roots`, `worktree_root` and `skills` are paths on the server;
+`[[mcp]]` and `[[tracker]]` are lists of tables, each one a decision about what
+an agent of yours can reach, and the integrations screen already says so about
+the MCP half.
+
+**The file is edited, not regenerated.** Each key is found and replaced where it
+stands, so every comment `sbxd config --init` wrote is still there afterwards --
+which matters because the comments are most of what the file is for. Clearing a
+field removes the key rather than writing an empty one, because an absent key is
+what gets the built-in default and `policy = ""` would say something the parser
+does not mean. And the new text is parsed *before* it is written: every command
+except `sbxd doctor` refuses to run against a config it cannot read, so a
+settings screen that could save an invalid one would be able to break the server
+from inside its own UI.
+
 **A file that cannot be read stops the command**, rather than being quietly
 replaced by the defaults -- a key that does nothing is indistinguishable from a
 key that is not working, so a misspelled one is named back at you:

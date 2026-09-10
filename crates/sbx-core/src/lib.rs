@@ -41,6 +41,7 @@ pub mod repos;
 pub mod secrets;
 pub mod seed;
 pub mod session;
+pub mod settings;
 pub mod skills;
 pub mod state;
 pub mod status;

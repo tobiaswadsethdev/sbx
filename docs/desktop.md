@@ -147,7 +147,23 @@ is true about the selected worktree.
    |  worktree |   whatever is open       |  facts    |
    | projects  |                          |           |
    +-----------+--------------------------+-----------+
+               ^                          ^
+               both edges drag
 ```
+
+**Both sidebars drag.** The handle is zero pixels wide in the layout and its hit
+area overhangs the border in both directions, so what you aim at is the line
+that was already on screen -- there is no gutter, because a visible grab strip
+is what makes an application look like a prototype of one. A double-click puts
+one back; the separator is focusable and takes arrow keys, `Home`, `End` and
+`Enter`, because a layout only a mouse can change is one a keyboard user cannot
+change at all. Widths are this window's own and kept on this machine -- see
+[settings](#settings).
+
+**Worktrees are indented under their project, with a rule down the indent.** The
+rule is the part doing the work rather than the offset: project headers are
+sticky, so once a long list has scrolled, the header above a card is not that
+card's project, and the line is what still connects it to the one it belongs to.
 
 It was a flat session list, and that was right while a session was the unit of
 work. It stopped being right at four repositories: a list sorted by name says
@@ -314,6 +330,42 @@ the next session gets the edit, across two machines. The reading and packing
 happen on the Rust side of the bridge, because a webview cannot see your home
 directory. See [skills.md](skills.md).
 
+## Settings
+
+**settings** in the header is two halves, and the split between them is the only
+structure the screen has -- because it is the only one that matters: **who owns
+the answer.**
+
+The top half writes the *server's* config file: the branch prefix, the base
+branch, the policy and providers a new session starts with, and whether `sbxd`
+fetches releases in the background. Those belong to the server because they hold
+for every session on it, including the ones `sbxd new` starts from a terminal --
+a window keeping its own branch prefix would be a second convention that
+disagrees with the first, and the disagreement would show up as a branch name
+nobody's commit hooks recognise. The screen says which file it writes, because
+that file may be on another machine. See
+[configuration.md](configuration.md#editing-it-from-the-window) for what it does
+and does not touch, and why it edits the file rather than regenerating it.
+
+The bottom half never leaves this machine: the two sidebar widths, how often the
+worktree list is re-read, and whether the OS is told when an agent starts
+waiting. `localStorage`, which for a Tauri window is a file in its own data
+directory -- so it survives the window closing without a request, a round trip
+or a file format. Every value is read back through a validator, because the
+store is on disk and an older build may have written something else into it.
+
+The server half saves on a button and the window half applies as you change it,
+which is the one place this application acts on a press rather than immediately.
+A config file re-read by every command is not somewhere to land a half-typed
+branch name, and the server refuses a policy that is not a template -- an error
+per character while somebody types `feature-work` is not a form. A width has
+nothing to validate against and the whole point of it is seeing it.
+
+Turning notifications off gates the notification and not the bookkeeping: the
+states seen keep being recorded, or turning them back on would find every
+waiting session to be a fresh transition and announce a queue of things that have
+been true for an hour.
+
 ## Ending work
 
 Two removals, deliberately not the same control and deliberately not next to
@@ -322,9 +374,9 @@ each other.
 **Forget a project** -- the icon beside its name -- is bookkeeping. The project
 is a repository someone said they were working on; forgetting it takes the
 grouping away and **leaves every worktree in it alive**, which is why it is
-allowed to be one click with no question. They reappear as an `external` group,
-because a session is a real thing with an agent in it and no amount of
-bookkeeping removes one.
+allowed to be one click with no question. They reappear grouped by their clone
+URL at the bottom of the tree, because a session is a real thing with an agent
+in it and no amount of bookkeeping removes one.
 
 **Destroy a worktree** -- the icon on the row, shown when the row is hovered or
 focused -- is the one that ends something. The sandbox goes, and with it

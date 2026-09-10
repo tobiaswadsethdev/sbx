@@ -186,6 +186,34 @@ pub fn dispatch(backends: &Backends, request: Request) -> Outcome {
             Ok(cfg) => Reply::Tasks(tracker::inbox(cfg.trackers(), cfg.branch_prefix())).into(),
             Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
         },
+
+        // The config file's editable defaults. Read and written here rather
+        // than through `ops`, because there is no session in it: this is the
+        // machine's own answer to what a *new* session starts with, which is
+        // exactly what `sbxd config` prints.
+        Request::Settings => settings(),
+        Request::SetSettings(wanted) => {
+            match sbx_core::settings::save(&config::Config::default_path(), &wanted) {
+                // The reply is built from the config that came back out of the
+                // file rather than from `wanted`, so a client is shown what was
+                // saved and not what it asked for.
+                Ok(cfg) => Reply::Settings(sbx_core::settings::view(&cfg)).into(),
+                Err(e) => Failure::failed(e.to_string()).into(),
+            }
+        }
+    }
+}
+
+/// The config file as a settings screen should draw it.
+///
+/// A file that will not parse is a failure here rather than a screen full of
+/// defaults: every command except `sbx doctor` already refuses to run against
+/// one, and a settings screen that showed the built-ins would invite somebody
+/// to save over a file whose real contents it never managed to read.
+fn settings() -> Outcome {
+    match config::Config::load() {
+        Ok(cfg) => Reply::Settings(sbx_core::settings::view(&cfg)).into(),
+        Err(e) => Failure::failed(format!("could not read the config file: {e}")).into(),
     }
 }
 
