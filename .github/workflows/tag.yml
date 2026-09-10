@@ -39,7 +39,7 @@ jobs:
       # Every tag, so the "does this one already exist" check below can see the
       # ones cut before today. A shallow clone fetches none of them and would
       # cheerfully re-tag a version that is already published.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -101,7 +101,7 @@ jobs:
           echo "tag=v$next" >> "$GITHUB_OUTPUT"
           echo "$current -> $next" >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 

@@ -55,7 +55,7 @@ jobs:
       # label the result with a tag it had never been at. Naming the tag also
       # means a dispatch for a tag that does not exist fails here, loudly,
       # instead of publishing whatever `main` happened to be.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
 
@@ -112,7 +112,7 @@ jobs:
           tar -czf "sbxd-${TAG}-${{ matrix.target }}.tar.gz" -C "$bin" sbxd
           sha256sum "sbxd-${TAG}-${{ matrix.target }}.tar.gz" > "${{ matrix.target }}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbxd-${{ matrix.target }}
           path: |
@@ -161,7 +161,7 @@ jobs:
       # label the result with a tag it had never been at. Naming the tag also
       # means a dispatch for a tag that does not exist fails here, loudly,
       # instead of publishing whatever `main` happened to be.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
 
@@ -183,7 +183,7 @@ jobs:
           workspaces: apps/desktop/src-tauri
           key: desktop-windows
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -329,7 +329,7 @@ jobs:
           # part of a log line.
           jq 'del(.platforms."windows-x86_64".signature)' dist/latest.json
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbx-desktop-windows
           path: |
@@ -348,7 +348,16 @@ jobs:
     needs: [build, desktop]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      # `merge-multiple`, because the three build jobs upload three artifacts
+      # and what the steps below want is one directory with everything in it.
+      #
+      # On v8 a digest mismatch between what the server holds and what arrives
+      # is an *error* rather than a logged warning, which is the default worth
+      # having here and worth writing down: the files that come out of this are
+      # the ones `SHA256SUMS` is computed over, so a corrupted download would
+      # otherwise be published with a checksum that matches the corruption.
+      # Pinning back to v7 would quietly give that up.
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
