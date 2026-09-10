@@ -14,7 +14,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { api, messageOf, type Paired, type ServerSummary } from "./api";
 import { ConnectDialog } from "./Connect";
 import { Dock } from "./Dock";
-import { Inbox, Integrations, NewProject, Servers } from "./icons";
+import { Inbox, Integrations, NewProject, Servers, Settings } from "./icons";
 import { InboxDialog } from "./Inbox";
 import { IntegrationsDialog } from "./Integrations";
 import type { Project } from "./gen/Project";
@@ -25,15 +25,13 @@ import { onSessions, reset as resetNotifications } from "./notify";
 import { close, nextChannelId, open } from "./stream";
 import { NewProjectDialog } from "./NewProject";
 import { NewWorktreeDialog } from "./NewWorktree";
+import { DEFAULTS, LIMITS, usePrefs } from "./prefs";
+import { SettingsDialog } from "./Settings";
+import { Split } from "./Split";
 import type { Against } from "./gen/Against";
 import { keyOf, Tabs, type Tab } from "./Tabs";
 import { group, Tree } from "./Tree";
 import { UpdateBar } from "./Update";
-
-/// How often the worktree list is re-read. Slower than the terminal's second,
-/// because every refresh is a round trip to a server that may be a continent
-/// away rather than an exec on this machine.
-const REFRESH_MS = 3000;
 
 /// The tabs a worktree has open.
 ///
@@ -54,6 +52,12 @@ function tabsFor(shells: string[], open: Tab[]): Tab[] {
 
 
 export default function App() {
+  // How wide the sidebars are, how often the list is re-read, and whether the
+  // OS is told when an agent waits. This window's own, kept on this machine:
+  // see `prefs.ts` for why none of it is on the server beside the branch
+  // prefix.
+  const [prefs, setPrefs] = usePrefs();
+
   const [servers, setServers] = useState<ServerSummary[] | null>(null);
   const [server, setServer] = useState<string | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -66,6 +70,7 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [showingIntegrations, setShowingIntegrations] = useState(false);
   const [showingInbox, setShowingInbox] = useState(false);
+  const [showingSettings, setShowingSettings] = useState(false);
   /// The ticket a create was started from, carried from the inbox to the form.
   const [fromTask, setFromTask] = useState<Task | null>(null);
   // Every worktree's last poll: what its agent is doing, what it has spent, and
@@ -98,7 +103,7 @@ export default function App() {
   }, []);
 
   // Keyed on the *names*, joined, rather than on the array: the list is a new
-  // array every three seconds and re-subscribing to four sandboxes that often
+  // array every few seconds and re-subscribing to four sandboxes that often
   // would be worse than not subscribing at all.
   const names = sessions.map((s) => s.name).join("\u0000");
   useEffect(() => {
@@ -158,9 +163,9 @@ export default function App() {
     // last one's say nothing about them.
     resetNotifications();
     void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
+    const timer = setInterval(() => void refresh(), prefs.refreshMs);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, prefs.refreshMs]);
 
   /// Pairing from the window, which used to be a terminal and a restart.
   ///
@@ -197,8 +202,11 @@ export default function App() {
   // in the fetch, because the state that matters arrives on the status channel
   // and not in the list.
   useEffect(() => {
-    onSessions(live);
-  }, [live]);
+    // Handed the list either way, and told whether to say anything about it:
+    // `notify.ts` has to keep watching the states while it is turned off, or
+    // turning it back on would announce everything that has been waiting since.
+    onSessions(live, prefs.notify);
+  }, [live, prefs.notify]);
 
   const groups = useMemo(() => group(projects, live), [projects, live]);
 
@@ -289,7 +297,23 @@ export default function App() {
       <UpdateBar />
       <header>
         <span className="mark">sbx</span>
-        {servers && servers.length > 1 ? (
+        {/* The chooser only when there is a choice, and nothing at all when
+            there is not: with one paired server there is nothing to
+            disambiguate, and the servers dialog names it.
+
+            An address and a port used to sit here, and it was the wrong fact
+            in the wrong place: `127.0.0.1:17671` is what you check once when
+            pairing goes wrong, not something to read every time you look at
+            the top of the window -- and it is already on the row for each
+            server in that dialog, next to the button that forgets it.
+
+            The tally that stood beside it is gone for the same reason. "4
+            worktrees in 2 projects" is the tree's own content restated as
+            arithmetic: the tree is two feet to the left with the worktrees
+            actually in it, and the count was reliably wrong anyway -- every
+            session started from a terminal has no project, so a full list of
+            them read "5 worktrees in 0 projects". */}
+        {servers && servers.length > 1 && (
           <select value={server ?? ""} onChange={(e) => setServer(e.target.value)}>
             {servers.map((s) => (
               <option key={s.name} value={s.name}>
@@ -297,13 +321,7 @@ export default function App() {
               </option>
             ))}
           </select>
-        ) : (
-          <span className="server">{servers?.[0]?.address ?? "…"}</span>
         )}
-        <span className="count">
-          {sessions.length} worktree{sessions.length === 1 ? "" : "s"} in {projects.length} project
-          {projects.length === 1 ? "" : "s"}
-        </span>
         {/* The rate-limit windows are the *account's*, not this session's --
             two sessions on one account report the same numbers -- so they sit
             in the header rather than beside a worktree. The reading is
@@ -340,11 +358,21 @@ export default function App() {
           <Servers />
           servers
         </button>
+        <button className="new" disabled={!server} onClick={() => setShowingSettings(true)}>
+          <Settings />
+          settings
+        </button>
         {error && <span className="error">{error}</span>}
       </header>
 
       <main>
+        {/* The widths are inline styles rather than CSS variables, and that is
+            the point of doing it this way: they are *values*, one per sidebar,
+            and the handle beside each writes the same number the settings
+            screen does. A `--tree-width` on the root would be a third place
+            for the same fact to live. */}
         <Tree
+          width={prefs.treeWidth}
           groups={groups}
           stats={stats}
           selected={selected}
@@ -377,6 +405,16 @@ export default function App() {
               })
               .catch((e) => setError(messageOf(e)));
           }}
+        />
+
+        <Split
+          label="projects sidebar width"
+          value={prefs.treeWidth}
+          min={LIMITS.treeWidth.min}
+          max={LIMITS.treeWidth.max}
+          reset={DEFAULTS.treeWidth}
+          grows="right"
+          onChange={(treeWidth) => setPrefs({ treeWidth })}
         />
 
         {session && server ? (
@@ -426,7 +464,20 @@ export default function App() {
                   .catch((e) => setError(messageOf(e)));
               }}
             />
+            {/* Between the editor and the dock, so a drag on it takes width
+                from the middle and gives it to the right -- which is why this
+                one `grows="left"`. */}
+            <Split
+              label="dock width"
+              value={prefs.dockWidth}
+              min={LIMITS.dockWidth.min}
+              max={LIMITS.dockWidth.max}
+              reset={DEFAULTS.dockWidth}
+              grows="left"
+              onChange={(dockWidth) => setPrefs({ dockWidth })}
+            />
             <Dock
+              width={prefs.dockWidth}
               server={server}
               session={session}
               usage={(selected ? polls[selected]?.usage : undefined) ?? null}
@@ -486,6 +537,15 @@ export default function App() {
             setFromTask(task);
             setCreatingIn(project);
           }}
+        />
+      )}
+
+      {showingSettings && server && (
+        <SettingsDialog
+          server={server}
+          prefs={prefs}
+          onPrefs={setPrefs}
+          onClose={() => setShowingSettings(false)}
         />
       )}
 

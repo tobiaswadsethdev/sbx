@@ -28,6 +28,8 @@ import type { Project } from "./gen/Project";
 import type { NewSession } from "./gen/NewSession";
 import type { Poll } from "./gen/Poll";
 import type { Session } from "./gen/Session";
+import type { Settings } from "./gen/Settings";
+import type { SettingsView } from "./gen/SettingsView";
 import type { View as PolicyView } from "./gen/View";
 
 export type ServerSummary = { name: string; address: string };
@@ -127,6 +129,19 @@ export const api = {
   // The task inbox, read on the server with the credentials in its store: this
   // window shows a list and never holds a token.
   tasks: (server: string) => invoke<Inbox>("tasks", { server }),
+
+  // The editable defaults in the server's config file. The server's, because
+  // `branch_prefix` names the branch of every session on that machine and a
+  // window holding its own copy would be a second convention. What is this
+  // window's -- sidebar widths, the refresh interval -- is in `prefs.ts` and
+  // never crosses the bridge at all.
+  //
+  // The write answers with the file re-read, like the integrations screen:
+  // a cleared field comes back as an absent key and an absent key reads as the
+  // built-in default, so what was saved is not what was sent.
+  settings: (server: string) => invoke<SettingsView>("settings", { server }),
+  setSettings: (server: string, settings: Settings) =>
+    invoke<SettingsView>("set_settings", { server, settings }),
 };
 
 /// A rejected command, as the bridge sends it: see `Failed` in main.rs.

@@ -67,6 +67,13 @@ endpoint, the binaries it is granted to, and how much of it they get:
   is assigned to you, read by the server; one button turns a ticket into a
   session with the task, the name and the branch already right, and publishing
   comments the pull request back onto the ticket and moves it.
+- **Set up once, from the window.** The branch prefix a work branch is named
+  under, and the base branch, policy and credentials a new session starts with,
+  are edited on the settings screen and written into the server's own config
+  file -- so `tobias/PROJ-123-add-the-changelog` is what a session is called
+  whether it was started here or from `sbxd new`. The comments that file was
+  created with survive the edit, because they are most of what it is for. See
+  [docs/configuration.md](docs/configuration.md).
 - **The window can be somewhere else.** `sbxd` serves its sessions over one
   authenticated TLS port, so the machine you sit at needs no gateway, no Docker
   and no tmux of its own -- a Linux server inside WSL with the window out on

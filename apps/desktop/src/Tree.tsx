@@ -76,6 +76,7 @@ function keyOf(g: Group): string {
 }
 
 export function Tree({
+  width,
   groups,
   stats,
   selected,
@@ -84,6 +85,9 @@ export function Tree({
   onForget,
   onDestroy,
 }: {
+  /// How wide, in pixels. From the window's own preferences and written by the
+  /// handle on this sidebar's right edge -- see `prefs.ts` and `Split.tsx`.
+  width: number;
   groups: Group[];
   /// Each worktree's diff against its base, by session name, as the last poll
   /// reported it. Absent for a session that has not been polled yet, which is
@@ -109,7 +113,11 @@ export function Tree({
     });
 
   return (
-    <nav className="tree scrollbar-sleek" aria-label="projects and worktrees">
+    <nav
+      className="tree scrollbar-sleek"
+      style={{ width }}
+      aria-label="projects and worktrees"
+    >
       {groups.map((g) => {
         const key = keyOf(g);
         const open = !shut.has(key);
@@ -131,12 +139,26 @@ export function Tree({
                 <span className="group-count">{g.worktrees.length}</span>
               </button>
 
-              {g.project ? (
-                // Hidden until the group is hovered or something inside it has
-                // focus -- see `style.css`. A row of controls beside every
-                // project is a row of controls you read past; the ones here
-                // are for the moment you have decided to act on *this* project
-                // and are already pointing at it.
+              {/* Hidden until the group is hovered or something inside it has
+                  focus -- see `style.css`. A row of controls beside every
+                  project is a row of controls you read past; the ones here are
+                  for the moment you have decided to act on *this* project and
+                  are already pointing at it.
+
+                  Nothing at all for a by-repository group, and no `+`: there
+                  is no project to start a worktree in, and making one from
+                  here would have to guess which checkout on the server the URL
+                  meant, of which there may be several.
+
+                  There used to be an `external` badge in its place, and it was
+                  a word on every row of the bottom half of the sidebar that
+                  told you something the label above it already says: a group
+                  with no project is drawn in the mono face at the dimmer rank,
+                  which is the difference. A badge earns its space when it
+                  marks an exception -- `unsandboxed` on a worktree session does
+                  -- and `external` marked a whole category. The full URL is
+                  still one hover away on the group's own title. */}
+              {g.project && (
                 <span className="group-actions">
                   <button
                     className="quiet-icon"
@@ -153,34 +175,34 @@ export function Tree({
                     <Forget aria-label="forget project" />
                   </button>
                 </span>
-              ) : (
-                // No `+` here on purpose: there is no project to start one in.
-                // Making one from this group would guess which checkout on the
-                // server the URL meant, and there may be several.
-                <span
-                  className="group-note"
-                  title="not a project — created outside the workspace"
-                >
-                  external
-                </span>
               )}
             </header>
 
-            {open &&
-              (g.worktrees.length === 0 ? (
-                <p className="empty-group">no worktrees yet</p>
-              ) : (
-                g.worktrees.map((s) => (
-                  <Worktree
-                    key={s.name}
-                    session={s}
-                    stat={stats[s.name] ?? null}
-                    on={s.name === selected}
-                    onSelect={onSelect}
-                    onDestroy={onDestroy}
-                  />
-                ))
-              ))}
+            {/* Indented, and with a rule running down the indent -- see
+                `.group-body` in `style.css`. Two things a flat list could not
+                say: which project a card belongs to once the header above it
+                has scrolled out from under the sticky one, and where a group
+                ends. The project row keeps its own alignment at the sidebar's
+                edge, so the twisty and the name are still the column your eye
+                runs down. */}
+            {open && (
+              <div className="group-body">
+                {g.worktrees.length === 0 ? (
+                  <p className="empty-group">no worktrees yet</p>
+                ) : (
+                  g.worktrees.map((s) => (
+                    <Worktree
+                      key={s.name}
+                      session={s}
+                      stat={stats[s.name] ?? null}
+                      on={s.name === selected}
+                      onSelect={onSelect}
+                      onDestroy={onDestroy}
+                    />
+                  ))
+                )}
+              </div>
+            )}
           </section>
         );
       })}

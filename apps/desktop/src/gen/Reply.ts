@@ -12,6 +12,7 @@ import type { Picked } from "./Picked";
 import type { Poll } from "./Poll";
 import type { Project } from "./Project";
 import type { Session } from "./Session";
+import type { SettingsView } from "./SettingsView";
 import type { Status } from "./Status";
 import type { View } from "./View";
 
@@ -25,4 +26,4 @@ export type Reply = { "reply": "ls", sessions: Array<Session>,
  * the server's to do and the client would otherwise see sessions
  * appear and vanish with no account of why.
  */
-adopted: Array<string>, dead: Array<string>, warnings: Array<string>, } | { "reply": "poll" } & Poll | { "reply": "diff", body: string, } | { "reply": "policy" } & View | { "reply": "events", events: Array<Event>, } | { "reply": "comments", comments: Array<Comment>, } | { "reply": "shells", shells: Array<string>, } | { "reply": "files" } & Dir | { "reply": "file" } & FileText | { "reply": "git", said: string, status: Status, } | { "reply": "git-diff" } & FileDiff | { "reply": "told", message: string, } | { "reply": "projects", projects: Array<Project>, } | { "reply": "repos" } & Listing | { "reply": "inspect" } & Picked | { "reply": "new-options" } & NewOptions | { "reply": "created", name: string, } | { "reply": "integrations" } & Integrations | { "reply": "tasks" } & Inbox;
+adopted: Array<string>, dead: Array<string>, warnings: Array<string>, } | { "reply": "poll" } & Poll | { "reply": "diff", body: string, } | { "reply": "policy" } & View | { "reply": "events", events: Array<Event>, } | { "reply": "comments", comments: Array<Comment>, } | { "reply": "shells", shells: Array<string>, } | { "reply": "files" } & Dir | { "reply": "file" } & FileText | { "reply": "git", said: string, status: Status, } | { "reply": "git-diff" } & FileDiff | { "reply": "told", message: string, } | { "reply": "projects", projects: Array<Project>, } | { "reply": "repos" } & Listing | { "reply": "inspect" } & Picked | { "reply": "new-options" } & NewOptions | { "reply": "created", name: string, } | { "reply": "integrations" } & Integrations | { "reply": "tasks" } & Inbox | { "reply": "settings" } & SettingsView;

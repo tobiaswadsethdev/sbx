@@ -53,6 +53,13 @@
 # a long list, and lower it if the diff pane feels behind the agent. 250ms to 60s.
 # refresh = "1s"
 
+# Whether `sbxd serve` may fetch a newer release in the background. It never
+# replaces a running binary: it downloads and verifies ahead of time and leaves
+# the result beside the current one, and the swap happens at the next process
+# start. `false` turns the check off altogether, for a machine that would rather
+# not reach github at all.
+# auto_update = true
+
 # MCP servers the agent gets, one table each. They run on the host -- in their
 # own containers, holding their own credentials -- and the sandbox is granted one
 # endpoint each, reachable only by the agent binary. Nothing else in the sandbox

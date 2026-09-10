@@ -5,6 +5,7 @@ import type { McpOp } from "./McpOp";
 import type { NewComment } from "./NewComment";
 import type { NewProject } from "./NewProject";
 import type { NewSession } from "./NewSession";
+import type { Settings } from "./Settings";
 import type { SkillUpload } from "./SkillUpload";
 
 /**
@@ -17,4 +18,4 @@ export type Request = { "op": "ls" } | { "op": "poll", name: string, } | { "op":
 /**
  * The branch to measure against; `None` means the checkout's own.
  */
-branch: string | null, } | { "op": "new-options" } | { "op": "git-status", name: string, } | { "op": "git-diff", name: string, path: string, against: Against, } | { "op": "git", name: string, action: GitOp, } | { "op": "files", name: string, path: string, } | { "op": "file", name: string, path: string, } | { "op": "shells", name: string, } | { "op": "new-shell", name: string, } | { "op": "kill-shell", name: string, tmux: string, } | { "op": "comments", name: string, } | { "op": "comment", name: string, comment: NewComment, } | { "op": "uncomment", name: string, id: number, } | { "op": "send-comments", name: string, } | { "op": "create" } & NewSession | { "op": "destroy", name: string, } | { "op": "integrations" } | { "op": "mcp", name: string, action: McpOp, } | { "op": "secret", name: string, value: string | null, } | { "op": "upload-skills", skills: Array<SkillUpload>, } | { "op": "forget-skill", name: string, } | { "op": "tasks" };
+branch: string | null, } | { "op": "new-options" } | { "op": "git-status", name: string, } | { "op": "git-diff", name: string, path: string, against: Against, } | { "op": "git", name: string, action: GitOp, } | { "op": "files", name: string, path: string, } | { "op": "file", name: string, path: string, } | { "op": "shells", name: string, } | { "op": "new-shell", name: string, } | { "op": "kill-shell", name: string, tmux: string, } | { "op": "comments", name: string, } | { "op": "comment", name: string, comment: NewComment, } | { "op": "uncomment", name: string, id: number, } | { "op": "send-comments", name: string, } | { "op": "create" } & NewSession | { "op": "destroy", name: string, } | { "op": "integrations" } | { "op": "mcp", name: string, action: McpOp, } | { "op": "secret", name: string, value: string | null, } | { "op": "upload-skills", skills: Array<SkillUpload>, } | { "op": "forget-skill", name: string, } | { "op": "tasks" } | { "op": "settings" } | { "op": "set-settings" } & Settings;

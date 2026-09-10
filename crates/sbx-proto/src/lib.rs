@@ -34,6 +34,7 @@ use sbx_core::policy::View as PolicyView;
 use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
+use sbx_core::settings::{Settings, SettingsView};
 use sbx_core::skills::Upload as SkillUpload;
 use sbx_core::tracker::Inbox;
 
@@ -250,6 +251,21 @@ pub enum Request {
     /// read comes back beside what could -- an inbox missing a tracker's rows
     /// is invisible otherwise.
     Tasks,
+
+    /// The editable defaults in the server's config file.
+    ///
+    /// The *server's*, and that is the point rather than an accident of where
+    /// the file lives: `branch_prefix` decides what a work branch is called for
+    /// every session on this machine, including the ones `sbx new` starts, and
+    /// a client keeping its own answer would be a second convention that
+    /// disagrees with the first. See [`sbx_core::settings`].
+    Settings,
+    /// Write them back. Answers with [`Reply::Settings`], re-read.
+    ///
+    /// Not boxed, unlike [`Request::Create`]: five optional fields is the size
+    /// of the `Comment` variant already here, and nowhere near the eight
+    /// strings that made a `NewSession` worth a pointer.
+    SetSettings(Settings),
 }
 
 /// What to do to a managed MCP container.
@@ -284,7 +300,9 @@ impl Request {
             | Request::Secret { .. }
             | Request::UploadSkills { .. }
             | Request::ForgetSkill { .. }
-            | Request::Tasks => None,
+            | Request::Tasks
+            | Request::Settings
+            | Request::SetSettings(_) => None,
             Request::Poll { name }
             | Request::Diff { name }
             | Request::Policy { name }
@@ -405,6 +423,14 @@ pub enum Reply {
     Integrations(IntegrationsView),
     /// The inbox, and whatever could not be read.
     Tasks(Inbox),
+    /// The config file's editable defaults, and where the file is.
+    ///
+    /// What a write answers with as well as a read, for the reason the
+    /// integrations screen gives: what the file now says is not what was sent
+    /// -- a cleared field came out as an absent key, and an absent key reads
+    /// as the built-in default -- so a client patching the copy it had would
+    /// be inventing the answer.
+    Settings(SettingsView),
 }
 
 impl From<Refreshed> for Reply {

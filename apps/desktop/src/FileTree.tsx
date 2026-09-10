@@ -25,8 +25,12 @@ export function FileTree({
   onOpen: (path: string) => void;
 }) {
   return (
+    // No heading. There used to be a sticky `FILES` above this, and it was a
+    // label repeating the word on the dock tab two lines above it -- the one
+    // that was pressed to get here. A pane in a tabbed strip is already named
+    // by its tab, and eleven pixels of uppercase saying so again is eleven
+    // pixels of the tree.
     <div className="files">
-      <header>files</header>
       <Level server={server} name={name} path="" depth={0} onOpen={onOpen} />
     </div>
   );

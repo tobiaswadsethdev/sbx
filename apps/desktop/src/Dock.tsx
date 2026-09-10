@@ -27,12 +27,16 @@ const VIEWS = ["files", "git", "events", "policy", "facts"] as const;
 type View = (typeof VIEWS)[number];
 
 export function Dock({
+  width,
   server,
   session,
   usage,
   onOpenFile,
   onOpenDiff,
 }: {
+  /// How wide, in pixels. From the window's own preferences and written by the
+  /// handle on this sidebar's left edge -- see `prefs.ts` and `Split.tsx`.
+  width: number;
   server: string;
   session: Session;
   /// What this session has spent, from the status channel. `null` until its
@@ -46,7 +50,7 @@ export function Dock({
   const [view, setView] = useState<View>("files");
 
   return (
-    <aside className="dock">
+    <aside className="dock" style={{ width }}>
       <nav className="dock-tabs">
         {VIEWS.map((v) => (
           <button key={v} className={v === view ? "on" : ""} onClick={() => setView(v)}>

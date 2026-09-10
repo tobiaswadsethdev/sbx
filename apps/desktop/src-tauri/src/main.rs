@@ -44,6 +44,7 @@ use sbx_core::policy::View as PolicyView;
 use sbx_core::projects::{NewProject, Project};
 use sbx_core::repos::Listing;
 use sbx_core::session::Session;
+use sbx_core::settings::{Settings, SettingsView};
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
 use sbx_core::integrations::View as IntegrationsView;
 use sbx_core::tracker::Inbox;
@@ -516,6 +517,33 @@ fn tasks(server: String) -> Result<Inbox, Failed> {
     expect_reply!(reply, Reply::Tasks(inbox) => inbox, "a task inbox")
 }
 
+/// The editable defaults in the server's config file.
+///
+/// The server's own file, not a preference of this window's, and the split is
+/// deliberate: `branch_prefix` names the work branch of every session on that
+/// machine including the ones started from a terminal, so a window holding its
+/// own copy would be a second convention that disagrees with the first. What
+/// *is* this window's -- how wide the sidebars are, how often the list is
+/// re-read -- never leaves it. See `prefs.ts`.
+#[tauri::command(async)]
+fn settings(server: String) -> Result<SettingsView, Failed> {
+    let reply = remote(&server)?.call(Request::Settings).map_err(to_message)?;
+    expect_reply!(reply, Reply::Settings(view) => view, "the settings view")
+}
+
+/// Write them back, and answer with the file as it now reads.
+///
+/// Re-read rather than echoed, for the reason the integrations screen gives:
+/// a cleared field comes back out as an absent key and an absent key reads as
+/// the built-in default, so what was saved is not what was sent.
+#[tauri::command(async)]
+fn set_settings(server: String, settings: Settings) -> Result<SettingsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::SetSettings(settings))
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Settings(view) => view, "the settings view")
+}
+
 /// The one streaming connection, and which server it is to.
 ///
 /// One per window rather than one per pane: the protocol multiplexes, so four
@@ -708,6 +736,8 @@ fn main() {
             forget_skill,
             my_skills,
             tasks,
+            settings,
+            set_settings,
             watch,
             unwatch,
             terminal_input,

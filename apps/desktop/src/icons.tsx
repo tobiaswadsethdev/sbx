@@ -37,6 +37,7 @@ import {
   Minus as MinusGlyph,
   RefreshCw,
   Server as ServerGlyph,
+  Settings as SettingsGlyph,
   ShieldOff,
   Trash,
   Undo2,
@@ -69,6 +70,7 @@ export const Inbox = InboxGlyph;
 export const Integrations = Plug;
 export const Servers = ServerGlyph;
 export const NewProject = FolderPlus;
+export const Settings = SettingsGlyph;
 export const Forget = Trash;
 /// A session with no sandbox around it. There is no `Sandboxed` beside it on
 /// purpose: sandboxed is what every session is, and a mark on the rule as well
