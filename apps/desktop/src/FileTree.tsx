@@ -13,7 +13,8 @@ import { useEffect, useState } from "react";
 
 import { api, messageOf } from "./api";
 import type { Entry } from "./gen/Entry";
-import { Chevron, FileIcon, Folder } from "./icons";
+import { Empty, Waiting } from "./Empty";
+import { Chevron, FileIcon, Folder, NoFiles } from "./icons";
 
 export function FileTree({
   server,
@@ -67,7 +68,14 @@ function Level({
   }, [server, name, path]);
 
   if (error) return <p className="error">{error}</p>;
-  if (!entries) return <p className="loading" style={{ paddingLeft: depth * 12 + 8 }}>…</p>;
+  // Indented to the level being read, so the wait appears where the
+  // directory is about to, rather than at the root of the tree.
+  if (!entries)
+    return (
+      <div style={{ paddingLeft: depth * 12 + 8 }}>
+        <Waiting size="row" />
+      </div>
+    );
 
   return (
     <>
@@ -107,11 +115,23 @@ function Level({
           </div>
         );
       })}
-      {entries.length === 0 && (
-        <p className="loading" style={{ paddingLeft: depth * 12 + 8 }}>
-          empty
-        </p>
-      )}
+      {/* An open folder with nothing under it -- the tree's own glyph, which
+          says "this is a directory and it is empty" where the word `empty`
+          said only the second half.
+
+          At the root it gets the pane treatment instead, because the two cases
+          are different claims: an empty directory somewhere down the tree is
+          one row among many and belongs on that row, and an empty *repository*
+          is the whole pane having nothing in it -- where a 14-pixel glyph in
+          the top-left corner looks like something failed to draw. */}
+      {entries.length === 0 &&
+        (depth === 0 ? (
+          <Empty icon={NoFiles} />
+        ) : (
+          <div style={{ paddingLeft: depth * 12 + 8 }}>
+            <Empty size="row" icon={NoFiles} />
+          </div>
+        ))}
     </>
   );
 }

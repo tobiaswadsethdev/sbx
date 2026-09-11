@@ -5,6 +5,8 @@
 // terminal derives its wording from. The two say the same thing and neither is
 // parsing the other's output.
 
+import { Waiting } from "../Empty";
+import { ICON_BIG, Unsandboxed } from "../icons";
 import { useFetch } from "../useFetch";
 import { api } from "../api";
 import type { View } from "../gen/View";
@@ -20,7 +22,7 @@ export function PolicyPane({ server, name }: { server: string; name: string }) {
   // server's -- `Isolation::explain` -- so the terminal says the same thing.
   if (kind === "no-isolation") return <Unisolated said={error} />;
   if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="loading">reading the policy…</p>;
+  if (!data) return <Waiting />;
   return <Policy view={data} />;
 }
 
@@ -204,8 +206,15 @@ function Notice({ children }: { children: React.ReactNode }) {
 /// Exported because the events feed shows the same thing for the same reason,
 /// and two wordings of "this session is not isolated" is one too many.
 export function Unisolated({ said }: { said: string | null }) {
+  // Deliberately **not** an `Empty`, though it is the same shape. `Empty`
+  // is neutral because most absences are neither good nor bad, and this one
+  // is a warning: a session running with the server's own rights is the
+  // exception this product exists to make visible. So it keeps the amber and
+  // it keeps its words -- the wording is the server's own,
+  // `Isolation::explain`, so the terminal says the same thing.
   return (
     <div className="unisolated">
+      <Unsandboxed size={ICON_BIG} className="unisolated-mark" />
       <h3>not isolated</h3>
       <p>{said}</p>
     </div>

@@ -10,6 +10,18 @@
 // is answered rather than accepted. What is left of the old argument is the
 // bottom half of this file, which stays hand-drawn because it has to.
 //
+// **Every glyph the window uses is named here, and nothing else imports
+// `lucide-react`.** That rule is what keeps the vocabulary honest now that the
+// window says most of what it has to say in pictures: an icon has become a
+// *term*, and a term used in two panes has to be the same picture in both. A
+// `RefreshCw` imported straight from the library in one pane beside a
+// `RotateCw` in another would be two words for one idea, which is the one
+// confusion an icon-led interface cannot afford -- there is no label beside it
+// to correct the guess. So the renames below are the vocabulary: `Stop`,
+// `Store`, `Publish` say which button they sit on rather than what shape they
+// are, and the day one of them is drawn better the change is a line in this
+// file instead of a find-and-replace across the app.
+//
 // `absoluteStrokeWidth` is the part that makes the pinning work. lucide draws
 // on a 24-grid and scales the stroke with the icon, so one `strokeWidth` at
 // 14px and at 20px are two different weights on screen; with it set, the number
@@ -22,25 +34,47 @@
 // swapped.
 
 import {
+  Activity,
+  ArrowDownToLine,
+  ArrowLeft,
+  ArrowUpFromLine,
+  Binary,
   ChevronDown,
   ChevronRight,
   CircleAlert,
   CircleCheck,
   CircleQuestionMark,
+  CloudDownload,
+  CloudUpload,
+  ExternalLink,
   Folder as FolderClosed,
   FolderOpen,
   FolderPlus,
+  FolderSearch,
+  FolderTree,
   GitBranch,
   Inbox as InboxGlyph,
+  Info,
+  KeyRound,
+  Play,
   Plug,
   Plus as PlusGlyph,
   Minus as MinusGlyph,
   RefreshCw,
+  RotateCw,
+  Save,
+  Search,
   Server as ServerGlyph,
+  ServerOff,
   Settings as SettingsGlyph,
+  Shield,
   ShieldOff,
+  Sparkles,
+  Square,
+  Ticket,
   Trash,
   Undo2,
+  Unplug,
   X,
 } from "lucide-react";
 
@@ -55,27 +89,111 @@ export const ICON_SIZE = 14;
 /// two-pixel stroke beside it reads as bold -- which is what an icon set at its
 /// default weight looks like dropped into an interface built at this scale.
 export const ICON_STROKE = 1.25;
+/// The one deliberate exception to the 14-grid: the glyph that stands in for a
+/// pane with nothing in it. See `Empty.tsx`.
+///
+/// Passed as lucide's `size` rather than set in CSS, and that is not a style
+/// preference -- it is the only way to resize one of these without changing its
+/// weight. `absoluteStrokeWidth` works by dividing the stroke by the size at
+/// render time, so a `width: 26px` in a stylesheet scales a stroke computed for
+/// 14 and lands at 2.3 actual pixels: a bold icon in a window that has none.
+export const ICON_BIG = 26;
+/// The same glyph when it has the whole middle of the window to itself -- a
+/// first run with no server, or no worktree selected. Larger because the
+/// alternative at this scale is a 26-pixel mark adrift in six hundred, which
+/// reads as a rendering fault rather than as a statement.
+export const ICON_PAGE = 40;
 
-// The chrome, renamed for what it does here rather than what lucide calls it.
-// A rename per icon is worth it: `Forget` says which button it is on and
-// `Trash` does not, and the day one is swapped for a better glyph the change is
-// one line in this file instead of a find-and-replace across the app.
+// ---------------------------------------------------------------------------
+// The vocabulary, grouped by where it is spoken. A rename per icon is worth
+// it: `Forget` says which button it is on and `Trash` does not.
+// ---------------------------------------------------------------------------
+
+// The header's five destinations. Icon-only, and the window's own nav: see
+// `App.tsx` for why the labels went and what replaced them.
+export const Inbox = InboxGlyph;
+export const NewProject = FolderPlus;
+export const Integrations = Plug;
+export const Servers = ServerGlyph;
+export const Settings = SettingsGlyph;
+
+// The dock's five panes, in the order the strip shows them.
+export const Files = FolderTree;
+export const Branch = GitBranch;
+export const Events = Activity;
+export const Policy = Shield;
+/// The session record -- what it was created with, and what it has spent.
+/// `Info` and not a document: it is a read-out, not a file.
+export const Record = Info;
+
+// git, where the four operations are four different arrows on purpose.
+//
+// `Fetch` and `Pull` are the distinction worth drawing: both bring refs down
+// and only one touches the working copy, so one is a cloud and the other is an
+// arrow at a line. `Publish` is a first push -- a branch the remote has never
+// heard of -- and wears a different glyph from `Push` for the same reason the
+// button used to carry a different word.
+export const Fetch = CloudDownload;
+export const Pull = ArrowDownToLine;
+export const Push = ArrowUpFromLine;
+export const Publish = CloudUpload;
+export const Refresh = RefreshCw;
+export const Revert = Undo2;
+
+// The integrations screen: containers to run, credentials to hold, trackers to
+// read, skills to push.
+export const Start = Play;
+export const Stop = Square;
+export const Restart = RotateCw;
+/// Storing a secret. A save and not a tick: the value is written somewhere the
+/// window can never read it back, which is a filing action rather than a
+/// confirmation.
+export const Store = Save;
+export const Secret = KeyRound;
+export const Tracker = Ticket;
+export const Skill = Sparkles;
+
+// The chrome.
 export const Plus = PlusGlyph;
 export const Minus = MinusGlyph;
 export const Close = X;
-export const Revert = Undo2;
-export const Refresh = RefreshCw;
-export const Branch = GitBranch;
-export const Inbox = InboxGlyph;
-export const Integrations = Plug;
-export const Servers = ServerGlyph;
-export const NewProject = FolderPlus;
-export const Settings = SettingsGlyph;
+export const Back = ArrowLeft;
+export const Find = Search;
+/// Opening a ticket in the browser. The one icon in the window that means
+/// "this leaves the window".
+export const Elsewhere = ExternalLink;
 export const Forget = Trash;
 /// A session with no sandbox around it. There is no `Sandboxed` beside it on
 /// purpose: sandboxed is what every session is, and a mark on the rule as well
 /// as on the exception is a mark that says nothing. See `Tree.tsx`.
 export const Unsandboxed = ShieldOff;
+
+// ---------------------------------------------------------------------------
+// The absences. One glyph per kind of nothing, and they are a vocabulary in
+// their own right -- see `Empty.tsx`, which is the only thing that renders
+// them.
+//
+// Each is the *subject* of the pane it stands in, not a general-purpose shrug:
+// a pane with no policy decisions shows the feed's own glyph gone quiet, which
+// says "this is the feed, and it is empty" in one mark. A single shared "no
+// data" symbol would have said "something is missing" five times without ever
+// saying what.
+// ---------------------------------------------------------------------------
+
+/// Not paired with anything. The first screen a new install shows.
+export const NoServer = ServerOff;
+/// No repositories where the server was told to look.
+export const NoRepos = FolderSearch;
+/// A directory with nothing in it, and the tree's own shape for it.
+export const NoFiles = FolderOpen;
+/// Nothing has changed in the working copy. A tick, because a clean tree is a
+/// state rather than a shortfall -- the one absence in the window that is good
+/// news.
+export const Clean = CircleCheck;
+/// No MCP servers configured. The integrations glyph with the plug pulled.
+export const NoIntegrations = Unplug;
+/// A file Monaco will not be shown.
+export const NotText = Binary;
 
 type Props = { className?: string; title?: string };
 

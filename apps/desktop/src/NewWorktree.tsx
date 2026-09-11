@@ -15,6 +15,8 @@
 import { useEffect, useState } from "react";
 
 import { api, messageOf } from "./api";
+import { Waiting } from "./Empty";
+import { Close } from "./icons";
 import type { Facts } from "./gen/Facts";
 import type { Kind } from "./gen/Kind";
 import type { NewOptions } from "./gen/NewOptions";
@@ -63,7 +65,7 @@ export function NewWorktreeDialog({
     <div className="scrim" onMouseDown={onClose}>
       <div className="dialog" onMouseDown={(e) => e.stopPropagation()}>
         {error && <p className="error">{error}</p>}
-        {!options && !error && <p className="loading">reading the options…</p>}
+        {!options && !error && <Waiting />}
         {options && (
           <Form
             server={server}
@@ -215,20 +217,18 @@ function Form({
     <>
       <header className="dialog-head">
         <h2>{project.name}</h2>
-        <button className="quiet" onClick={onClose}>
-          close
+        <button className="quiet-icon" title="close" onClick={onClose}>
+          <Close aria-label="close" />
         </button>
       </header>
 
       <p className="origin">{project.repo}</p>
       {from && (
         <p className="hint">
-          From{" "}
           <a href={from.url} target="_blank" rel="noreferrer">
             {from.key}
           </a>{" "}
-          in {from.tracker} — the branch will be <code>{from.branch}</code>, and publishing will
-          comment the pull request back onto it.
+          → <code>{from.branch}</code>. Publishing comments back onto it.
         </p>
       )}
       {facts && <Drift facts={facts} sandboxed={sandboxed} />}
@@ -246,8 +246,7 @@ function Form({
           />
           <span>sandbox</span>
           <span className="hint">
-            a kernel-enforced sandbox, cloned from the remote, with a policy on
-            everything it reaches
+            kernel-enforced, cloned from the remote, a policy on everything it reaches
           </span>
         </label>
         <label className="tick">
@@ -258,8 +257,8 @@ function Form({
           />
           <span>worktree</span>
           <span className="hint">
-            a `git worktree` on the server, in seconds, sharing this checkout's
-            history
+            a <code>git worktree</code> on the server, in seconds, sharing this
+            checkout's history
           </span>
         </label>
       </fieldset>
@@ -374,15 +373,14 @@ function Form({
         </>
       ) : (
         <p className="hint">
-          The agent is the server's own, so it reads the server user's own
-          skills and MCP servers rather than being given a copy of them.
+          The agent is the server's own, so it reads that user's skills and MCP
+          servers rather than a copy.
         </p>
       )}
 
       {sandboxed && mine.length > 0 && (
         <p className="hint">
-          {mine.length} skill{mine.length === 1 ? "" : "s"} from this machine will be pushed to the
-          server first: {mine.join(", ")}
+          pushed from this machine first: {mine.join(", ")}
         </p>
       )}
 

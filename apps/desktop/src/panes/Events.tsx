@@ -4,6 +4,8 @@
 // the policy one above is worth reading -- a rule is a claim, and this is what
 // actually happened.
 
+import { Empty, Waiting } from "../Empty";
+import { Events } from "../icons";
 import { useFetch } from "../useFetch";
 import { api } from "../api";
 import type { Event } from "../gen/Event";
@@ -17,8 +19,11 @@ export function EventsPane({ server, name }: { server: string; name: string }) {
   // session, not two.
   if (kind === "no-isolation") return <Unisolated said={error} />;
   if (error) return <p className="error">{error}</p>;
-  if (!data) return <p className="loading">reading the feed…</p>;
-  if (data.length === 0) return <p className="loading">no policy decisions in the recent log</p>;
+  if (!data) return <Waiting />;
+  // The note stays, and it is the qualifier that earns it: this is the
+  // *recent* log rather than every decision ever made, so an empty feed is
+  // not a claim that the gateway has never denied anything.
+  if (data.length === 0) return <Empty icon={Events} note="no decisions in the recent log" />;
 
   return (
     <ul className="events">

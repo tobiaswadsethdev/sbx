@@ -143,7 +143,7 @@ Two more things that are not sbx's to fix but look exactly like it:
 
 The desktop application reads the same paired servers as the CLI: pair once with
 `sbxd connect` and the window lists that server without being told again. It can
-also *be* the thing that pairs -- paste the string into its **servers** dialog,
+also *be* the thing that pairs -- paste the string into its servers screen,
 which runs the same checks and writes the same file. That is what a Windows
 client does, having no `sbxd` to run:
 [desktop.md](desktop.md#connecting-it-to-a-server).

@@ -118,7 +118,7 @@ to install; it never installs unasked.
 **The window is installed separately, and can be on another machine.** On Linux
 it is built from the tree; on Windows it is an installer from the [releases
 page](https://github.com/tobiaswadsethdev/sbx/releases) and is all that side
-needs -- it pairs with a server from its own dialog, so there is no `sbxd` to
+needs -- it pairs with a server from its own screen, so there is no `sbxd` to
 install there. Both are [docs/install.md](docs/install.md#the-desktop-application).
 
 `sbxd doctor` is the one to run when something looks wrong -- it checks the

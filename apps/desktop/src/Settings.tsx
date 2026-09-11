@@ -25,12 +25,15 @@
 import { useEffect, useState } from "react";
 
 import { api, messageOf } from "./api";
+import { Waiting } from "./Empty";
 import type { NewOptions } from "./gen/NewOptions";
 import type { Settings } from "./gen/Settings";
 import type { SettingsView } from "./gen/SettingsView";
+import { Settings as SettingsGlyph } from "./icons";
 import { DEFAULTS, LIMITS, type Prefs } from "./prefs";
+import { Screen } from "./Screen";
 
-export function SettingsDialog({
+export function SettingsScreen({
   server,
   prefs,
   onPrefs,
@@ -78,12 +81,6 @@ export function SettingsDialog({
       live = false;
     };
   }, [server]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   /// One field of the draft.
   const edit = (change: Partial<Settings>) => {
@@ -142,218 +139,208 @@ export function SettingsDialog({
     });
 
   return (
-    <div className="scrim" onMouseDown={onClose}>
-      <div className="dialog settings" onMouseDown={(e) => e.stopPropagation()}>
-        <header className="dialog-head">
-          <h2>Settings</h2>
-          <button className="quiet" onClick={onClose}>
-            close
-          </button>
-        </header>
+    <Screen icon={SettingsGlyph} title="settings" onClose={onClose}>
+      {error && <p className="error">{error}</p>}
+      {!view && !error && <Waiting />}
 
-        {error && <p className="error">{error}</p>}
-        {!view && !error && <p className="loading">asking the server…</p>}
+      {view && draft && (
+        <>
+          <section className="setting-group">
+            <h3>new sessions</h3>
+            <p className="hint">
+              Defaults on the server, so they hold for a session started from a terminal with{" "}
+              <code>sbx new</code> as well as one started here. A choice in the create form still
+              wins over any of them.
+            </p>
 
-        {view && draft && (
-          <>
-            <section className="setting-group">
-              <h3>new sessions</h3>
-              <p className="hint">
-                Defaults on the server, so they hold for a session started from a terminal with{" "}
-                <code>sbx new</code> as well as one started here. A choice in the create form still
-                wins over any of them.
-              </p>
+            <label>
+              <span>branch prefix</span>
+              <input
+                value={draft.branch_prefix ?? ""}
+                placeholder={view.default_branch_prefix}
+                spellCheck={false}
+                onChange={(e) => edit({ branch_prefix: text(e.target.value) })}
+              />
+            </label>
+            {/* The example, computed rather than described. `<prefix>/<name>`
+                is a sentence somebody has to decode; `tobias/add-auth` is
+                the branch they are about to have. */}
+            <p className="hint indent">
+              a work branch is{" "}
+              <code>
+                {(draft.branch_prefix?.trim() || view.default_branch_prefix).replace(/\/+$/, "")}
+                /add-auth
+              </code>
+              . Set it to your own name and a ticket-started session lands on the
+              convention your reviewers already look for.
+            </p>
 
-              <label>
-                <span>branch prefix</span>
-                <input
-                  value={draft.branch_prefix ?? ""}
-                  placeholder={view.default_branch_prefix}
-                  spellCheck={false}
-                  onChange={(e) => edit({ branch_prefix: text(e.target.value) })}
-                />
-              </label>
-              {/* The example, computed rather than described. `<prefix>/<name>`
-                  is a sentence somebody has to decode; `tobias/add-auth` is
-                  the branch they are about to have. */}
-              <p className="hint indent">
-                a work branch is{" "}
-                <code>
-                  {(draft.branch_prefix?.trim() || view.default_branch_prefix).replace(/\/+$/, "")}
-                  /add-auth
-                </code>
-                . Set it to your own name and a session started from a ticket lands on the
-                convention your reviewers and your tracker's commit hooks already look for.
-              </p>
+            <label>
+              <span>base branch</span>
+              <input
+                value={draft.base ?? ""}
+                placeholder="the remote's default branch"
+                spellCheck={false}
+                onChange={(e) => edit({ base: text(e.target.value) })}
+              />
+            </label>
+            <p className="hint indent">
+              What a new session clones from. Leave it empty unless the repository develops off
+              something other than its default branch.
+            </p>
 
-              <label>
-                <span>base branch</span>
-                <input
-                  value={draft.base ?? ""}
-                  placeholder="the remote's default branch"
-                  spellCheck={false}
-                  onChange={(e) => edit({ base: text(e.target.value) })}
-                />
-              </label>
-              <p className="hint indent">
-                What a new session clones from. Leave it empty unless the repository develops off
-                something other than its default branch.
-              </p>
-
-              <label>
-                <span>policy</span>
-                <select
-                  value={draft.policy ?? ""}
-                  onChange={(e) => edit({ policy: text(e.target.value) })}
-                >
-                  {/* The built-in default is an option rather than a blank
-                      row: "whatever sbx chooses" is a real answer here, and
-                      the one that survives the default changing. */}
-                  <option value="">
-                    {options ? `${options.default_policy} — the built-in default` : "the default"}
+            <label>
+              <span>policy</span>
+              <select
+                value={draft.policy ?? ""}
+                onChange={(e) => edit({ policy: text(e.target.value) })}
+              >
+                {/* The built-in default is an option rather than a blank
+                    row: "whatever sbx chooses" is a real answer here, and
+                    the one that survives the default changing. */}
+                <option value="">
+                  {options ? `${options.default_policy} — the built-in default` : "the default"}
+                </option>
+                {(options?.policies ?? []).map((p) => (
+                  <option key={p.spec} value={p.spec}>
+                    {p.spec} — {p.summary}
                   </option>
-                  {(options?.policies ?? []).map((p) => (
-                    <option key={p.spec} value={p.spec}>
-                      {p.spec} — {p.summary}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {/* A policy set to a YAML path is a perfectly good answer and one
-                  no chooser can offer, so it is shown rather than silently
-                  replaced by the first template in the list. */}
-              {draft.policy && !(options?.policies ?? []).some((p) => p.spec === draft.policy) && (
-                <p className="hint indent">
-                  <code>{draft.policy}</code> is not one of this server's templates — a path to a
-                  YAML file, most likely. Picking anything above replaces it.
-                </p>
-              )}
-
-              <fieldset>
-                <legend>providers</legend>
-                {!options && <p className="hint">asking the gateway…</p>}
-                {options?.providers_error && <p className="error">{options.providers_error}</p>}
-                {options && options.providers.length === 0 && !options.providers_error && (
-                  <p className="hint">the gateway has no credential providers</p>
-                )}
-                {(options?.providers ?? []).map((p) => (
-                  <label key={p.name} className="tick">
-                    <input
-                      type="checkbox"
-                      checked={providers.includes(p.name)}
-                      onChange={() => toggleProvider(p.name)}
-                    />
-                    <span>{p.name}</span>
-                    <span className="hint">{p.kind}</span>
-                  </label>
                 ))}
-                <p className="hint">
-                  Ticking any of these replaces the create form's guesswork with your answer: it
-                  normally ticks the agent's credential and the repository host's when the type
-                  names exactly one. Ticking none leaves it guessing, which is the default.
-                </p>
-              </fieldset>
-            </section>
-
-            <section className="setting-group">
-              <h3>this server</h3>
-              <label className="tick">
-                <input
-                  type="checkbox"
-                  // Absent means on, which is what the server does with the
-                  // key missing -- so the box has to be ticked for a file that
-                  // does not mention it.
-                  checked={draft.auto_update ?? true}
-                  onChange={(e) => edit({ auto_update: e.target.checked })}
-                />
-                <span>fetch new releases in the background</span>
-              </label>
+              </select>
+            </label>
+            {/* A policy set to a YAML path is a perfectly good answer and one
+                no chooser can offer, so it is shown rather than silently
+                replaced by the first template in the list. */}
+            {draft.policy && !(options?.policies ?? []).some((p) => p.spec === draft.policy) && (
               <p className="hint indent">
-                It never replaces a running binary: the download is verified and left beside the
-                current one, and the swap happens the next time <code>sbxd</code> starts. Turn it
-                off for a machine that would rather not reach github at all.
+                <code>{draft.policy}</code> is not one of this server's templates — a path to a
+                YAML file, most likely. Picking anything above replaces it.
               </p>
-            </section>
+            )}
 
-            <div className="setting-actions">
-              <span className="hint path">
-                {view.present ? "writes " : "creates "}
-                <code>{view.path}</code>
-              </span>
-              {dirty && <span className="unsaved">unsaved</span>}
-              {saved && !dirty && <span className="ok">saved</span>}
-              <button className="go" disabled={saving || !dirty} onClick={() => void save()}>
-                {saving ? "saving…" : "save"}
-              </button>
-            </div>
-          </>
-        )}
+            <fieldset>
+              <legend>providers</legend>
+              {!options && <p className="hint">asking the gateway…</p>}
+              {options?.providers_error && <p className="error">{options.providers_error}</p>}
+              {options && options.providers.length === 0 && !options.providers_error && (
+                <p className="hint">the gateway has no credential providers</p>
+              )}
+              {(options?.providers ?? []).map((p) => (
+                <label key={p.name} className="tick">
+                  <input
+                    type="checkbox"
+                    checked={providers.includes(p.name)}
+                    onChange={() => toggleProvider(p.name)}
+                  />
+                  <span>{p.name}</span>
+                  <span className="hint">{p.kind}</span>
+                </label>
+              ))}
+              <p className="hint">
+                Ticking any of these replaces the create form's guesswork with your
+                answer. Ticking none leaves it guessing, which is the default.
+              </p>
+            </fieldset>
+          </section>
 
-        <section className="setting-group">
-          <h3>this window</h3>
-          <p className="hint">
-            Kept on this machine. Nothing here is sent to the server, and another window on the
-            same sessions has its own answers.
-          </p>
-
-          <label>
-            <span>projects width</span>
-            <Pixels
-              value={prefs.treeWidth}
-              limit={LIMITS.treeWidth}
-              onChange={(treeWidth) => onPrefs({ treeWidth })}
-            />
-          </label>
-
-          <label>
-            <span>dock width</span>
-            <Pixels
-              value={prefs.dockWidth}
-              limit={LIMITS.dockWidth}
-              onChange={(dockWidth) => onPrefs({ dockWidth })}
-            />
-          </label>
-          <p className="hint indent">
-            Or drag either sidebar's inner edge. Double-click one to put it back.
-          </p>
-
-          <label>
-            <span>refresh</span>
-            <Pixels
-              value={prefs.refreshMs}
-              limit={LIMITS.refreshMs}
-              unit="ms"
-              step={250}
-              onChange={(refreshMs) => onPrefs({ refreshMs })}
-            />
-          </label>
-          <p className="hint indent">
-            How often the worktree list is re-read. A round trip to the server, so raise it for one
-            across a VPN; what each agent is <em>doing</em> arrives on its own channel and is not
-            affected.
-          </p>
-
-          <label className="tick">
-            <input
-              type="checkbox"
-              checked={prefs.notify}
-              onChange={(e) => onPrefs({ notify: e.target.checked })}
-            />
-            <span>notify me when an agent starts waiting</span>
-          </label>
-          <p className="hint indent">
-            An OS notification the moment a session needs an answer — the reason watching four of
-            them costs nothing. Only on the transition, never for one that has been waiting a while.
-          </p>
+          <section className="setting-group">
+            <h3>this server</h3>
+            <label className="tick">
+              <input
+                type="checkbox"
+                // Absent means on, which is what the server does with the
+                // key missing -- so the box has to be ticked for a file that
+                // does not mention it.
+                checked={draft.auto_update ?? true}
+                onChange={(e) => edit({ auto_update: e.target.checked })}
+              />
+              <span>fetch new releases in the background</span>
+            </label>
+            <p className="hint indent">
+              It never replaces a running binary: the download is verified and left beside the
+              current one, and the swap happens the next time <code>sbxd</code> starts. Turn it
+              off for a machine that would rather not reach github at all.
+            </p>
+          </section>
 
           <div className="setting-actions">
-            <button className="quiet" onClick={() => onPrefs(DEFAULTS)}>
-              back to defaults
+            <span className="hint path">
+              {view.present ? "writes " : "creates "}
+              <code>{view.path}</code>
+            </span>
+            {dirty && <span className="unsaved">unsaved</span>}
+            {saved && !dirty && <span className="ok">saved</span>}
+            <button className="go" disabled={saving || !dirty} onClick={() => void save()}>
+              {saving ? "saving…" : "save"}
             </button>
           </div>
-        </section>
-      </div>
-    </div>
+        </>
+      )}
+
+      <section className="setting-group">
+        <h3>this window</h3>
+        <p className="hint">
+          Kept on this machine. Nothing here is sent to the server, and another window on the
+          same sessions has its own answers.
+        </p>
+
+        <label>
+          <span>projects width</span>
+          <Pixels
+            value={prefs.treeWidth}
+            limit={LIMITS.treeWidth}
+            onChange={(treeWidth) => onPrefs({ treeWidth })}
+          />
+        </label>
+
+        <label>
+          <span>dock width</span>
+          <Pixels
+            value={prefs.dockWidth}
+            limit={LIMITS.dockWidth}
+            onChange={(dockWidth) => onPrefs({ dockWidth })}
+          />
+        </label>
+        <p className="hint indent">
+          Or drag either sidebar's inner edge. Double-click one to put it back.
+        </p>
+
+        <label>
+          <span>refresh</span>
+          <Pixels
+            value={prefs.refreshMs}
+            limit={LIMITS.refreshMs}
+            unit="ms"
+            step={250}
+            onChange={(refreshMs) => onPrefs({ refreshMs })}
+          />
+        </label>
+        <p className="hint indent">
+          How often the worktree list is re-read — a round trip, so raise it for a server
+          across a VPN. What each agent is <em>doing</em> arrives on its own channel and
+          is not affected.
+        </p>
+
+        <label className="tick">
+          <input
+            type="checkbox"
+            checked={prefs.notify}
+            onChange={(e) => onPrefs({ notify: e.target.checked })}
+          />
+          <span>notify me when an agent starts waiting</span>
+        </label>
+        <p className="hint indent">
+          An OS notification the moment a session needs an answer, and only on the
+          transition — never for one that has been waiting a while.
+        </p>
+
+        <div className="setting-actions">
+          <button className="quiet" onClick={() => onPrefs(DEFAULTS)}>
+            back to defaults
+          </button>
+        </div>
+      </section>
+    </Screen>
   );
 }
 

@@ -139,7 +139,7 @@ needs none of the prerequisites above -- and the server it dials can be this
 machine, a box on the LAN, or the Linux side of the same laptop.
 
 Whichever platform, the last step is the same: **the window pairs with a server
-from its own dialog**, so nothing above has to be installed beside it. Run
+from its own screen**, so nothing above has to be installed beside it. Run
 `sbxd pair desktop --host <the address the window will dial>` on the server,
 paste the `sbx://…` line it prints into the window, and that is the install
 finished. [desktop.md](desktop.md#connecting-it-to-a-server) is that step in

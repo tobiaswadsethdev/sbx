@@ -13,6 +13,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api, messageOf } from "./api";
+import { Empty, Waiting } from "./Empty";
+import { Close, NoRepos } from "./icons";
 import type { Listing } from "./gen/Listing";
 import type { LocalRepo } from "./gen/LocalRepo";
 import type { Project } from "./gen/Project";
@@ -62,7 +64,7 @@ export function NewProjectDialog({
     <div className="scrim" onMouseDown={onClose}>
       <div className="dialog" onMouseDown={(e) => e.stopPropagation()}>
         {error && <p className="error">{error}</p>}
-        {!listing && !error && <p className="loading">looking for repositories…</p>}
+        {!listing && !error && <Waiting />}
         {listing && (
           <Picker listing={listing} busy={busy} onPick={(r) => void pick(r)} onClose={onClose} />
         )}
@@ -102,10 +104,14 @@ function Picker({
 
   return (
     <>
+      {/* The word `close` is gone from every dialog head in the window and
+          from the screens too, because an X in the top corner of a thing
+          that floats is the one control nobody has needed labelled since
+          1985. Escape still does it, and the title attribute still says so. */}
       <header className="dialog-head">
         <h2>New project</h2>
-        <button className="quiet" onClick={onClose}>
-          close
+        <button className="quiet-icon" title="close" onClick={onClose}>
+          <Close aria-label="close" />
         </button>
       </header>
       <input
@@ -116,13 +122,17 @@ function Picker({
         onChange={(e) => setQuery(e.target.value)}
       />
       {listing.repos.length === 0 ? (
-        <div className="none">
-          <p>No git repositories on the server.</p>
-          <p>
-            It looked in {listing.roots.join(", ") || "nowhere"}. Set{" "}
-            <code>repo_roots</code> in its config file to look elsewhere.
+        // The note is where it looked, because that is the fact that turns
+        // "there are none" into something actionable -- a list of roots you
+        // did not expect is the answer nine times out of ten.
+        <Empty
+          icon={NoRepos}
+          note={`nothing in ${listing.roots.join(", ") || "any configured root"}`}
+        >
+          <p className="hint">
+            <code>repo_roots</code> in the server's config file is where it looks.
           </p>
-        </div>
+        </Empty>
       ) : (
         <ul className="repos">
           {rows.map((r) => (

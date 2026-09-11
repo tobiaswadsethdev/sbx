@@ -93,7 +93,7 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `ansi.rs` | one tokenizer for captured screens, into style types of its own, shared by everything that shows them and the matcher that reads them |
 | `pane.rs` | the markup the text panes share, so styling stays in one place |
 | `attach.rs` | *(sbxd)* raw mode, and handing this terminal to the agent |
-| `lib.rs` | *(sbx-client)* the servers this machine is paired with, pairing with one, and one request against one. `pair` is shared: `sbxd connect` and the desktop application's connect dialog are both it |
+| `lib.rs` | *(sbx-client)* the servers this machine is paired with, pairing with one, and one request against one. `pair` is shared: `sbxd connect` and the desktop application's servers screen are both it |
 | `pin.rs` | *(sbx-client)* judging a server by its certificate's fingerprint and nothing else |
 | `http.rs` | *(sbx-client)* enough HTTP/1.1 to ask an `sbxd` a question |
 | `state.rs` | where secrets live: keys, tokens, and saved connections |
