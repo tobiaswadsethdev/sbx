@@ -1737,6 +1737,34 @@ main { display: flex; flex: 1; min-height: 0; }
 .terminal { height: 100%; width: 100%; background: var(--sunken); }
 .terminal .xterm { height: 100%; padding: 6px 8px; }
 
+/* xterm.css paints the viewport `#000`, for a macOS native scrollbar that this
+   build does not have -- xterm 6 draws its own slider as an element instead.
+   Left as it is, that black is the only black in the window, and it is the part
+   of the pane you see: the viewport is `inset: 0` against `.xterm`, which puts
+   it over the padding above rather than inside it, so the terminal ends up
+   framed on all four sides in a colour from no palette. The frame is thickest
+   on the right and the bottom, where `FitAddon` leaves the scrollbar's width
+   and whatever is left over from the last whole row. The pane's own surface is
+   the one that should show through all of it. */
+.terminal .xterm-viewport { background-color: transparent; }
+
+/* xterm's slider, wearing the window's scrollbar. The same trick as
+   `.scrollbar-sleek` at the top of this file -- colour clipped to the padding
+   box inside a transparent border, so a 14px scrollbar shows a 6px thumb that
+   floats clear of the text -- and the colour itself comes from the same two
+   custom properties, handed to xterm by `Terminal.tsx` as part of the theme.
+
+   One class more specific than the rule xterm injects, and it has to be. That
+   rule sets `background`, the shorthand, which resets `background-clip` to
+   `border-box` along with it -- so at equal specificity the thumb keeps the
+   colour and loses the inset, and a 14px slab is what you get. Colour is still
+   xterm's: nothing here declares it. */
+.terminal .xterm .xterm-scrollable-element > .scrollbar > .slider {
+  background-clip: padding-box;
+  border: 4px solid transparent;
+  border-radius: 999px;
+}
+
 /* Where the engine could not measure the font, xterm's rows are drawn two
    pixels too high and clipped -- see charSize.ts, which adds this class. The
    row's own `line-height` is an inline style set to the pixel height of the
