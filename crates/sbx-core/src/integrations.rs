@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::mcp;
 use crate::secrets;
 use crate::skills;
+use crate::tracker;
 
 /// What the integrations screen shows.
 // `Integrations` on the wire, because `policy::View` is already `View` -- and
@@ -36,6 +37,25 @@ pub struct View {
     /// The skills the server's own config file names by path, which are not
     /// uploads and cannot be removed from here.
     pub configured_skills: Vec<String>,
+    /// The trackers the inbox reads, and whether each one's credential is
+    /// actually in the store.
+    pub trackers: Vec<Tracker>,
+}
+
+/// One configured tracker, as a screen that can add and remove them needs it.
+///
+/// The entry as the file has it, plus the one fact that is not in the file and
+/// decides whether it works: a tracker names a secret, and a name with nothing
+/// behind it is an inbox that fails on a timer with a 401.
+#[cfg_attr(
+    feature = "ts",
+    derive(ts_rs::TS),
+    ts(export, rename = "ConfiguredTracker")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tracker {
+    pub source: tracker::Source,
+    pub secret_set: bool,
 }
 
 /// Ask the server everything, once.
@@ -45,11 +65,20 @@ pub struct View {
 /// the screen honest.
 pub fn view(cfg: &crate::config::Config) -> View {
     let entries = cfg.mcp();
+    let stored = secrets::names();
     View {
         mcp: mcp::statuses(entries),
-        secrets: named_secrets(entries),
+        secrets: named_secrets(entries, cfg.trackers()),
         skills: skills::library(),
         configured_skills: cfg.skills().iter().map(|s| s.name.clone()).collect(),
+        trackers: cfg
+            .trackers()
+            .iter()
+            .map(|t| Tracker {
+                secret_set: stored.contains(&t.secret),
+                source: t.clone(),
+            })
+            .collect(),
     }
 }
 
@@ -61,7 +90,7 @@ pub fn view(cfg: &crate::config::Config) -> View {
 /// stored name that nothing references is listed too: it is either a leftover
 /// from an entry that has gone or a typo in one that has not, and both are worth
 /// seeing.
-fn named_secrets(entries: &[mcp::Entry]) -> Vec<secrets::Named> {
+fn named_secrets(entries: &[mcp::Entry], trackers: &[tracker::Source]) -> Vec<secrets::Named> {
     let stored = secrets::names();
     let mut out: Vec<secrets::Named> = Vec::new();
 
@@ -85,6 +114,12 @@ fn named_secrets(entries: &[mcp::Entry]) -> Vec<secrets::Named> {
         for name in entry.managed.iter().flat_map(|m| m.secrets.iter()) {
             note(name, Some(entry.name()));
         }
+    }
+    // A tracker's credential belongs in this list for the same reason a
+    // container's does: the name is in the config file, the value is in the
+    // store, and the gap between the two is the whole failure.
+    for t in trackers {
+        note(&t.secret, Some(&t.name));
     }
     for name in &stored {
         note(name, None);
@@ -122,7 +157,7 @@ mod tests {
             entry("jira", &["ATLASSIAN_TOKEN"]),
             entry("wiki", &["ATLASSIAN_TOKEN"]),
         ];
-        let named = named_secrets(&entries);
+        let named = named_secrets(&entries, &[]);
 
         assert_eq!(named.len(), 1, "{named:?}");
         assert_eq!(named[0].name, "ATLASSIAN_TOKEN");
@@ -140,7 +175,26 @@ mod tests {
             mcp::Server::parse("theirs", "http://mcp-theirs:9000/mcp", mcp::Transport::Http)
                 .unwrap(),
         );
-        let named = named_secrets(std::slice::from_ref(&external));
+        let named = named_secrets(std::slice::from_ref(&external), &[]);
         assert!(named.iter().all(|n| n.used_by.is_empty()), "{named:?}");
+    }
+
+    /// A tracker's credential is in this list for the same reason a container's
+    /// is: the name is in the config file, the value is in the store, and an
+    /// inbox that 401s on a timer is the gap between them.
+    #[test]
+    fn a_trackers_secret_is_listed_and_says_who_wants_it() {
+        let jira = tracker::Source {
+            kind: tracker::Kind::Jira,
+            name: "jira".into(),
+            secret: "JIRA_TOKEN".into(),
+            site: Some("https://x.atlassian.net".into()),
+            email: Some("me@example.invalid".into()),
+            ..Default::default()
+        };
+        let named = named_secrets(&[], std::slice::from_ref(&jira));
+        assert_eq!(named.len(), 1, "{named:?}");
+        assert_eq!(named[0].name, "JIRA_TOKEN");
+        assert_eq!(named[0].used_by, ["jira"]);
     }
 }

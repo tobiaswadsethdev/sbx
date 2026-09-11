@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use sbx_core::backend::{Backend, Torn, Worktree};
 use sbx_core::seed::{self, SeedState};
 use sbx_core::session::{Kind, Session, State};
+use sbx_core::{files, git, ops};
 
 /// A checkout with one commit on `main`, and no remote.
 ///
@@ -295,5 +296,55 @@ fn shells_are_this_session_s_and_nobody_else_s() {
     for (name, s) in [("mine", &mine), ("theirs", &theirs)] {
         backend.tear_down(name, Some(s)).unwrap();
     }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A session with no working copy is what a clone that never finished leaves
+/// behind, and every pane asks about that directory at once. Each of them used
+/// to pass the shell's answer straight through -- `ls: cannot access
+/// '/sandbox/repo'`, `sh: 1: cd: can't cd to /sandbox/repo` -- which names a
+/// path the reader has no reason to know and says nothing about what to do.
+#[test]
+fn a_session_without_a_working_copy_says_so_in_words() {
+    let root = temp("no-working-copy");
+    let src = checkout(&root);
+    let backend = Worktree::new(root.join("worktrees"), root.join("state"));
+    let mut s = session("vanished", &src);
+    backend.place(&mut s, &Default::default()).unwrap();
+
+    // The shape a failed clone leaves: a session, and nothing where its files
+    // should be.
+    let repo = PathBuf::from(backend.paths(&s).repo);
+    let _ = std::fs::remove_dir_all(&repo);
+    assert!(!repo.exists());
+    s.state = State::Failed;
+
+    let expected = files::no_working_copy(&s);
+    assert!(
+        expected.contains("has no working copy"),
+        "the sentence itself: {expected}"
+    );
+
+    for (pane, said) in [
+        ("tree", files::list(&backend, &s, "").unwrap_err()),
+        ("file", files::read(&backend, &s, "README.md").unwrap_err()),
+        ("git", git::status(&backend, &s).map(|_| ()).unwrap_err()),
+    ] {
+        assert_eq!(said, expected, "the {pane} pane");
+        assert!(
+            !said.contains(&repo.display().to_string()),
+            "{pane}: {said}"
+        );
+    }
+    // The diff pane shows what its script printed rather than an error.
+    let diff = ops::repo_diff(&backend, &s);
+    assert_eq!(diff.trim(), expected);
+
+    // And while it is still being made, the same absence means "wait", not
+    // "start again".
+    s.state = State::Seeding;
+    let waiting = files::list(&backend, &s, "").unwrap_err();
+    assert!(waiting.contains("still being prepared"), "{waiting}");
+
     let _ = std::fs::remove_dir_all(&root);
 }

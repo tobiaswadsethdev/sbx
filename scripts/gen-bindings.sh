@@ -31,9 +31,16 @@ files=$(find "$out" -name '*.ts' | wc -l)
 #
 # So the count is checked. One `ts(export)` attribute is one file; fewer files
 # than attributes means two types answered to one name, and `ts(rename = "...")`
-# on one of them is the fix. Counted from attribute lines only, so a comment
-# mentioning the attribute -- there is one -- does not inflate the total.
-exported=$(grep -rhE '^[[:space:]]*#\[.*ts\(export' "$root/crates" --include='*.rs' | wc -l)
+# on one of them is the fix.
+#
+# Counted by the `ts(export` itself rather than by the `#[` in front of it: a
+# long `cfg_attr` is wrapped over several lines by rustfmt, and anchoring on the
+# opening bracket silently stopped counting those -- which reads as the error
+# above against a perfectly good pair of types. Comment lines are dropped
+# instead, since there is a comment mentioning the attribute and it must not
+# inflate the total.
+exported=$(grep -rhE 'ts\(export' "$root/crates" --include='*.rs' \
+    | grep -cvE '^[[:space:]]*(//|\*|/\*)')
 if [ "$files" -ne "$exported" ]; then
     echo "error: $exported types exported but $files files written." >&2
     echo "Two exported types share a name; give one \`ts(rename = \"...\")\`." >&2

@@ -84,8 +84,8 @@ fn check_openshell() -> Check {
         None => Check::fail(
             "openshell",
             "not on PATH",
-            "install from the release tarballs into ~/.local/bin (see docs/manual-loop.md); \
-             OpenShell's own install.sh supports dpkg/rpm only",
+            "install from the release tarballs into ~/.local/bin; OpenShell's own \
+             install.sh supports dpkg/rpm only",
         ),
     }
 }

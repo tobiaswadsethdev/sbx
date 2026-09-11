@@ -20,7 +20,38 @@ use serde::{Deserialize, Serialize};
 
 use crate::backend::Backend;
 use crate::seed::sh_quote;
-use crate::session::Session;
+use crate::session::{Session, State};
+
+/// Sentinel a script prints when the working copy is not there at all.
+///
+/// The same machine-readable channel [`crate::publish`] uses, and for the same
+/// reason: it has to be told apart from anything the shell might say on its own.
+pub(crate) const NO_REPO: &str = "@@sbx-no-repo@@";
+
+/// What every pane says when a session has no working copy.
+///
+/// The tree, the file viewer and the git pane all ask the sandbox about the
+/// same directory, and each of them used to answer with whatever `sh` said
+/// about it -- `ls: cannot access '/sandbox/repo': No such file or directory`
+/// in the tree, `sh: 1: cd: can't cd to /sandbox/repo` in git. That is the
+/// shell answering a question nobody asked, in a path the reader has no reason
+/// to have heard of.
+///
+/// Two sentences, because there are two ways to have no working copy and the
+/// right thing to do differs: one is to wait, the other is to start again.
+pub fn no_working_copy(session: &Session) -> String {
+    match session.state {
+        State::Creating | State::Seeding => format!(
+            "`{}` is still being prepared; its files appear once the clone finishes",
+            session.name
+        ),
+        _ => format!(
+            "`{}` has no working copy: its clone never finished, so there is nothing here to \
+             show. Create the session again to retry it.",
+            session.name
+        ),
+    }
+}
 
 /// How much of a file is read. A viewer showing half a megabyte is already
 /// showing more than anyone reads; the rest is a scroll bar lying about how
@@ -93,6 +124,24 @@ fn absolute(root: &str, rel: &str) -> String {
     }
 }
 
+/// A shell's complaint, turned into a sentence when it is one of the two that
+/// have a better wording, and kept as it is when it is not.
+///
+/// `No such file or directory` means the tree is showing something that has
+/// since been deleted, which is worth saying in those words rather than in
+/// `ls`'s. Anything else is a genuine surprise, and hiding what the sandbox
+/// said about it would leave nothing to investigate.
+fn gone_or(stderr: &str, gone: &str) -> String {
+    let said = stderr.trim();
+    if said.contains("No such file or directory") {
+        return gone.to_string();
+    }
+    if said.is_empty() {
+        return "the sandbox would not read it, and said nothing about why".to_string();
+    }
+    format!("the sandbox could not read it: {said}")
+}
+
 /// List one directory.
 pub fn list(backend: &dyn Backend, session: &Session, path: &str) -> Result<Dir, String> {
     let rel = clean(path)?;
@@ -101,15 +150,23 @@ pub fn list(backend: &dyn Backend, session: &Session, path: &str) -> Result<Dir,
     // not `.` and `..`. A filename with a newline in it would split into two
     // entries; git will not track one, and the cost of handling it is a format
     // busybox's `ls` does not have.
-    let script = format!("ls -Ap -- {dir}", dir = sh_quote(&absolute(&root, &rel)));
+    let script = format!(
+        "[ -d {root} ] || {{ printf '%s\\n' {mark}; exit 0; }}\nls -Ap -- {dir}",
+        root = sh_quote(&root),
+        mark = sh_quote(NO_REPO),
+        dir = sh_quote(&absolute(&root, &rel)),
+    );
     let out = backend
         .exec(session, &["sh", "-c", &script])
         .map_err(|e| e.to_string())?;
+    // The root, rather than the directory asked for: a session whose clone
+    // never happened has no tree at all, and saying that once is worth more
+    // than saying `ls: cannot access` about every path in it.
+    if out.trimmed() == NO_REPO {
+        return Err(no_working_copy(session));
+    }
     if !out.ok() {
-        return Err(format!(
-            "could not read that directory: {}",
-            out.stderr.trim()
-        ));
+        return Err(gone_or(&out.stderr, "that directory is not there any more"));
     }
 
     let mut entries: Vec<Entry> = out
@@ -144,14 +201,24 @@ pub fn read(backend: &dyn Backend, session: &Session, path: &str) -> Result<File
     // that hands back a `String`: an exec's stdout is already lossy UTF-8, and a
     // source file with a stray byte in it would come back altered.
     let script = format!(
-        "p={path}; [ -f \"$p\" ] || {{ echo missing; exit 3; }}; wc -c < \"$p\"; head -c {CAP} \"$p\" | base64 | tr -d '\\n'",
+        "[ -d {root} ] || {{ printf '%s\\n' {mark}; exit 0; }}\np={path}; [ -f \"$p\" ] || {{ echo missing; exit 3; }}; wc -c < \"$p\"; head -c {CAP} \"$p\" | base64 | tr -d '\\n'",
+        root = sh_quote(&root),
+        mark = sh_quote(NO_REPO),
         path = sh_quote(&absolute(&root, &rel)),
     );
     let out = backend
         .exec(session, &["sh", "-c", &script])
         .map_err(|e| e.to_string())?;
+    if out.trimmed() == NO_REPO {
+        return Err(no_working_copy(session));
+    }
+    // Exit 3 is the script's own way of saying the file is gone, and it says it
+    // on stdout -- so the old wording put an empty stderr after a colon.
+    if out.exit_code == 3 || out.trimmed() == "missing" {
+        return Err("that file is not there any more".into());
+    }
     if !out.ok() {
-        return Err(format!("could not read that file: {}", out.stderr.trim()));
+        return Err(gone_or(&out.stderr, "that file is not there any more"));
     }
 
     let mut lines = out.trimmed().splitn(2, '\n');

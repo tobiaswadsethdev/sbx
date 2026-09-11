@@ -309,9 +309,13 @@ fn decode(s: &str) -> Result<Vec<u8>, String> {
 }
 
 fn run(backend: &dyn Backend, session: &Session, script: &str) -> Result<String, String> {
+    // The `cd` reports its own failure rather than being left to the shell,
+    // whose version of it -- `sh: 1: cd: can't cd to /sandbox/repo` -- was what
+    // the git pane showed for a session whose clone never finished.
     let full = format!(
-        "cd {repo} && {script}",
-        repo = sh_quote(&backend.paths(session).repo)
+        "cd {repo} 2>/dev/null || {{ printf '%s\n' {mark} >&2; exit 1; }}\n{script}",
+        repo = sh_quote(&backend.paths(session).repo),
+        mark = sh_quote(crate::files::NO_REPO),
     );
     let out = backend
         .exec(session, &["sh", "-c", &full])
@@ -321,6 +325,9 @@ fn run(backend: &dyn Backend, session: &Session, script: &str) -> Result<String,
         // nothing staged, a pull with a conflict -- all things the person
         // asking needs to read rather than a sentence written here about them.
         let said = out.stderr.trim();
+        if said.contains(crate::files::NO_REPO) {
+            return Err(crate::files::no_working_copy(session));
+        }
         return Err(if said.is_empty() {
             out.trimmed().to_string()
         } else {

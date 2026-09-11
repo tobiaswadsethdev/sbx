@@ -37,11 +37,17 @@ use crate::session;
 ///
 /// A subset of the file, and the subset is "what a new session starts with"
 /// plus the one switch about the server itself. `repo_roots`, `worktree_root`,
-/// `skills`, `[[mcp]]` and `[[tracker]]` are deliberately not here: each is a
-/// decision about what an agent of yours can reach or where its files land,
-/// several of them are lists of tables, and a text field in a window is the
-/// wrong shape for any of it. The integrations screen already says as much
-/// about the MCP tables.
+/// `skills` and `[[mcp]]` are deliberately not here: each is a decision about
+/// what an agent of yours can reach or where its files land, and a text field
+/// in a window is the wrong shape for any of it.
+///
+/// `[[tracker]]` used to be on that list and is not any more. The argument was
+/// that a list of tables is the wrong shape for a settings screen, which is
+/// true and is why it is not one: [`add_tracker`] and [`forget_tracker`] add
+/// and remove whole tables from the integrations screen, beside the secret each
+/// one needs. Without them the inbox is a pane that can only ever be empty for
+/// anyone who does not edit the server's config file by hand -- which, from a
+/// desktop on another machine, is nobody.
 ///
 /// Every field is an `Option`, and `None` means **the key is not in the file**
 /// rather than "empty". That difference is the whole reason for the type: an
@@ -157,16 +163,7 @@ pub fn view(cfg: &Config) -> SettingsView {
 /// two-line config file that documents nothing, and the example's commented-out
 /// keys are also what [`insertion_point`] aims at.
 pub fn save(path: &Path, settings: &Settings) -> Result<Config, Error> {
-    let current = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => config::EXAMPLE.to_string(),
-        Err(source) => {
-            return Err(Error::Read {
-                path: path.to_path_buf(),
-                source,
-            });
-        }
-    };
+    let current = read_or_example(path)?;
 
     let next = edit(&current, &settings.normalized());
     // Before the write, not after: see the module note. A file that does not
@@ -176,6 +173,157 @@ pub fn save(path: &Path, settings: &Settings) -> Result<Config, Error> {
     let cfg = Config::parse(path, &next)?;
     write_atomically(path, &next)?;
     Ok(cfg)
+}
+
+/// Add a `[[tracker]]` table, and answer with the config as it now reads.
+///
+/// Appended rather than merged into whatever is already there: a table is the
+/// unit here, the file is read in order, and appending is the one edit that
+/// cannot disturb a line somebody else wrote.
+///
+/// Everything about whether the tracker makes sense -- a Jira entry with no
+/// site, a name two trackers share, a kind nobody has heard of -- is
+/// [`Config::parse`]'s answer rather than a second opinion here, which is the
+/// same division [`save`] works on. So an entry that would break the file is
+/// refused in the parser's own words and nothing is written.
+pub fn add_tracker(path: &Path, source: &crate::tracker::Source) -> Result<Config, Error> {
+    let current = read_or_example(path)?;
+    let newline = if current.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut next = current;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push_str(newline);
+    }
+    next.push_str(&table(&source.normalized(), newline));
+
+    let cfg = Config::parse(path, &next)?;
+    write_atomically(path, &next)?;
+    Ok(cfg)
+}
+
+/// Take one out by name, and answer with the config as it now reads.
+///
+/// The name is resolved against the *parsed* config and the table is then
+/// removed by position, rather than by looking for a `name = ` line: a tracker
+/// with no `name` key is named after its kind by the parser, and a textual
+/// search would not find the entry it is being asked to remove.
+pub fn forget_tracker(path: &Path, name: &str) -> Result<Config, Error> {
+    let current = read_or_example(path)?;
+    let cfg = Config::parse(path, &current)?;
+    let missing = |message: String| Error::Invalid {
+        path: path.to_path_buf(),
+        key: "tracker",
+        message,
+    };
+    let Some(index) = cfg.trackers().iter().position(|t| t.name == name) else {
+        return Err(missing(format!("no tracker called `{name}`")));
+    };
+
+    let newline = if current.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut lines: Vec<String> = current
+        .split('\n')
+        .map(|line| line.trim_end_matches('\r').to_string())
+        .collect();
+    if lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    let Some(extent) = nth_table(&lines, "[[tracker]]", index) else {
+        return Err(missing(format!(
+            "`{name}` is in the config as it parsed but not in its text"
+        )));
+    };
+    lines.splice(extent, None);
+    let mut next = lines.join(newline);
+    next.push_str(newline);
+
+    let cfg = Config::parse(path, &next)?;
+    write_atomically(path, &next)?;
+    Ok(cfg)
+}
+
+/// The file, or the documented example when there is not one yet.
+fn read_or_example(path: &Path) -> Result<String, Error> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(config::EXAMPLE.to_string()),
+        Err(source) => Err(Error::Read {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
+/// One tracker as the text of a table, with the blank line that separates it
+/// from whatever is above.
+fn table(source: &crate::tracker::Source, newline: &str) -> String {
+    let mut out = String::new();
+    let mut line = |text: String| {
+        out.push_str(&text);
+        out.push_str(newline);
+    };
+    line(String::new());
+    line("[[tracker]]".to_string());
+    line(format!("kind = {}", quote(source.kind.label())));
+    line(format!("name = {}", quote(&source.name)));
+    line(format!("secret = {}", quote(&source.secret)));
+    for (key, value) in [
+        ("repo", &source.repo),
+        ("org", &source.org),
+        ("project", &source.project),
+        ("site", &source.site),
+        ("email", &source.email),
+        ("query", &source.query),
+        ("on_publish", &source.on_publish),
+    ] {
+        if let Some(value) = value {
+            line(format!("{key} = {}", quote(value)));
+        }
+    }
+    out
+}
+
+/// The lines the `n`th table with this header occupies, the blank lines above
+/// it included.
+///
+/// It ends where the next table begins, which is what a table *is* in TOML. The
+/// blank lines above come with it so that adding and removing a tracker leaves
+/// the file as it was rather than a growing gap where one used to be.
+fn nth_table(lines: &[String], header: &str, n: usize) -> Option<Range<usize>> {
+    let mut seen = 0;
+    let mut depth = 0i32;
+    let mut start: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if depth == 0 && line.trim_start().starts_with('[') {
+            if let Some(start) = start {
+                return Some(blank_before(lines, start)..i);
+            }
+            if line.trim() == header {
+                if seen == n {
+                    start = Some(i);
+                } else {
+                    seen += 1;
+                }
+            }
+        }
+        depth += brackets(line);
+    }
+    start.map(|start| blank_before(lines, start)..lines.len())
+}
+
+/// How far back the blank lines immediately above a line run.
+fn blank_before(lines: &[String], start: usize) -> usize {
+    let mut first = start;
+    while first > 0 && lines[first - 1].trim().is_empty() {
+        first -= 1;
+    }
+    first
 }
 
 /// Write and then rename, so a crash or a full disk leaves the old file rather
@@ -647,6 +795,139 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    fn tracker_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sbx-tracker-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn jira(name: &str) -> crate::tracker::Source {
+        crate::tracker::Source {
+            kind: crate::tracker::Kind::Jira,
+            name: name.into(),
+            secret: "JIRA_TOKEN".into(),
+            site: Some("https://you.atlassian.net".into()),
+            email: Some("you@example.invalid".into()),
+            ..Default::default()
+        }
+    }
+
+    /// The whole point of the pair: a tracker can be added and taken away
+    /// again, and the inbox has something to read in between.
+    #[test]
+    fn a_tracker_is_added_and_removed_leaving_the_file_as_it_was() {
+        let dir = tracker_dir("round-trip");
+        let path = dir.join("config.toml");
+        let before = concat!(
+            "# my server\n",
+            "branch_prefix = \"tobias\"\n",
+            "\n",
+            "[[mcp]]\n",
+            "name = \"jira\"\n",
+            "url = \"http://mcp-jira:9000/mcp\"\n",
+        );
+        fs::write(&path, before).unwrap();
+
+        let cfg = add_tracker(&path, &jira("work")).unwrap();
+        assert_eq!(cfg.trackers().len(), 1);
+        assert_eq!(cfg.trackers()[0].name, "work");
+        assert_eq!(
+            cfg.trackers()[0].site.as_deref(),
+            Some("https://you.atlassian.net")
+        );
+        // Appended, so the `[[mcp]]` table above is untouched and the comment
+        // at the top is still the first line.
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(before), "{after}");
+        assert!(after.contains("[[tracker]]"), "{after}");
+
+        let cfg = forget_tracker(&path, "work").unwrap();
+        assert!(cfg.trackers().is_empty());
+        // Byte for byte: the blank line that came with the table goes with it,
+        // or a tracker added and removed a few times leaves a growing gap.
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Two of a kind, removed by name. A tracker with no `name` key is named
+    /// after its kind by the parser, so the one to remove is found by asking
+    /// the parsed config which it is and cutting that table.
+    #[test]
+    fn the_right_one_of_two_is_removed() {
+        let dir = tracker_dir("two");
+        let path = dir.join("config.toml");
+        fs::write(&path, "").unwrap();
+
+        add_tracker(&path, &jira("mine")).unwrap();
+        add_tracker(&path, &jira("theirs")).unwrap();
+        let cfg = forget_tracker(&path, "mine").unwrap();
+
+        let left: Vec<&str> = cfg.trackers().iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(left, ["theirs"]);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("theirs"), "{text}");
+        assert!(!text.contains("mine"), "{text}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The parser is the only opinion about whether an entry can work, and it
+    /// runs before the write: a Jira tracker with no site is refused and the
+    /// file is left as the file it was.
+    #[test]
+    fn a_tracker_that_could_not_work_is_refused_and_nothing_is_written() {
+        let dir = tracker_dir("refused");
+        let path = dir.join("config.toml");
+        fs::write(&path, "base = \"main\"\n").unwrap();
+
+        let mut bad = jira("work");
+        bad.site = None;
+        assert!(add_tracker(&path, &bad).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "base = \"main\"\n");
+
+        // And a name two trackers share, which is the other way an inbox ends
+        // up writing a comment back to the wrong tracker.
+        add_tracker(&path, &jira("work")).unwrap();
+        assert!(
+            add_tracker(&path, &jira("work")).is_err(),
+            "a second `work` must be refused"
+        );
+        assert_eq!(
+            Config::load_from(&path).unwrap().trackers().len(),
+            1,
+            "and not written"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// An unnamed tracker is named after its kind, and the fields belonging to
+    /// another kind are not written at all -- a GitHub entry carrying a `site`
+    /// key is one the parser refuses.
+    #[test]
+    fn a_table_carries_only_what_its_kind_uses() {
+        let source = crate::tracker::Source {
+            kind: crate::tracker::Kind::GitHub,
+            name: "  ".into(),
+            secret: " GITHUB_TOKEN ".into(),
+            repo: Some("octocat/Hello-World".into()),
+            ..Default::default()
+        };
+        let text = table(&source.normalized(), "\n");
+        assert!(text.contains("kind = \"github\""), "{text}");
+        assert!(text.contains("name = \"github\""), "{text}");
+        assert!(text.contains("secret = \"GITHUB_TOKEN\""), "{text}");
+        assert!(text.contains("repo = \"octocat/Hello-World\""), "{text}");
+        assert!(!text.contains("site"), "{text}");
+        assert!(!text.contains("query"), "{text}");
+    }
+
     #[test]
     fn a_rejected_value_leaves_the_file_alone() {
         let dir = std::env::temp_dir().join(format!("sbx-settings-bad-{}", std::process::id()));
@@ -711,5 +992,38 @@ mod real_file {
             text.lines().count(),
             after.lines().count()
         );
+    }
+
+    /// The same question for the table edits, on a copy: adding a tracker to a
+    /// file somebody has actually written, and taking it out again, has to give
+    /// that file back unchanged.
+    #[test]
+    #[ignore = "reads the developer's own config file"]
+    fn a_tracker_round_trips_through_the_local_config() {
+        let Ok(text) = fs::read_to_string(Config::default_path()) else {
+            eprintln!("no config file; nothing to check");
+            return;
+        };
+        // A copy, because these two write: the point is the round trip, not the
+        // developer's file.
+        let dir = std::env::temp_dir().join(format!("sbx-real-tracker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(&path, &text).unwrap();
+
+        let source = crate::tracker::Source {
+            kind: crate::tracker::Kind::GitHub,
+            name: "round-trip".into(),
+            secret: "GITHUB_TOKEN".into(),
+            ..Default::default()
+        };
+        let with = add_tracker(&path, &source).expect("the local config takes a tracker");
+        assert!(with.trackers().iter().any(|t| t.name == "round-trip"));
+        forget_tracker(&path, "round-trip").expect("and gives it back");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+
+        let _ = fs::remove_dir_all(&dir);
+        eprintln!("ok: a tracker came and went without touching the rest");
     }
 }

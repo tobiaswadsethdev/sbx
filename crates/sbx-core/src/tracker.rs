@@ -74,7 +74,13 @@ impl Kind {
 /// Validated when the config file is read, so a Jira entry with no site or an
 /// Azure DevOps entry with no organisation fails against the line that wrote it
 /// rather than against a 404 on a timer.
-#[derive(Debug, Clone, PartialEq, Eq)]
+// Serialised as well as parsed, because the desktop both draws the configured
+// trackers and adds one: the shape the config file describes and the shape a
+// client sends are the same shape, and a second one would be a second place for
+// a Jira entry to be missing its email.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, rename = "Tracker"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Source {
     pub kind: Kind,
     /// What the inbox calls it. Defaults to the kind, which is right until
@@ -101,7 +107,58 @@ pub struct Source {
     pub on_publish: Option<String>,
 }
 
+impl Default for Source {
+    /// Every field but the kind is optional on the wire, so a client sending a
+    /// GitHub tracker does not have to send Jira's fields as nulls. The kind is
+    /// the one thing there is no sensible default for, and `github` is the one
+    /// that needs the least beside it.
+    fn default() -> Self {
+        Source {
+            kind: Kind::GitHub,
+            name: String::new(),
+            secret: String::new(),
+            repo: None,
+            org: None,
+            project: None,
+            site: None,
+            email: None,
+            query: None,
+            on_publish: None,
+        }
+    }
+}
+
 impl Source {
+    /// Trim every field, and fall back to the kind for an unnamed tracker --
+    /// the same defaulting [`crate::config`] does when it reads one out of the
+    /// file, so a tracker added from a client and one written by hand come out
+    /// the same.
+    pub fn normalized(&self) -> Source {
+        let text = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        let name = self.name.trim();
+        Source {
+            kind: self.kind,
+            name: if name.is_empty() {
+                self.kind.label().to_string()
+            } else {
+                name.to_string()
+            },
+            secret: self.secret.trim().to_string(),
+            repo: text(&self.repo),
+            org: text(&self.org),
+            project: text(&self.project),
+            site: text(&self.site),
+            email: text(&self.email),
+            query: text(&self.query),
+            on_publish: text(&self.on_publish),
+        }
+    }
+
     /// What is missing, if anything.
     pub fn problem(&self) -> Option<String> {
         let missing = |what: &str| {

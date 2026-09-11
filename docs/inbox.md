@@ -25,10 +25,15 @@ both would serve both badly.
 
 ## Configuring one
 
-A `[[tracker]]` table per tracker, in the **server's** config file. The
-credential is named, never written: the value lives in the server's secret store
-(see [mcp.md](mcp.md#secrets)), which is also where the window's integrations
-screen puts it.
+**From the window:** the integrations screen has a *trackers* section — pick the
+kind, say where it points, name the secret and paste the token, and the entry
+and its credential land on the server in one go. That is the whole setup, and it
+is the only one available when the server is on another machine.
+
+What it writes is a `[[tracker]]` table in the **server's** config file, which is
+the other way to do it. The credential is named, never written: the value lives
+in the server's secret store (see [mcp.md](mcp.md#secrets)), which is also where
+the window's integrations screen puts it.
 
 ```toml
 branch_prefix = "tobias"                  # what a work branch is named under

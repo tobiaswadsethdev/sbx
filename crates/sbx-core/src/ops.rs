@@ -170,7 +170,9 @@ pub fn refresh_with(
             // identical from out here.
             let (state, note) = match seed::seed_state(backend, &s) {
                 seed::SeedState::Done => (State::Ready, "seeding finished".to_string()),
-                seed::SeedState::Failed(why) => (State::Failed, format!("seeding failed: {why}")),
+                seed::SeedState::Failed(why) => {
+                    (State::Failed, seed::failure_message(&s.name, &why))
+                }
                 seed::SeedState::Running { step, alive: false } => {
                     (State::Failed, format!("seeding stopped during `{step}`"))
                 }
@@ -735,6 +737,15 @@ pub fn create(
         s.skills = draft.skills.clone();
     }
 
+    // Written before the gateway is asked for anything, because until there is
+    // a record there is nothing for a client to show: creating a sandbox is
+    // seconds of gateway, and a window that stays empty for those seconds looks
+    // like the request was lost rather than like work in progress. The record
+    // says `creating`, which is exactly what it is, and
+    // [`crate::store::reconcile`] knows not to read the missing sandbox behind
+    // a young `creating` record as a dead one.
+    save(s.clone(), &mut warnings);
+
     progress(Step::Place);
     // Each failure is recorded before being returned. A `Failed` record is the
     // only trace of a sandbox that may exist at the gateway but was never
@@ -754,9 +765,11 @@ pub fn create(
     // directory` about a session that is being created perfectly well.
     //
     // The window was always here and used to be microseconds; imposing MCP
-    // endpoints made it a `policy update --wait`, which is seconds. Saving first
+    // endpoints made it a `policy update --wait`, which is seconds. Saving here
     // closes it: a record in `creating` is one the repair pass knows to leave
-    // alone until the seeder has something to say.
+    // alone until the seeder has something to say. This is an update rather than
+    // the first write -- the record went in above -- and what it adds is what
+    // `place` filled in: the sandbox's name, or the worktree's directory.
     save(s.clone(), &mut warnings);
 
     if let Err(e) = backend.configure(&s, draft, &mut warnings) {
@@ -834,7 +847,7 @@ fn watch_seed(backend: &dyn Backend, session: &Session, progress: &mut dyn FnMut
         match seed::seed_state(backend, session) {
             seed::SeedState::Done => return Watched::Done,
             seed::SeedState::Failed(why) => {
-                return Watched::Failed(format!("seeding failed: {why}"));
+                return Watched::Failed(seed::failure_message(&session.name, &why));
             }
             seed::SeedState::Running { step, alive } => {
                 if !alive && !step.is_empty() {
@@ -957,7 +970,7 @@ fi
 /// file is the most common thing an agent produces.
 pub fn repo_diff(backend: &dyn Backend, session: &Session) -> String {
     let script = format!(
-        r#"cd {repo} 2>/dev/null || {{ printf 'no repository at %s\n' {repo}; exit 0; }}
+        r#"cd {repo} 2>/dev/null || {{ printf '%s\n' {no_repo}; exit 0; }}
 {resolve_base}
 emit() {{
   if [ -z "$2" ]; then return 0; fi
@@ -991,6 +1004,9 @@ emit 'untracked' "$untracked"
 if [ -z "$any" ]; then printf 'no changes yet\n'; fi
 "#,
         repo = seed::sh_quote(&backend.paths(session).repo),
+        // The pane shows whatever this prints, so the sentence is the same one
+        // the tree and the git pane give rather than a path and a shrug.
+        no_repo = seed::sh_quote(&crate::files::no_working_copy(session)),
         resolve_base = resolve_base_script(session),
         section = DIFF_SECTION,
         notice = DIFF_NOTICE,

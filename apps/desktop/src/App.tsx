@@ -9,9 +9,10 @@
 // the two things no ADE built on git worktrees has -- the policy being enforced
 // and the decisions it made.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { api, messageOf, type Paired, type ServerSummary } from "./api";
+import { useConfirm } from "./Confirm";
 import { ConnectDialog } from "./Connect";
 import { Dock } from "./Dock";
 import { Inbox, Integrations, NewProject, Servers, Settings } from "./icons";
@@ -57,6 +58,10 @@ export default function App() {
   // see `prefs.ts` for why none of it is on the server beside the branch
   // prefix.
   const [prefs, setPrefs] = usePrefs();
+
+  /// Asking before something irreversible, in a dialog of this window's own.
+  /// `dialog` is rendered at the end, beside the others.
+  const { ask, dialog: confirmation } = useConfirm();
 
   const [servers, setServers] = useState<ServerSummary[] | null>(null);
   const [server, setServer] = useState<string | null>(null);
@@ -141,8 +146,14 @@ export default function App() {
     [sessions, polls],
   );
 
+  /// A session that has been asked for but is not in the list yet.
+  ///
+  /// A ref rather than state: `refresh` reads it, and making it a dependency
+  /// would rebuild the poll timer every time a session is created.
+  const pending = useRef<string | null>(null);
+
   const refresh = useCallback(async () => {
-    if (!server) return;
+    if (!server) return null;
     try {
       const [list, known] = await Promise.all([api.sessions(server), api.projects(server)]);
       setSessions(list);
@@ -150,13 +161,47 @@ export default function App() {
       setError(null);
       // A worktree that has gone should not leave the panes showing its last
       // known state, which is indistinguishable from it still being there.
+      // A session still being created is the exception: it is selected before
+      // its record exists, and moving off it would take the window away from
+      // the thing that was just asked for.
       setSelected((current) =>
-        current && list.some((s) => s.name === current) ? current : (list[0]?.name ?? null),
+        current && (current === pending.current || list.some((s) => s.name === current))
+          ? current
+          : (list[0]?.name ?? null),
       );
+      return list;
     } catch (e) {
       setError(messageOf(e));
+      return null;
     }
   }, [server]);
+
+  /// Ask for the list until the new session is in it.
+  ///
+  /// `create` answers as soon as the request is accepted -- the sandbox is
+  /// seconds of gateway after that, on the server's own thread -- so the record
+  /// appears a moment later and the ordinary poll is seconds away again. Left
+  /// to the timer, the sidebar stays exactly as it was for those seconds and a
+  /// click that worked looks like one that did not.
+  ///
+  /// Bounded, and it gives up quietly: a create that fails before it writes
+  /// anything says so in the server's log, and the sidebar is then telling the
+  /// truth by not listing it.
+  const refreshUntil = useCallback(
+    async (name: string) => {
+      pending.current = name;
+      try {
+        for (let tries = 0; tries < 20; tries++) {
+          const list = await refresh();
+          if (list?.some((s) => s.name === name)) return;
+          await new Promise((done) => setTimeout(done, 300));
+        }
+      } finally {
+        pending.current = null;
+      }
+    },
+    [refresh],
+  );
 
   useEffect(() => {
     // A different server is a different set of sessions, and the states of the
@@ -273,8 +318,8 @@ export default function App() {
                     server that is running perfectly well. */}
                 <code>--host</code> is the address this window should dial, and
                 leaving it out is the usual reason a paired server cannot be
-                reached. For a server on another machine, see{" "}
-                <code>docs/server.md</code>.
+                reached. For a server on another machine, give it the address
+                that machine answers on rather than <code>127.0.0.1</code>.
               </p>
               <button className="go" onClick={() => setConnecting(true)}>
                 paste a pairing string
@@ -390,20 +435,33 @@ export default function App() {
             // Asked, and asked with the consequence spelled out, because this
             // is the one thing in the window that cannot be undone: the
             // sandbox goes, and with it whatever the agent had not pushed.
-            const what =
-              s.backend === "worktree"
-                ? `Destroy ${s.name}? Its worktree on the server goes too, and anything uncommitted in it is lost.`
-                : `Destroy ${s.name}? Its sandbox and anything the agent has not pushed are lost.`;
-            if (!window.confirm(what)) return;
-            api
-              .destroy(server, s.name)
-              .then((left) => {
-                setSessions(left);
-                // Whatever was showing is gone. Left selected, the panes would
-                // go on asking the server about a session it no longer has.
-                if (selected === s.name) setSelected(null);
-              })
-              .catch((e) => setError(messageOf(e)));
+            ask({
+              title: `Destroy ${s.name}?`,
+              body:
+                s.backend === "worktree" ? (
+                  <>
+                    Its worktree on the server goes with it, and anything uncommitted in{" "}
+                    <code>{s.name}</code> is lost.
+                  </>
+                ) : (
+                  <>
+                    Its sandbox goes with it, and anything the agent has not pushed is lost.
+                  </>
+                ),
+              confirm: "destroy",
+              onConfirm: () => {
+                api
+                  .destroy(server, s.name)
+                  .then((left) => {
+                    setSessions(left);
+                    // Whatever was showing is gone. Left selected, the panes
+                    // would go on asking the server about a session it no
+                    // longer has.
+                    if (selected === s.name) setSelected(null);
+                  })
+                  .catch((e) => setError(messageOf(e)));
+              },
+            });
           }}
         />
 
@@ -549,6 +607,8 @@ export default function App() {
         />
       )}
 
+      {confirmation}
+
       {creatingIn && server && (
         <NewWorktreeDialog
           server={server}
@@ -561,10 +621,11 @@ export default function App() {
           onCreated={(name) => {
             setCreatingIn(null);
             setFromTask(null);
-            // Selected before it exists, on purpose: the record is written a
-            // second or two in, and the next poll finds it.
+            // Selected before it exists, on purpose: the record is written as
+            // soon as the server's thread reaches it, and the burst below is
+            // what puts it in the sidebar rather than the next poll.
             setSelected(name);
-            void refresh();
+            void refreshUntil(name);
           }}
         />
       )}

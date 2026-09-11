@@ -53,12 +53,43 @@ fn host_git_identity() -> (String, String) {
     )
 }
 
+/// How many times the clone is attempted before the seeding gives up.
+///
+/// Three because the failure this exists for is a race that is over in
+/// milliseconds, and a second attempt has already missed it; the third is for
+/// the ordinary flaky network the first two were not.
+const CLONE_ATTEMPTS: u32 = 3;
+/// How long to wait between attempts. Long enough that a gateway settling after
+/// a fresh sandbox has settled, short enough not to be felt.
+const CLONE_RETRY_SECS: u32 = 2;
+
 /// The clone-and-branch half of seeding, without a shebang or a `set`.
 ///
 /// Idempotent: re-seeding an already-seeded sandbox re-uses the clone and
 /// switches to the existing branch instead of failing. Kept separate from
 /// [`detached_script`] so the tricky parts -- the credential prelude, the
 /// quoting -- have one home.
+///
+/// The clone is retried, which nothing else in the seeder is, because it is the
+/// one step that runs while the sandbox is still brand new -- and OpenShell
+/// 0.0.110 can deny that first connection for a reason that has nothing to do
+/// with the policy:
+///
+/// ```text
+/// DENY NET:OPEN /usr/lib/git-core/git-remote-http(202) -> github.com:443
+///   ancestor integrity check failed for /usr/bin/dash:
+///   Failed to stat /usr/bin/dash: No such file or directory (os error 2)
+/// ```
+///
+/// A network rule is granted to a binary *and its ancestry*, and the gateway
+/// re-reads each ancestor's executable before it allows the connection. `dash`
+/// is in that ancestry -- it is `/bin/sh`, and [`launch`] starts the seeder with
+/// one -- and the launching shell exits about a tenth of a second after the
+/// clone begins, which is roughly when git opens its first connection. Lose that
+/// race and the ancestor's executable cannot be read, the connection is denied,
+/// and git reports the refused CONNECT as `response 403`. It is transient: the
+/// same clone, run again a second later, is allowed. Without a retry a race
+/// nobody can see costs the whole session, which is what it did.
 pub(crate) fn clone_and_branch(session: &Session, paths: &Paths) -> String {
     let (name, email) = host_git_identity();
 
@@ -84,7 +115,18 @@ pub(crate) fn clone_and_branch(session: &Session, paths: &Paths) -> String {
 
     format!(
         r#"{prelude}if [ ! -d {repo}/.git ]; then
-  gitc clone --quiet {base}-- {url} {repo}
+  attempt=1
+  while :; do
+    if gitc clone --quiet {base}-- {url} {repo}; then break; fi
+    if [ "$attempt" -ge {tries} ]; then exit 1; fi
+    # Whatever the failed attempt left behind is debris -- there was no
+    # repository here when this branch was entered -- and git refuses to clone
+    # into a directory that is not empty.
+    rm -rf {repo}
+    echo "clone attempt $attempt failed; retrying in {delay}s" >&2
+    attempt=$((attempt + 1))
+    sleep {delay}
+  done
 fi
 cd {repo}
 git config user.name {gname}
@@ -104,6 +146,8 @@ git switch --quiet -c {branch} 2>/dev/null || git switch --quiet {branch}
         gname = sh_quote(&name),
         gemail = sh_quote(&email),
         branch = sh_quote(&session.work_branch),
+        tries = CLONE_ATTEMPTS,
+        delay = CLONE_RETRY_SECS,
     )
 }
 
@@ -347,6 +391,25 @@ pub fn parse_seed_state(text: &str) -> SeedState {
     }
 }
 
+/// What a failed seeding says to whoever asked for the session.
+///
+/// A denied connection is the one failure that reads as something else
+/// entirely. The gateway refuses the CONNECT, git reports `response 403`, and a
+/// 403 from a git host means an expired token to anyone who has ever seen one
+/// -- so the reader goes looking for a credential when the answer is a policy
+/// rule. The reason the gateway gives exists in exactly one place, the events
+/// feed, so say which feed rather than leaving the 403 to be interpreted.
+pub fn failure_message(session: &str, why: &str) -> String {
+    let mut msg = format!("seeding failed: {why}");
+    if why.contains("CONNECT tunnel failed") {
+        msg.push_str(&format!(
+            " -- that 403 is the gateway denying the connection, not the host refusing it; \
+             `sbxd events {session}` names the rule and the reason"
+        ));
+    }
+    msg
+}
+
 /// Script that starts the agent inside the sandbox, under tmux.
 ///
 /// Idempotent: if the session already exists the agent is left alone, so
@@ -543,6 +606,136 @@ mod tests {
         assert!(script.contains("git switch --quiet -c 'sbx/x'"));
     }
 
+    /// A directory of its own per test, removed on drop so a failing assertion
+    /// does not leave one behind.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "sbx-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Run the clone half of the seeder for real, against a `git` that fails
+    /// its first `fails` clones the way a denied connection does.
+    ///
+    /// Under `sh -eu`, like the seeder itself: the retry has to survive a failed
+    /// attempt without `set -e` ending the script, which is the whole reason
+    /// this is run rather than inspected. `sleep` is cut to nothing -- the
+    /// waiting is not what is being tested and four seconds of it in a unit test
+    /// is four seconds nobody gets back.
+    fn run_clone(tag: &str, fails: u32) -> (bool, String, u32) {
+        let dir = TempDir::new(tag);
+        let bin = dir.0.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let counter = dir.0.join("attempts");
+
+        // Every git call succeeds except the first `fails` clones. A clone that
+        // works leaves the `.git` the script tests for.
+        std::fs::write(
+            bin.join("git"),
+            format!(
+                r#"#!/bin/sh
+if [ "$1" != clone ]; then exit 0; fi
+n=$(cat {counter} 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > {counter}
+if [ "$n" -le {fails} ]; then
+  echo "fatal: unable to access: CONNECT tunnel failed, response 403" >&2
+  exit 128
+fi
+for dest; do :; done
+mkdir -p "$dest/.git"
+"#,
+                counter = sh_quote(counter.to_str().unwrap()),
+            ),
+        )
+        .unwrap();
+        std::process::Command::new("chmod")
+            .args(["0755"])
+            .arg(bin.join("git"))
+            .status()
+            .unwrap();
+
+        let s = Session::new("x".into(), "https://github.com/o/r.git".into(), "t".into());
+        let paths = Paths {
+            repo: dir.0.join("repo").to_string_lossy().into_owned(),
+            sbx: dir.0.join("sbx").to_string_lossy().into_owned(),
+        };
+        let script =
+            clone_and_branch(&s, &paths).replace(&format!("sleep {CLONE_RETRY_SECS}"), "sleep 0");
+
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "set -eu\nexport PATH={bin}:$PATH\n{script}",
+                bin = sh_quote(&bin.to_string_lossy()),
+            ))
+            .output()
+            .expect("sh");
+        let attempts = std::fs::read_to_string(&counter)
+            .unwrap_or_default()
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            attempts,
+        )
+    }
+
+    /// The gateway can deny the *first* connection of a brand-new sandbox over a
+    /// race in its ancestor check, and that denial is gone a second later. The
+    /// clone has to survive it: without the retry, a race nobody can see costs
+    /// the whole session.
+    #[test]
+    fn a_denied_first_clone_is_retried() {
+        let (ok, _stderr, attempts) = run_clone("clone-retry", 1);
+        assert!(ok, "the second attempt must be allowed to happen");
+        assert_eq!(attempts, 2, "one denial, one retry");
+    }
+
+    /// Retrying is not the same as never giving up: a repository that genuinely
+    /// cannot be cloned has to fail, with git's own last words, rather than
+    /// spinning.
+    #[test]
+    fn a_clone_that_never_works_gives_up_and_says_why() {
+        let (ok, stderr, attempts) = run_clone("clone-give-up", CLONE_ATTEMPTS + 1);
+        assert!(!ok, "must fail rather than loop");
+        assert_eq!(attempts, CLONE_ATTEMPTS, "bounded: {stderr}");
+        assert!(stderr.contains("CONNECT tunnel failed"), "{stderr}");
+    }
+
+    /// The 403 a denied connection produces reads as an expired token, and the
+    /// only place the actual reason exists is the events feed. Anything else is
+    /// left exactly as the seeder said it.
+    #[test]
+    fn a_denied_seeding_points_at_the_events_feed() {
+        let denied = failure_message(
+            "add-tests",
+            "fatal: unable to access 'https://github.com/o/r.git/': CONNECT tunnel failed, response 403",
+        );
+        assert!(denied.contains("sbxd events add-tests"), "{denied}");
+        assert!(denied.starts_with("seeding failed: fatal:"), "{denied}");
+
+        let ordinary = failure_message("add-tests", "fatal: repository not found");
+        assert_eq!(ordinary, "seeding failed: fatal: repository not found");
+    }
+
     #[test]
     fn seed_script_omits_branch_flag_when_unset() {
         let s = Session::new("x".into(), "url".into(), "t".into());
@@ -597,7 +790,8 @@ mod tests {
             .expect("a clone");
         assert_eq!(
             clone_line.trim(),
-            "gitc clone --quiet -- 'https://dev.azure.com/contoso/proj/_git/repo' '/sandbox/repo'"
+            "if gitc clone --quiet -- 'https://dev.azure.com/contoso/proj/_git/repo' \
+             '/sandbox/repo'; then break; fi"
         );
         assert!(!clone_line.contains('@'), "{clone_line}");
         // And the header is persisted so a later push needs no special casing.
