@@ -19,7 +19,7 @@ import { Forget, NotText } from "../icons";
 import type { Against } from "../gen/Against";
 import type { Comment } from "../gen/Comment";
 import type { FileDiff as Sides } from "../gen/FileDiff";
-import { languageOf, THEME } from "./File";
+import { ensureTheme, languageOf, THEME } from "./File";
 
 export function FileDiffPane({
   server,
@@ -55,6 +55,7 @@ export function FileDiffPane({
     const element = host.current;
     if (!element || !sides || sides.binary) return;
 
+    ensureTheme();
     const created = monaco.editor.createDiffEditor(element, {
       theme: THEME,
       readOnly: true,

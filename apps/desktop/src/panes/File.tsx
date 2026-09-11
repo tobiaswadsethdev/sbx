@@ -26,6 +26,7 @@ import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import { api, messageOf } from "../api";
 import { Empty, Waiting } from "../Empty";
 import { NotText } from "../icons";
+import { palette } from "../palette";
 import type { FileText } from "../gen/FileText";
 
 (self as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
@@ -34,12 +35,31 @@ import type { FileText } from "../gen/FileText";
 
 /// Matching style.css, so the editor is not a white rectangle in a dark pane.
 export const THEME = "sbx-dark";
-monaco.editor.defineTheme(THEME, {
-  base: "vs-dark",
-  inherit: true,
-  rules: [],
-  colors: { "editor.background": "#0e0e12", "editorGutter.background": "#0e0e12" },
-});
+
+/// Define it, once, against the palette the window is actually using.
+///
+/// Called before creating an editor rather than at module scope, and that is
+/// not a style preference: `main.tsx` imports `App` -- and so this file --
+/// before it imports `style.css`, so at module scope there are no custom
+/// properties to read yet and every colour would come back a fallback. By the
+/// time a pane renders, the stylesheet is in.
+///
+/// `vs-dark` underneath supplies the syntax rules, which are a palette of their
+/// own and not this window's business. What is overridden is only the surface:
+/// the editor and its gutter, which are the two that sit against the pane and
+/// so the two that showed the seam.
+let defined = false;
+export function ensureTheme(): void {
+  if (defined) return;
+  const { surface } = palette({ surface: ["--sunken", "#0a0a0a"] });
+  monaco.editor.defineTheme(THEME, {
+    base: "vs-dark",
+    inherit: true,
+    rules: [],
+    colors: { "editor.background": surface, "editorGutter.background": surface },
+  });
+  defined = true;
+}
 
 export function FilePane({
   server,
@@ -71,6 +91,7 @@ export function FilePane({
     const element = host.current;
     if (!element || !file || file.binary) return;
 
+    ensureTheme();
     const editor = monaco.editor.create(element, {
       value: file.text,
       language: languageOf(path),
