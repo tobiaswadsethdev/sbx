@@ -230,6 +230,21 @@ pub fn reconcile(
                 Phase::Error => session.state = State::Failed,
                 Phase::Stopped => session.state = State::Idle,
                 Phase::Ready if session.state == State::Dead => session.state = State::Ready,
+                // A sandbox that is not running yet, under a record that claims
+                // it is. Only reachable for a session whose create finished
+                // long ago -- a create of its own waits for `Ready` before it
+                // seeds -- which leaves a gateway restart, or a sandbox the
+                // gateway is bringing back. Left as `Ready` it is a row the user
+                // can click, and every exec behind it fails with the gateway's
+                // own `is not ready (phase: Provisioning)`. `Creating` is what
+                // it actually is, and the states in flight are left alone for
+                // the reason `in_flight_states_are_left_alone` gives: a create
+                // in another process owns them.
+                Phase::Provisioning | Phase::Starting
+                    if matches!(session.state, State::Ready | State::Idle | State::Dead) =>
+                {
+                    session.state = State::Creating;
+                }
                 _ => {}
             },
         }
@@ -470,6 +485,17 @@ mod tests {
         let live = [sandbox("sbx-a", Phase::Provisioning, Some("a"))];
         let r = reconcile(vec![session("a", State::Seeding)], &live);
         assert_eq!(r.sessions[0].state, State::Seeding);
+    }
+
+    /// Regression: a record saying `ready` over a sandbox the gateway has not
+    /// finished bringing up is a row the user can click, and every exec behind
+    /// it -- the agent terminal above all -- fails with the gateway's own
+    /// `is not ready (phase: Provisioning)`.
+    #[test]
+    fn a_provisioning_sandbox_is_not_reported_ready() {
+        let live = [sandbox("sbx-a", Phase::Provisioning, Some("a"))];
+        let r = reconcile(vec![session("a", State::Ready)], &live);
+        assert_eq!(r.sessions[0].state, State::Creating);
     }
 
     #[test]

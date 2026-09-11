@@ -6,8 +6,11 @@
 //! trait so that the second kind could exist without the first growing an `if`.
 //! The comments that explain *why* each step is ordered as it is came with it.
 
+use std::time::{Duration, Instant};
+
 use openshell_client::{
-    CreateOpts, Error as OsError, ExecOutput, OpenShell, PolicyRevision, PolicyUpdate, Provider,
+    CreateOpts, Error as OsError, ExecOutput, OpenShell, Phase, PolicyRevision, PolicyUpdate,
+    Provider, Sandbox,
 };
 
 use super::{Backend, Error, Isolation, Paths, Result, Torn};
@@ -140,7 +143,83 @@ impl Sandboxed {
             }
         }
     }
+
+    /// Block until a freshly made sandbox will accept an exec.
+    ///
+    /// `sandbox create` returns once the gateway has *accepted* the sandbox, not
+    /// once it can run anything: it comes back in `Provisioning`, and the
+    /// phases after that are the gateway pulling the image and starting the
+    /// supervisor. Policy updates are served throughout -- `configure` runs
+    /// against a provisioning sandbox quite happily -- so nothing between here
+    /// and the seeder notices, and the first thing that actually needs the
+    /// sandbox to be *running* is the seeder's exec. The gateway refuses it, and
+    /// how far provisioning has got decides which refusal: `sandbox not found`
+    /// early on, `sandbox 'sbx-x' is not ready (phase: Provisioning)` later.
+    /// Both surfaced as `seeding failed`, which reads as a broken repository or
+    /// a lost sandbox rather than as "ask again in a second".
+    ///
+    /// Invisible on a small sandbox -- a base image with no providers is `Ready`
+    /// about a second after create returns, which is why this went unnoticed --
+    /// and it is the ordinary session that loses: providers to attach and a
+    /// policy file to compile are what make provisioning long enough to matter.
+    ///
+    /// Here rather than in the seeder because every path into a sandbox has the
+    /// same requirement: [`crate::ops::attach`] hands the desktop app an
+    /// `exec --tty` with no gate of its own, and the terminal showed the
+    /// gateway's refusal verbatim. A create that does not return until the
+    /// sandbox can be exec'd is what makes every later exec safe, so the gate
+    /// belongs at the one place a sandbox comes into existence.
+    ///
+    /// A phase this build does not know is treated as ready. The alternative is
+    /// refusing to create a session because the gateway added a phase, and the
+    /// exec that follows is itself the check: if it really was not ready, the
+    /// error says so.
+    fn await_ready(&self, made: &Sandbox) -> Result<()> {
+        let mut phase = made.phase.clone();
+        let started = Instant::now();
+        loop {
+            match phase {
+                Phase::Ready | Phase::Unknown | Phase::Other(_) => return Ok(()),
+                // Terminal, and waiting out the timeout would only delay saying
+                // so. `Stopped` included: a sandbox whose compute was released
+                // before it was ever seeded is not one this will talk itself
+                // into.
+                Phase::Error | Phase::Stopping | Phase::Stopped | Phase::Deleting => {
+                    return Err(Error::Local(format!(
+                        "the sandbox `{}` reached `{phase}` instead of `Ready`",
+                        made.name
+                    )));
+                }
+                Phase::Provisioning | Phase::Starting => {}
+            }
+            if started.elapsed() >= READY_LIMIT {
+                return Err(Error::Local(format!(
+                    "the sandbox `{}` was still `{phase}` after {}s",
+                    made.name,
+                    READY_LIMIT.as_secs()
+                )));
+            }
+            std::thread::sleep(READY_EVERY);
+            // An unreadable phase is not an answer: the gateway is reachable --
+            // it just made this sandbox -- so a failed `get` is worth another
+            // ask rather than a failed create.
+            phase = match self.client.get(&made.name) {
+                Ok(sb) => sb.phase,
+                Err(_) => phase,
+            };
+        }
+    }
 }
+
+/// How long to wait for a new sandbox to become exec-able.
+///
+/// Generous because the slow case is a cold image, and running out of patience
+/// here throws away a sandbox that was about to work. Short enough that a
+/// sandbox which is never going to start is reported rather than hung on.
+const READY_LIMIT: Duration = Duration::from_secs(5 * 60);
+/// How often to ask. One `sandbox get` each, against a phase that changes a
+/// handful of times over the whole wait.
+const READY_EVERY: Duration = Duration::from_millis(500);
 
 impl Backend for Sandboxed {
     fn isolation(&self) -> Isolation {
@@ -203,7 +282,8 @@ impl Backend for Sandboxed {
             command: vec!["true".into()],
             ..Default::default()
         };
-        self.client.create(&opts)?;
+        let made = self.client.create(&opts)?;
+        self.await_ready(&made)?;
         Ok(())
     }
 
@@ -272,5 +352,120 @@ impl Backend for Sandboxed {
 
     fn providers(&self) -> Result<Vec<Provider>> {
         Ok(self.client.providers()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    use openshell_client::{GatewayStatus, Result as OsResult};
+
+    use super::*;
+
+    /// A gateway that answers `get` with a scripted run of phases, so a create
+    /// can be watched through provisioning without one.
+    struct Phases {
+        rest: RefCell<Vec<Phase>>,
+    }
+
+    impl Phases {
+        fn new(rest: Vec<Phase>) -> Self {
+            Phases {
+                rest: RefCell::new(rest),
+            }
+        }
+    }
+
+    fn sandbox(phase: Phase) -> Sandbox {
+        Sandbox {
+            id: "id".into(),
+            name: "sbx-a".into(),
+            phase,
+            created_at: String::new(),
+            labels: BTreeMap::new(),
+            workspace: "default".into(),
+        }
+    }
+
+    impl OpenShell for Phases {
+        fn get(&self, _: &str) -> OsResult<Sandbox> {
+            let mut rest = self.rest.borrow_mut();
+            if rest.is_empty() {
+                return Ok(sandbox(Phase::Ready));
+            }
+            Ok(sandbox(rest.remove(0)))
+        }
+        fn status(&self) -> OsResult<GatewayStatus> {
+            unreachable!()
+        }
+        fn create(&self, _: &CreateOpts) -> OsResult<Sandbox> {
+            unreachable!()
+        }
+        fn list(&self, _: Option<&str>) -> OsResult<Vec<Sandbox>> {
+            unreachable!()
+        }
+        fn exec(&self, _: &str, _: &[&str]) -> OsResult<ExecOutput> {
+            unreachable!()
+        }
+        fn delete(&self, _: &str) -> OsResult<()> {
+            unreachable!()
+        }
+        fn policy(&self, _: &str) -> OsResult<PolicyRevision> {
+            unreachable!()
+        }
+        fn policy_update(&self, _: &str, _: &PolicyUpdate) -> OsResult<()> {
+            unreachable!()
+        }
+        fn logs(&self, _: &str, _: usize) -> OsResult<String> {
+            unreachable!()
+        }
+        fn providers(&self) -> OsResult<Vec<Provider>> {
+            unreachable!()
+        }
+        fn interactive_argv(&self, _: &str, _: &[&str]) -> Vec<String> {
+            unreachable!()
+        }
+    }
+
+    fn waiting_on(rest: Vec<Phase>) -> Sandboxed {
+        Sandboxed::new(Box::new(Phases::new(rest)))
+    }
+
+    /// The whole point: `create` answers in `Provisioning`, and the wait is what
+    /// stands between that and the seeder's exec.
+    #[test]
+    fn a_provisioning_sandbox_is_waited_out() {
+        let b = waiting_on(vec![Phase::Provisioning, Phase::Starting, Phase::Ready]);
+        assert!(b.await_ready(&sandbox(Phase::Provisioning)).is_ok());
+    }
+
+    /// Already there, so nothing is asked of the gateway at all.
+    #[test]
+    fn a_ready_sandbox_is_not_waited_on() {
+        let b = waiting_on(vec![]);
+        assert!(b.await_ready(&sandbox(Phase::Ready)).is_ok());
+    }
+
+    /// A sandbox that will never run says so now rather than in five minutes.
+    #[test]
+    fn a_sandbox_that_fails_to_start_does_not_wait_out_the_limit() {
+        let b = waiting_on(vec![]);
+        let e = b
+            .await_ready(&sandbox(Phase::Error))
+            .expect_err("`Error` is terminal");
+        assert!(e.to_string().contains("instead of `Ready`"), "{e}");
+    }
+
+    /// A phase this build has never heard of must not fail a create: the exec
+    /// that follows is the real check.
+    #[test]
+    fn an_unknown_phase_is_taken_as_ready() {
+        let b = waiting_on(vec![]);
+        assert!(
+            b.await_ready(&sandbox(Phase::Other("Rehydrating".into())))
+                .is_ok()
+        );
     }
 }

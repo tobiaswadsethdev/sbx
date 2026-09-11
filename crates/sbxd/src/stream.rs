@@ -362,6 +362,15 @@ async fn terminal(
     let _ = out.send(ServerFrame::Closed { id, reason }).await;
 }
 
+/// How long a terminal waits for its sandbox before giving up on it.
+///
+/// Shorter than the create's own wait: by the time a tab is opened the sandbox
+/// is normally long since up, so a wait this side means something is wrong
+/// rather than something is slow, and an empty pane that says nothing for five
+/// minutes is worse than one that admits it.
+const ATTACH_WAIT_LIMIT: Duration = Duration::from_secs(60);
+const ATTACH_WAIT_EVERY: Duration = Duration::from_millis(500);
+
 /// The blocking half: a pty, a child in it, and the two directions of traffic.
 ///
 /// Its own thread rather than `spawn_blocking`, because it outlives a single
@@ -379,9 +388,36 @@ fn pty_worker(
     // a worktree on this machine. Either way it is spawned under the pty below
     // exactly as a terminal emulator would.
     let backends = crate::rpc::backends();
-    let Ok(argv) = ops::attach_argv(backends.for_session(&session), &session, &tmux) else {
+    let backend = backends.for_session(&session);
+    let Ok(argv) = ops::attach_argv(backend, &session, &tmux) else {
         return;
     };
+
+    // A sandbox that is not running yet refuses the exec, and the refusal goes
+    // to the pty -- so the gateway's own `sandbox 'sbx-x' is not ready (phase:
+    // Provisioning)` was drawn into the pane as though the agent had said it,
+    // and then the terminal closed. `ops::create` no longer leaves a session in
+    // that state, but a gateway restart still can, and a tab is opened by
+    // clicking rather than by creating.
+    //
+    // One `true` is the whole test: it is the same exec the attach is about to
+    // do, so nothing can be ready for this and not for that. A sandbox that is
+    // up answers in one round trip, which is what this costs in the normal case.
+    let ready = || matches!(backend.exec(&session, &["true"]), Ok(out) if out.ok());
+    let mut waited = Duration::ZERO;
+    while !ready() {
+        if waited.is_zero() {
+            let _ = out.blocking_send(b"waiting for the sandbox...\r\n".to_vec());
+        }
+        if waited >= ATTACH_WAIT_LIMIT {
+            let _ = out.blocking_send(
+                b"the sandbox has not come up; close this tab and open it again\r\n".to_vec(),
+            );
+            return;
+        }
+        std::thread::sleep(ATTACH_WAIT_EVERY);
+        waited += ATTACH_WAIT_EVERY;
+    }
 
     // A size to start with. The client sends its own as soon as it has one, and
     // until then this is what tmux draws for -- so it is the session's own

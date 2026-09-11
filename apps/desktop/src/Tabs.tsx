@@ -9,6 +9,8 @@
 // extra shells beside the agent are the one after. Both are held here rather
 // than added later so the tab bar is not rebuilt around them twice.
 
+import { useState } from "react";
+
 import { FilePane } from "./panes/File";
 import { FileDiffPane } from "./panes/FileDiff";
 import type { Against } from "./gen/Against";
@@ -57,6 +59,7 @@ export function Tabs({
   onNewShell,
   onCloseShell,
   onCloseFile,
+  onReorder,
 }: {
   server: string;
   name: string;
@@ -69,7 +72,23 @@ export function Tabs({
   /// not a thing that can be.
   onCloseShell: (tmux: string) => void;
   onCloseFile: (path: string) => void;
+  /// Put `moved` where `onto` currently is. The order lives with the caller
+  /// because the tab list is derived -- see `tabsFor` -- so this says what the
+  /// user did and lets the caller decide what that means for a list it rebuilds
+  /// from the sandbox on every poll.
+  onReorder: (moved: string, onto: string) => void;
 }) {
+  /// The tab being dragged, and the one it is currently over. Local because
+  /// nothing outside the bar can see a drag in progress: it ends in an
+  /// `onReorder` or in nothing at all.
+  const [dragging, setDragging] = useState<string | null>(null);
+  const [over, setOver] = useState<string | null>(null);
+
+  const endDrag = () => {
+    setDragging(null);
+    setOver(null);
+  };
+
   return (
     <section className="editor">
       <nav className="tabs">
@@ -77,9 +96,56 @@ export function Tabs({
           const key = keyOf(tab);
           const shell = tab.kind === "terminal" && tab.tmux !== null ? tab.tmux : null;
           const file = tab.kind === "file" || tab.kind === "filediff" ? keyOf(tab) : null;
+          /// Middle click closes exactly what the cross closes, and nothing
+          /// else: the agent's terminal has no cross because it is not yours to
+          /// close, and a middle click that killed it would be the same mistake
+          /// made faster.
+          const close = shell ? () => onCloseShell(shell) : file ? () => onCloseFile(file) : null;
           return (
-            <span key={key} className={`tab${key === active ? " on" : ""}`}>
-              <button onClick={() => onActivate(key)} title={file ?? undefined}>
+            <span
+              key={key}
+              className={`tab${key === active ? " on" : ""}${dragging === key ? " dragging" : ""}${
+                over === key && dragging !== key ? " over" : ""
+              }`}
+              draggable
+              onDragStart={(e) => {
+                setDragging(key);
+                // Move rather than copy, so the cursor says what will happen,
+                // and some text on the clipboard because Firefox will not start
+                // a drag without it.
+                e.dataTransfer.effectAllowed = "move";
+                e.dataTransfer.setData("text/plain", key);
+              }}
+              onDragOver={(e) => {
+                // Both needed: without the default prevented the drop never
+                // fires, and this is also the only event that reports where the
+                // pointer now is.
+                e.preventDefault();
+                e.dataTransfer.dropEffect = "move";
+                setOver(key);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragging && dragging !== key) onReorder(dragging, key);
+                endDrag();
+              }}
+              // Fires whether the drag ended in a drop or was abandoned, which
+              // is what makes it the one place the highlight has to come off.
+              onDragEnd={endDrag}
+              onAuxClick={(e) => {
+                if (e.button !== 1 || !close) return;
+                // Middle click pastes the selection on X11 and autoscrolls on
+                // Windows; neither is wanted on a tab.
+                e.preventDefault();
+                close();
+              }}
+            >
+              {/* Draggable as well as the pill around it: a button does not
+                  always start a drag of its draggable ancestor -- WebKit is the
+                  one that matters here -- and the label is most of the tab, so
+                  it is where a drag will actually be started from. The event
+                  bubbles to the handler above either way. */}
+              <button draggable onClick={() => onActivate(key)} title={file ?? undefined}>
                 {labelOf(tab)}
               </button>
               {shell && (
