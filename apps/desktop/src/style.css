@@ -1178,6 +1178,16 @@ main { display: flex; flex: 1; min-height: 0; }
      genuinely above everything else. */
   box-shadow: 0 16px 48px rgb(0 0 0 / 0.55);
 }
+/* A question, which is a narrower thing than a form. */
+.dialog.narrow { width: 420px; }
+.confirm-body { margin: 0; font-size: 12px; color: var(--text); line-height: 1.5; }
+.confirm-body code { font-size: 12px; }
+.confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+/* The button that does the irreversible thing wears the colour of what it
+   does, rather than the primary colour of a button you are meant to press. */
+.go.danger { background: var(--bad); color: var(--surface); }
+.go.danger:hover:not(:disabled) { background: var(--bad); filter: brightness(1.15); }
+
 .dialog-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .dialog-head h2 { font-size: 14px; font-weight: 600; margin: 0; flex: 1; }
 .dialog .quiet {
@@ -1293,6 +1303,22 @@ main { display: flex; flex: 1; min-height: 0; }
 .mcp-state.crashing, .mcp-state.detached { color: var(--bad); font-weight: 600; }
 .mcp-state.stopped, .mcp-state.absent { color: var(--warn); }
 .mcp-state.unknown, .mcp-state.external { color: var(--dimmer); }
+
+/* A tracker's kind, in the same column the MCP state occupies: it is the one
+   word that says how the rest of the row is addressed. */
+.integration .tracker-kind {
+  font-size: 11px;
+  min-width: 84px;
+  font-family: var(--font-mono);
+  color: var(--dim);
+}
+/* The add form is a row of many small fields rather than a stacked form: it is
+   the same shape as the secret above it, and a tracker is four short answers.
+   The hint under it takes the whole width so the wrap is deliberate. */
+.integration .row.tracker.new { align-items: flex-start; }
+.integration .row.tracker.new input { width: 150px; }
+.integration .row.tracker.new .hint { flex-basis: 100%; white-space: normal; overflow: visible; }
+.integration .row.tracker.new select { width: auto; }
 
 .integration .problem { flex-basis: 100%; margin: 3px 0 0; color: var(--bad); max-width: 72ch; }
 .integration .log {

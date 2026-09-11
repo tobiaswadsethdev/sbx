@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { api, messageOf, type GitAnswer } from "./api";
+import { useConfirm } from "./Confirm";
 import type { Against } from "./gen/Against";
 import type { Change } from "./gen/Change";
 import type { ChangedFile } from "./gen/ChangedFile";
@@ -40,6 +41,9 @@ export function GitView({
   const [answer, setAnswer] = useState<GitAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /// Discarding a file is the one thing in this pane that destroys work, so it
+  /// is asked for in a dialog of the window's own rather than the webview's.
+  const { ask, dialog: confirmation } = useConfirm();
   const [message, setMessage] = useState("");
 
   const load = useCallback(() => {
@@ -51,8 +55,7 @@ export function GitView({
 
   useEffect(load, [load]);
 
-  const act = async (action: Parameters<typeof api.git>[2], confirmWith?: string) => {
-    if (confirmWith && !window.confirm(confirmWith)) return;
+  const act = async (action: Parameters<typeof api.git>[2]) => {
     setBusy(true);
     setError(null);
     try {
@@ -73,6 +76,7 @@ export function GitView({
 
   return (
     <div className="git">
+      {confirmation}
       <header>
         <span className="branch">{status.branch}</span>
         {status.upstream ? (
@@ -120,10 +124,17 @@ export function GitView({
         onOpen={(p) => onOpenDiff(p, "worktree")}
         action={{ icon: <Plus aria-label="stage" />, title: "stage", run: (path) => void act({ do: "stage", path }) }}
         discard={(path) =>
-          void act(
-            { do: "discard", path },
-            `Throw away your changes to ${path}? The agent may be part-way through writing it.`,
-          )
+          ask({
+            title: "Throw away your changes?",
+            body: (
+              <>
+                <code>{path}</code> goes back to what it was, and the agent may be part-way
+                through writing it.
+              </>
+            ),
+            confirm: "discard",
+            onConfirm: () => void act({ do: "discard", path }),
+          })
         }
       />
 

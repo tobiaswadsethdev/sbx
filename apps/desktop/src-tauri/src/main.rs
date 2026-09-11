@@ -47,7 +47,7 @@ use sbx_core::session::Session;
 use sbx_core::settings::{Settings, SettingsView};
 use sbx_proto::stream::{Channel, ChannelId, ClientFrame, ServerFrame};
 use sbx_core::integrations::View as IntegrationsView;
-use sbx_core::tracker::Inbox;
+use sbx_core::tracker::{Inbox, Source as TrackerSource};
 use sbx_proto::{FailureKind, GitOp, McpOp, Reply, Request};
 use serde::Serialize;
 use tauri::{Emitter as _, Manager as _};
@@ -444,6 +444,28 @@ fn secret(server: String, name: String, value: Option<String>) -> Result<Integra
     expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
 }
 
+/// Add a tracker to the server's config file, so the inbox has something to
+/// read.
+///
+/// The credential is not in here: it is a secret like any other, stored with
+/// `secret` under the name this entry gives, which is why the two are one form
+/// in the window and two requests underneath.
+#[tauri::command(async)]
+fn add_tracker(server: String, tracker: TrackerSource) -> Result<IntegrationsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::AddTracker(Box::new(tracker)))
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
+#[tauri::command(async)]
+fn forget_tracker(server: String, name: String) -> Result<IntegrationsView, Failed> {
+    let reply = remote(&server)?
+        .call(Request::ForgetTracker { name })
+        .map_err(to_message)?;
+    expect_reply!(reply, Reply::Integrations(view) => view, "the integrations view")
+}
+
 /// Push this machine's own skills to the server.
 ///
 /// **The reading and the packing happen on this side of the bridge**, which is
@@ -732,6 +754,8 @@ fn main() {
             integrations,
             mcp,
             secret,
+            add_tracker,
+            forget_tracker,
             upload_skills,
             forget_skill,
             my_skills,

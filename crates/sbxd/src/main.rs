@@ -784,7 +784,7 @@ fn remote_tasks(remote: &remote::Remote) -> Fallible {
 fn cmd_tasks(cfg: &Config) -> Fallible {
     if cfg.trackers().is_empty() {
         return Err(format!(
-            "no trackers configured; add a `[[tracker]]` table to {} (see docs/inbox.md)",
+            "no trackers configured; add a `[[tracker]]` table to {}, or add one from the desktop's integrations screen",
             cfg.path.display()
         )
         .into());
@@ -1122,6 +1122,32 @@ fn cmd_config(cfg: &Config, init: bool, path_only: bool) -> Fallible {
                         Some(m) => format!("{} -> {} (managed)", e.name(), m.image),
                         None => format!("{} -> {}", e.name(), e.server.url),
                     }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        },
+    );
+    // The kind and where it points, because "jira" alone does not say which
+    // site an empty inbox failed to read.
+    row(
+        "trackers",
+        !cfg.trackers().is_empty(),
+        if cfg.trackers().is_empty() {
+            "(none; the inbox has nothing to read)".into()
+        } else {
+            cfg.trackers()
+                .iter()
+                .map(|t| {
+                    let where_ = t
+                        .site
+                        .clone()
+                        .or_else(|| match (&t.org, &t.project) {
+                            (Some(org), Some(project)) => Some(format!("{org}/{project}")),
+                            _ => None,
+                        })
+                        .or_else(|| t.repo.clone())
+                        .unwrap_or_else(|| "assigned to you".into());
+                    format!("{} ({}) -> {where_}", t.name, t.kind.label())
                 })
                 .collect::<Vec<_>>()
                 .join(", ")

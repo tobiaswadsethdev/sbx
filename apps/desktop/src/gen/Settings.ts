@@ -5,11 +5,17 @@
  *
  * A subset of the file, and the subset is "what a new session starts with"
  * plus the one switch about the server itself. `repo_roots`, `worktree_root`,
- * `skills`, `[[mcp]]` and `[[tracker]]` are deliberately not here: each is a
- * decision about what an agent of yours can reach or where its files land,
- * several of them are lists of tables, and a text field in a window is the
- * wrong shape for any of it. The integrations screen already says as much
- * about the MCP tables.
+ * `skills` and `[[mcp]]` are deliberately not here: each is a decision about
+ * what an agent of yours can reach or where its files land, and a text field
+ * in a window is the wrong shape for any of it.
+ *
+ * `[[tracker]]` used to be on that list and is not any more. The argument was
+ * that a list of tables is the wrong shape for a settings screen, which is
+ * true and is why it is not one: [`add_tracker`] and [`forget_tracker`] add
+ * and remove whole tables from the integrations screen, beside the secret each
+ * one needs. Without them the inbox is a pane that can only ever be empty for
+ * anyone who does not edit the server's config file by hand -- which, from a
+ * desktop on another machine, is nobody.
  *
  * Every field is an `Option`, and `None` means **the key is not in the file**
  * rather than "empty". That difference is the whole reason for the type: an

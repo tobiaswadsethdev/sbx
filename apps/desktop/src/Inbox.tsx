@@ -83,7 +83,7 @@ export function InboxDialog({
           <p className="hint">
             {view.warnings.length > 0
               ? "Nothing readable."
-              : "Nothing assigned to you, or no trackers configured — see docs/inbox.md."}
+              : "Nothing assigned to you — or no trackers yet, which is what the integrations screen adds."}
           </p>
         )}
 

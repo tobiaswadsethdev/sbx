@@ -36,7 +36,7 @@ use sbx_core::repos::Listing;
 use sbx_core::session::Session;
 use sbx_core::settings::{Settings, SettingsView};
 use sbx_core::skills::Upload as SkillUpload;
-use sbx_core::tracker::Inbox;
+use sbx_core::tracker::{Inbox, Source as TrackerSource};
 
 /// The protocol this build speaks.
 ///
@@ -243,6 +243,20 @@ pub enum Request {
     /// Drop one uploaded skill. The client's own copy is untouched -- the
     /// library is a cache of a directory on another machine.
     ForgetSkill { name: String },
+    /// Add a `[[tracker]]` table to the server's config file, so the inbox has
+    /// something to read.
+    ///
+    /// Beside the MCP servers and the secrets rather than in the settings
+    /// screen, because a tracker is the same kind of thing they are: an outside
+    /// service the server talks to with a credential it holds. Answers with
+    /// [`Reply::Integrations`], re-read.
+    ///
+    /// Boxed for the reason [`Request::Create`] is: ten fields of `String`
+    /// against a `Poll` that goes out every second.
+    AddTracker(Box<TrackerSource>),
+    /// Take one out by name. The secret it named is left in the store, because
+    /// nothing here can tell whether something else uses it.
+    ForgetTracker { name: String },
 
     /// The task inbox: what the configured trackers say is assigned to you.
     ///
@@ -300,6 +314,8 @@ impl Request {
             | Request::Secret { .. }
             | Request::UploadSkills { .. }
             | Request::ForgetSkill { .. }
+            | Request::AddTracker(_)
+            | Request::ForgetTracker { .. }
             | Request::Tasks
             | Request::Settings
             | Request::SetSettings(_) => None,
@@ -638,6 +654,18 @@ mod tests {
             }],
             skills: Vec::new(),
             configured_skills: Vec::new(),
+            // A tracker is the other thing that names a secret, and it carries
+            // the name for the same reason: what is in the file is a name, and
+            // the value lives in the store this reply cannot read.
+            trackers: vec![sbx_core::integrations::Tracker {
+                source: sbx_core::tracker::Source {
+                    kind: sbx_core::tracker::Kind::GitHub,
+                    name: "github".into(),
+                    secret: "SENTRY_TOKEN".into(),
+                    ..Default::default()
+                },
+                secret_set: true,
+            }],
         };
         let json = serde_json::to_string(&Reply::Integrations(view)).unwrap();
         assert!(json.contains("SENTRY_TOKEN"), "{json}");

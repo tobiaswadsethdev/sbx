@@ -11,6 +11,7 @@ import type { Comment } from "./gen/Comment";
 import type { FailureKind } from "./gen/FailureKind";
 import type { Inbox } from "./gen/Inbox";
 import type { Integrations } from "./gen/Integrations";
+import type { Tracker } from "./gen/Tracker";
 import type { McpOp } from "./gen/McpOp";
 import type { Dir } from "./gen/Dir";
 import type { Event } from "./gen/Event";
@@ -125,6 +126,13 @@ export const api = {
   forgetSkill: (server: string, name: string) =>
     invoke<Integrations>("forget_skill", { server, name }),
   mySkills: () => invoke<string[]>("my_skills"),
+  // A tracker is a `[[tracker]]` table in the server's config file. Adding one
+  // is what makes the inbox able to show anything at all; its credential is an
+  // ordinary secret, stored with `secret` under the name the entry gives.
+  addTracker: (server: string, tracker: Tracker) =>
+    invoke<Integrations>("add_tracker", { server, tracker }),
+  forgetTracker: (server: string, name: string) =>
+    invoke<Integrations>("forget_tracker", { server, name }),
 
   // The task inbox, read on the server with the credentials in its store: this
   // window shows a list and never holds a token.

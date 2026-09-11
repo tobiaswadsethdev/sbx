@@ -177,6 +177,22 @@ pub fn dispatch(backends: &Backends, request: Request) -> Outcome {
             Ok(()) => integrations(),
             Err(e) => Failure::failed(e).into(),
         },
+        // The config file is edited rather than regenerated, and the result is
+        // parsed before it is written: a tracker that would not load is refused
+        // in the parser's words and the file is left alone. See
+        // `sbx_core::settings`.
+        Request::AddTracker(source) => {
+            match sbx_core::settings::add_tracker(&config::Config::default_path(), &source) {
+                Ok(_) => integrations(),
+                Err(e) => Failure::failed(e.to_string()).into(),
+            }
+        }
+        Request::ForgetTracker { name } => {
+            match sbx_core::settings::forget_tracker(&config::Config::default_path(), &name) {
+                Ok(_) => integrations(),
+                Err(e) => Failure::failed(e.to_string()).into(),
+            }
+        }
 
         // The inbox. A tracker that could not be read is a warning inside the
         // reply rather than a failed request: one tracker being down should not

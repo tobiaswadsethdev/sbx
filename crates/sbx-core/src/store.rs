@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use openshell_client::{Phase, Sandbox};
 
-use crate::session::{LABEL_SESSION, Session, State};
+use crate::session::{self, LABEL_SESSION, Session, State};
 
 #[derive(Debug, Default)]
 pub struct Store {
@@ -164,6 +164,17 @@ pub struct Reconciliation {
     pub dead: Vec<String>,
 }
 
+/// How long a record may sit in `creating` with no sandbox behind it.
+///
+/// [`crate::ops::create`] writes the record before it asks the gateway for
+/// anything, so that a session appears in every client's list the moment it is
+/// asked for rather than however many seconds the gateway takes to answer. That
+/// makes "cached but not live" the normal shape of a young create rather than a
+/// dead session, and this is how long "young" lasts. Generous: creating a
+/// sandbox is a gateway round trip and, the first time an image variant is
+/// used, a docker build behind it.
+const CREATING_GRACE: u64 = 15 * 60;
+
 /// Correct cached state against what the gateway reports.
 ///
 /// Pure so it can be tested without a gateway. State is only changed where the
@@ -172,11 +183,19 @@ pub struct Reconciliation {
 /// alone, because a create may still be in flight.
 pub fn reconcile(cached: Vec<Session>, live: &[Sandbox]) -> Reconciliation {
     let by_name: BTreeMap<&str, &Sandbox> = live.iter().map(|s| (s.name.as_str(), s)).collect();
+    let now = session::now_epoch();
 
     let mut out = Reconciliation::default();
 
     for mut session in cached {
         match by_name.get(session.sandbox.as_str()) {
+            // A record written by a create that has not asked the gateway for
+            // anything yet. Absence is what `creating` *means* here, so it is
+            // not evidence of anything -- but only for as long as a create
+            // plausibly takes, or a create whose process died in that window
+            // would leave a session nothing could ever reconcile.
+            None if session.state == State::Creating
+                && now.saturating_sub(session.created_at) < CREATING_GRACE => {}
             None => {
                 if session.state != State::Dead {
                     out.dead.push(session.name.clone());
@@ -348,6 +367,26 @@ mod tests {
     #[test]
     fn missing_sandbox_marks_session_dead() {
         let r = reconcile(vec![session("a", State::Ready)], &[]);
+        assert_eq!(r.sessions[0].state, State::Dead);
+        assert_eq!(r.dead, vec!["a"]);
+    }
+
+    /// A create writes its record before the gateway has been asked for a
+    /// sandbox, so that the session shows up the instant it is asked for. For
+    /// that window "no sandbox" is what `creating` means, not a death -- and a
+    /// refresh runs every second, so getting this wrong would kill every new
+    /// session before it was made.
+    #[test]
+    fn a_create_that_has_not_reached_the_gateway_yet_is_not_dead() {
+        let r = reconcile(vec![session("a", State::Creating)], &[]);
+        assert_eq!(r.sessions[0].state, State::Creating);
+        assert!(r.dead.is_empty(), "{:?}", r.dead);
+
+        // Not forever: a create whose process died before it placed anything
+        // would otherwise leave a record nothing can ever reconcile.
+        let mut old = session("a", State::Creating);
+        old.created_at = session::now_epoch() - CREATING_GRACE - 1;
+        let r = reconcile(vec![old], &[]);
         assert_eq!(r.sessions[0].state, State::Dead);
         assert_eq!(r.dead, vec!["a"]);
     }

@@ -305,10 +305,11 @@ like having nothing assigned. [inbox.md](inbox.md) is the whole of it.
 ## Integrations
 
 **integrations** in the header is what the server holds on your sessions'
-behalf: the MCP servers and what each one is doing, the secret names it has, and
-the skills this machine has pushed to it. Three things that used to be three
-procedures in a document -- a `docker run` line to copy, a `-e` argument in a
-shell history, a path in a config file that cannot reach your laptop.
+behalf: the MCP servers and what each one is doing, the secret names it has, the
+trackers the inbox reads, and the skills this machine has pushed to it. Four
+things that used to be four procedures in a document -- a `docker run` line to
+copy, a `-e` argument in a shell history, a `[[tracker]]` table in a file on
+another machine, a path in a config file that cannot reach your laptop.
 
 Every button there answers with the whole view, re-read, for the reason the git
 view does the same: they explain each other, and a container that will not start
@@ -323,6 +324,16 @@ carries names and whether each is set, and nothing in it returns a value. The
 warning about what an MCP server costs you is beside the list rather than only
 in [mcp.md](mcp.md), which is a document nobody re-reads at the moment it
 matters.
+
+A tracker is added here too, which is the only reason the inbox can ever have
+anything in it for someone who does not edit the server's config file by hand:
+the kind, where it points, the name of the secret and the token itself, in one
+row. The token is stored under that name first and the `[[tracker]]` table is
+written second, so the entry is never in the file for a moment with nothing
+behind the name it gives. Removing one takes the table out and leaves the secret
+alone -- nothing here can tell what else might use it. A row whose secret is not
+set says so, because that is a configuration that looks complete and fetches
+nothing. [inbox.md](inbox.md) has the fields each kind needs.
 
 The skills section pushes this machine's own `~/.claude/skills` to the server,
 which also happens before every create -- so editing a skill here still means
