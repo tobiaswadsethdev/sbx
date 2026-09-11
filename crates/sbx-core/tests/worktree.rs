@@ -228,9 +228,11 @@ fn a_worktree_deleted_from_under_a_session_is_dead() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// A session whose record the cache has lost cannot be located, because unlike
-/// a sandbox name a worktree's directory is not a function of the session's
-/// name. Saying so beats deleting a directory that was guessed at.
+/// A session whose record the cache has lost is looked for where the naming
+/// convention would have put it -- `<root>/<name>` -- and there is nothing there
+/// to remove for a name that was never used. That is the whole answer: a
+/// worktree created under a *different* configured root is the one case the
+/// convention cannot find, and a record is the only thing that ever knew.
 #[test]
 fn removing_a_session_with_no_record_takes_only_the_record() {
     let root = temp("norecord");

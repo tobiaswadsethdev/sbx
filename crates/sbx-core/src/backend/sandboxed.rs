@@ -15,6 +15,7 @@ use crate::endpoints;
 use crate::mcp;
 use crate::ops::Draft;
 use crate::policy;
+use crate::removed;
 use crate::seed;
 use crate::session::{self, SELECTOR_MANAGED, Session};
 use crate::store;
@@ -249,7 +250,7 @@ impl Backend for Sandboxed {
 
     fn live(&self, cached: Vec<Session>) -> Result<store::Reconciliation> {
         let live = self.client.list(Some(SELECTOR_MANAGED))?;
-        Ok(store::reconcile(cached, &live))
+        Ok(store::reconcile(cached, &live, &removed::names()))
     }
 
     fn read_meta(&self, name: &str) -> Result<Session> {

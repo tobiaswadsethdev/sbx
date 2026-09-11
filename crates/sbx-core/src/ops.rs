@@ -9,16 +9,19 @@
 //! three questions -- where does an exec go, where are the files, is there any
 //! isolation to report.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use openshell_client::{PolicyRevision, PolicyUpdate};
 
-use crate::backend::{Backend, Backends, Isolation, Torn};
+use crate::backend::{self, Backend, Backends, Isolation, Torn};
+use crate::comments;
 use crate::events;
 use crate::forge;
 use crate::mcp;
 use crate::policy;
 use crate::publish;
+use crate::removed;
 use crate::seed;
 use crate::session::{self, Session, State};
 use crate::skills;
@@ -117,10 +120,25 @@ pub fn refresh_with(
     if failures.len() == backends.each().len() {
         return Err(failures.join("; ").into());
     }
+    let all_answered = failures.is_empty();
     out.warnings.extend(failures);
 
     for (_, rec) in &recs {
         out.dead.extend(rec.dead.clone());
+    }
+
+    // Tombstones outlive the removal that wrote them only for as long as the
+    // thing they name does. When every backend answered, anything tombstoned and
+    // reported by none of them has finally gone and the tombstone can go with
+    // it. Skipped entirely when one could not be asked: a gateway that did not
+    // answer reports nothing lingering, and pruning on that would forget exactly
+    // the tombstones still doing their job.
+    if all_answered {
+        let lingering: BTreeSet<String> = recs
+            .iter()
+            .flat_map(|(_, rec)| rec.lingering.iter().cloned())
+            .collect();
+        removed::keep_only(&lingering);
     }
     let merged: Vec<Session> = recs
         .iter()
@@ -718,6 +736,13 @@ pub fn create(
     {
         return Err(format!("session `{}` already exists", draft.name));
     }
+
+    // Someone claiming the name again, which is what a tombstone is waiting to
+    // hear. Dropped here rather than left to expire: from this point the name
+    // belongs to the record written below, so there is nothing for the tombstone
+    // to protect, and a stale one would stop a *later* refresh adopting this
+    // session if its own record were ever lost.
+    removed::forget(&draft.name);
 
     let mut s = Session::new(draft.name.clone(), draft.repo.clone(), draft.task.clone());
     s.backend = draft.backend;
@@ -1331,6 +1356,45 @@ pub enum Destroyed {
     RecordOnly,
 }
 
+/// Take away whatever the session ran in, whichever backend that was.
+///
+/// With a record this is one backend, the one the record names. Without a record
+/// it is *both*, because there is no longer anything that knows which kind the
+/// name was -- and the answer used to be "assume a sandbox", which quietly made
+/// a worktree unremovable: the gateway would say it had never heard of
+/// `sbx-<name>`, the record-only answer came back, and the directory stayed
+/// where it was. `Backend::place` refuses a directory that is already there, so
+/// the name was then unusable for good.
+///
+/// Neither backend has anything to do for a name that was not its own, so asking
+/// both costs one `sandbox delete` that answers not-found and one `exists` on a
+/// directory that does not. A backend that could not be *reached* only fails the
+/// removal if the other one found nothing either: a gateway that is down is not
+/// a reason to refuse to remove a worktree.
+fn tear_down(
+    backends: &Backends,
+    name: &str,
+    record: Option<&Session>,
+) -> Result<Torn, backend::Error> {
+    if let Some(record) = record {
+        return backends.for_session(record).tear_down(name, Some(record));
+    }
+
+    let mut torn = Torn::RecordOnly;
+    let mut failure = None;
+    for backend in backends.each() {
+        match backend.tear_down(name, None) {
+            Ok(Torn::Removed) => torn = Torn::Removed,
+            Ok(Torn::RecordOnly) => {}
+            Err(e) => failure = Some(e),
+        }
+    }
+    match failure {
+        Some(e) if torn == Torn::RecordOnly => Err(e),
+        _ => Ok(torn),
+    }
+}
+
 /// Delete a session's sandbox and drop its record.
 ///
 /// Shared by `sbx rm` and the TUI, so destroying means one thing wherever it is
@@ -1346,24 +1410,34 @@ pub enum Destroyed {
 /// Deletion itself is asynchronous. The sandbox stays listed as `Deleting` for
 /// a while afterwards, which `store::reconcile` already reads as dead, so a
 /// caller that refreshes immediately sees the row go rather than come back.
+///
+/// **Everything the name owns goes, not just the record.** A name is the key to
+/// four things that outlive the session -- the cache entry, the kept events, the
+/// unsent review, and the tombstone below -- and a removal that left any of them
+/// behind made the name unusable afterwards. Taking it again is the normal thing
+/// to do: the name describes the work, the work is still wanted, and a session
+/// gets removed because it went wrong rather than because it finished.
 pub fn destroy(backends: &Backends, name: &str) -> Result<Destroyed, String> {
     let record = Store::load()
         .map_err(|e| format!("could not read the session cache: {e}"))?
         .get(name)
         .cloned();
-    // A session the cache has lost is still a sandbox, because that is the kind
-    // whose name is a pure function of the session's -- which is what makes it
-    // removable with no record at all. There is no such convention for a
-    // worktree and there cannot be one, so its backend answers `RecordOnly`.
-    let kind = record
-        .as_ref()
-        .map_or(session::Kind::Sandbox, |s| s.backend);
-    let backend = backends.of_kind(kind);
 
-    let outcome = match backend.tear_down(name, record.as_ref()) {
+    // Written before any backend is asked, not after: the window this closes
+    // opens the moment the gateway starts deleting, and a tombstone written
+    // after a delete that takes seconds to be accepted is a tombstone written
+    // after the refresh it exists to stop. See [`crate::removed`].
+    removed::remember(name);
+
+    let outcome = match tear_down(backends, name, record.as_ref()) {
         Ok(Torn::Removed) => Destroyed::Sandbox,
         Ok(Torn::RecordOnly) => Destroyed::RecordOnly,
-        Err(e) => return Err(format!("could not remove `{name}`: {e}")),
+        Err(e) => {
+            // The session is staying, so the tombstone must not: it would stop
+            // the next refresh adopting a sandbox that is still very much there.
+            removed::forget(name);
+            return Err(format!("could not remove `{name}`: {e}"));
+        }
     };
 
     // Only after the backend has accepted the deletion: dropping the record
@@ -1373,6 +1447,10 @@ pub fn destroy(backends: &Backends, name: &str) -> Result<Destroyed, String> {
         .map_err(|e| format!("removed `{name}`, but could not update the cache: {e}"))?;
     // The kept events go with it: they are about a sandbox that no longer exists.
     events::forget_kept(name);
+    // So does the unsent review. It is a set of comments on a diff that has gone,
+    // and leaving it meant the next session to take the name inherited it --
+    // `ops::send_review` would have handed an agent notes on work it never did.
+    comments::forget(name);
     Ok(outcome)
 }
 

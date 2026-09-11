@@ -44,6 +44,7 @@ use super::{Backend, Error, Isolation, Paths, Result, Torn};
 use crate::config::Config;
 use crate::ops::Draft;
 use crate::projects;
+use crate::removed;
 use crate::seed::sh_quote;
 use crate::session::{self, Session, State};
 use crate::store;
@@ -367,19 +368,30 @@ fi
     ///
     /// `--force` because the point of removing a session is removing it: git
     /// refuses a worktree with modifications, and a worktree with modifications
-    /// is what every session that did any work is. The branch is left alone --
-    /// it is where the commits are, and this is not the command for deleting
-    /// work that was already pushed or is still wanted.
+    /// is what every session that did any work is.
+    ///
+    /// **The branch goes too, but only when there is nothing on it.** Leaving it
+    /// unconditionally is what this used to do, and it made a removed session
+    /// come back: [`Self::fetch_script`] checks out an existing `sbx/<name>`
+    /// rather than cutting a new one, so starting a session with the name of one
+    /// that was removed silently resumed the old branch, old commits and all.
+    /// Deleting it unconditionally is worse -- those commits may be the only
+    /// copy. So `git branch -d` decides, which deletes a branch merged into its
+    /// upstream or its base and refuses one carrying work of its own. A branch
+    /// it refuses is left exactly where it was.
+    ///
+    /// Without a record there is no way to know where the worktree went -- unlike
+    /// a sandbox name, the directory is not a pure function of the session's
+    /// name once a root has been reconfigured -- so the convention is the best
+    /// that can be done: whatever is at `<root>/<name>` and `<state>/<name>` is
+    /// where a session of that name would have been put, and leaving it behind
+    /// is what makes the name unusable afterwards.
     fn tear_down(&self, name: &str, session: Option<&Session>) -> Result<Torn> {
-        // A record is the only way to know where the worktree is: unlike a
-        // sandbox name, the directory is not a pure function of the session's
-        // name once a root has been reconfigured.
-        let Some(session) = session else {
-            return Ok(Torn::RecordOnly);
-        };
-        self.kill_tmux(session);
+        if let Some(session) = session {
+            self.kill_tmux(session);
+        }
 
-        let dir = self.dir(session);
+        let dir = session.map_or_else(|| self.root.join(name), |s| self.dir(s));
         let record = self.record_dir(name);
         let existed = dir.exists();
         if existed {
@@ -387,11 +399,30 @@ fi
             // is refused, so the removal is asked of the repository the worktree
             // belongs to -- which git itself resolves from the worktree, so no
             // record of the original checkout is needed.
+            //
+            // The branch is deleted last and from the main checkout, because
+            // both are forced: git refuses to delete a branch that is checked
+            // out in a worktree, and the worktree is the thing that has it
+            // checked out. `-d` rather than `-D` is the whole safety argument --
+            // see the doc comment -- and the `|| true` is it working: a branch
+            // with commits of its own makes this exit non-zero, and that is the
+            // answer being asked for rather than a failure to remove the
+            // session.
+            let branch = match session {
+                Some(s) => format!(
+                    "git -C \"$repo\" branch -d {} >/dev/null 2>&1 || true",
+                    sh_quote(&s.work_branch)
+                ),
+                None => String::new(),
+            };
             let script = format!(
                 "main=$(git -C {dir} rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
-git -C \"$main/..\" worktree remove --force {dir} || rm -rf {dir}
-git -C \"$main/..\" worktree prune >/dev/null 2>&1 || true",
+repo=\"$main/..\"
+git -C \"$repo\" worktree remove --force {dir} || rm -rf {dir}
+git -C \"$repo\" worktree prune >/dev/null 2>&1 || true
+{branch}",
                 dir = sh_quote(&dir.display().to_string()),
+                branch = branch,
             );
             let out = self.run(&["sh", "-c", &script])?;
             if !out.ok() {
@@ -436,6 +467,7 @@ git -C \"$main/..\" worktree prune >/dev/null 2>&1 || true",
         }
 
         let known: Vec<&str> = out.sessions.iter().map(|s| s.name.as_str()).collect();
+        let tombstoned = removed::names();
         // The records are what is scanned, not the worktrees: a directory under
         // the root says nothing about who made it, and the record is the thing
         // that claims a session.
@@ -444,9 +476,25 @@ git -C \"$main/..\" worktree prune >/dev/null 2>&1 || true",
                 let Some(name) = entry.file_name().to_str().map(str::to_string) else {
                     continue;
                 };
-                if !known.contains(&name.as_str()) && entry.path().join("meta.json").is_file() {
+                if !entry.path().join("meta.json").is_file() {
+                    continue;
+                }
+                // Destroyed, and its record still on disk because the removal
+                // could not finish. Adopting it puts back what `destroy` just
+                // dropped -- see [`crate::removed`] -- so it is reported as
+                // lingering instead, which is what keeps the tombstone.
+                if tombstoned.contains(&name) {
+                    out.lingering.push(name);
+                } else if !known.contains(&name.as_str()) {
                     out.orphans.push(name);
                 }
+            }
+        }
+        // A worktree whose record went but whose directory did not is still
+        // something the removal left behind, so the tombstone outlives it too.
+        for name in &tombstoned {
+            if !out.lingering.contains(name) && self.root.join(name).exists() {
+                out.lingering.push(name.clone());
             }
         }
         Ok(out)
@@ -560,6 +608,128 @@ mod tests {
             script.contains("show-ref --verify --quiet refs/heads/"),
             "an existing branch has to be reused rather than re-created: {script}"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A checkout with one commit on `main`, and a worktree session added to it.
+    /// Real git rather than a script assertion, because what is being tested is
+    /// what git decides -- whether a branch is safe to delete -- and a shape
+    /// test would only repeat the command back.
+    fn checkout_with_a_session(tag: &str) -> (PathBuf, Worktree, Session) {
+        let tmp = std::env::temp_dir().join(format!("sbx-test-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let repo = tmp.join("checkout");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "--quiet", "--initial-branch=main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("README"), "one\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "--quiet", "-m", "first"]);
+
+        let b = backend(&tmp);
+        let dir = tmp.join("worktrees").join("alpha");
+        git(&[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "sbx/alpha",
+            &dir.display().to_string(),
+            "main",
+        ]);
+        std::fs::create_dir_all(b.record_dir("alpha")).unwrap();
+
+        let mut s = session("alpha", &dir);
+        s.repo = repo.display().to_string();
+        s.work_branch = "sbx/alpha".into();
+        (tmp, b, s)
+    }
+
+    fn branches(repo: &Path) -> String {
+        let out = Command::new("git")
+            .current_dir(repo)
+            .args(["branch", "--format=%(refname:short)"])
+            .output()
+            .expect("git");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// The bug: the branch used to be left behind unconditionally, and
+    /// `fetch_script` checks out an existing one rather than cutting a new one.
+    /// So a session created with the name of one that had been removed resumed
+    /// the old branch instead of starting from the base.
+    #[test]
+    fn removing_a_session_that_did_no_work_takes_its_branch_with_it() {
+        let (tmp, b, s) = checkout_with_a_session("rm-empty");
+        let repo = tmp.join("checkout");
+
+        assert_eq!(b.tear_down("alpha", Some(&s)).unwrap(), Torn::Removed);
+
+        assert!(!b.dir(&s).exists(), "the worktree is gone");
+        assert!(!b.record_dir("alpha").exists(), "the record is gone");
+        assert!(
+            !branches(&repo).contains("sbx/alpha"),
+            "a branch with nothing on it is part of the session: {}",
+            branches(&repo)
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The other side of it, and the reason this is `git branch -d` rather than
+    /// `-D`: commits that were never pushed are the one thing removing a session
+    /// must not destroy.
+    #[test]
+    fn a_branch_carrying_commits_is_left_where_it_is() {
+        let (tmp, b, s) = checkout_with_a_session("rm-work");
+        let repo = tmp.join("checkout");
+        let dir = b.dir(&s);
+        std::fs::write(dir.join("README"), "two\n").unwrap();
+        for args in [
+            vec!["add", "."],
+            vec!["commit", "--quiet", "-m", "work the agent did"],
+        ] {
+            let out = Command::new("git")
+                .current_dir(&dir)
+                .args(&args)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "{out:?}");
+        }
+
+        assert_eq!(b.tear_down("alpha", Some(&s)).unwrap(), Torn::Removed);
+
+        assert!(!dir.exists(), "the worktree still goes");
+        assert!(
+            branches(&repo).contains("sbx/alpha"),
+            "the commits are the only copy: {}",
+            branches(&repo)
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A record lost -- a cache that was deleted, a server reinstalled -- used
+    /// to make the worktree unremovable, which made the name unusable: `place`
+    /// refuses a directory that is already there.
+    #[test]
+    fn a_worktree_is_removable_with_no_record_at_all() {
+        let (tmp, b, s) = checkout_with_a_session("rm-no-record");
+
+        assert_eq!(b.tear_down("alpha", None).unwrap(), Torn::Removed);
+
+        assert!(!b.dir(&s).exists(), "{:?} is still there", b.dir(&s));
+        assert!(!b.record_dir("alpha").exists());
+
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

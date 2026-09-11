@@ -67,6 +67,7 @@ Everything is in `sbx-core` unless the second column says otherwise.
 | `backend.rs` | *where* a session runs, as a trait: the sandboxed one and the worktree one. `backend/sandboxed.rs` is what `ops` used to do directly; `backend/worktree.rs` is a `git worktree` on the server with no isolation at all, and says so. See [worktrees.md](worktrees.md) |
 | `session.rs` | what a session *is*: identity, the derived branch and sandbox names, and the metadata record written inside the sandbox |
 | `store.rs` | the local cache and its reconciliation against the gateway; every write is locked |
+| `removed.rs` | the names of destroyed sessions, kept until the sandbox or worktree behind them has actually gone. Deletion is asynchronous, and a sandbox still listed with its record already dropped is the exact shape of an orphan worth adopting -- so without this a removed session came back on the next refresh, and the name could not be used again |
 | `seed.rs` | the detached script that clones, cuts the branch, writes the record and starts the agent |
 | `status.rs` | what the agent is doing, from hooks and from its screen |
 | `policy.rs` | the templates, the mid-run widen/tighten, and `View`: the policy pane as facts, which each renderer words for itself |
