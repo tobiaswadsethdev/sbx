@@ -711,6 +711,14 @@ main { display: flex; flex: 1; min-height: 0; }
 .tabs .tab:hover { background: var(--hover); }
 .tabs .tab.on { background: var(--selected); }
 .tabs .tab.on button { color: var(--text); }
+/* Dragged tabs. The one being carried fades; the one it is over takes a rule
+   on the edge it would land on -- a line rather than a fill, so it reads as a
+   position between two tabs and not as a second selection. */
+.tabs .tab.dragging { opacity: 0.4; }
+.tabs .tab.over { box-shadow: inset 2px 0 0 var(--primary); }
+/* WebKit wants telling that the pill is the thing being dragged, not the text
+   inside it. Without this the drag picks up the label as a selection. */
+.tabs .tab, .tabs .tab button { -webkit-user-drag: element; user-select: none; }
 .tabs button {
   background: none;
   border: none;
@@ -723,7 +731,11 @@ main { display: flex; flex: 1; min-height: 0; }
   cursor: pointer;
   white-space: nowrap;
 }
-.tabs .tab button { padding-right: 5px; }
+/* Tightened only when a close button follows, to close the gap between the
+   label and the cross. A tab without one -- the agent's, and a diff's -- keeps
+   the full 10px, or its label sits hard against the right edge of the pill and
+   reads as right-aligned. */
+.tabs .tab button:not(:last-child) { padding-right: 5px; }
 /* Only shown on a shell and on a file; see Tabs.tsx. Dim until hovered,
    because closing a shell kills what is running in it. */
 .tabs .close {

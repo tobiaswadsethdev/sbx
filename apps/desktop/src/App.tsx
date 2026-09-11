@@ -76,6 +76,39 @@ function tabsFor(shells: string[], open: Tab[]): Tab[] {
   ];
 }
 
+/// Put the tabs in the order the user dragged them into.
+///
+/// An overlay on `tabsFor` rather than a replacement for it, because the two
+/// know different things: that one knows which tabs *exist*, and it rebuilds
+/// them from the sandbox on every poll, so a remembered list of tabs would show
+/// shells that had been closed from elsewhere. This knows only an order, and a
+/// key in it that no longer exists is simply skipped.
+///
+/// Anything the order has never seen keeps its place from `tabsFor` -- appended
+/// here, which is where a new shell or a newly opened file belongs anyway.
+function arrange(tabs: Tab[], order: string[]): Tab[] {
+  const byKey = new Map(tabs.map((t) => [keyOf(t), t]));
+  const placed = order.flatMap((key) => {
+    const tab = byKey.get(key);
+    if (!tab) return [];
+    byKey.delete(key);
+    return [tab];
+  });
+  return [...placed, ...byKey.values()];
+}
+
+/// The order after `moved` is dropped onto `onto`.
+///
+/// Taken from the tabs as they are currently shown rather than from the stored
+/// order, so the first drag in a worktree -- where nothing is stored yet --
+/// starts from what the user can actually see.
+function reordered(tabs: Tab[], moved: string, onto: string): string[] {
+  const keys = tabs.map(keyOf).filter((key) => key !== moved);
+  const at = keys.indexOf(onto);
+  if (at < 0) return [...keys, moved];
+  return [...keys.slice(0, at), moved, ...keys.slice(at)];
+}
+
 
 export default function App() {
   // How wide the sidebars are, how often the list is re-read, and whether the
@@ -122,6 +155,9 @@ export default function App() {
   const [shells, setShells] = useState<Record<string, string[]>>({});
   const [files, setFiles] = useState<Record<string, Tab[]>>({});
   const [active, setActive] = useState<Record<string, string>>({});
+  /// Tab keys per worktree, in the order they were dragged into. Window state
+  /// like `files` and not persisted: see `arrange`.
+  const [order, setOrder] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     api
@@ -312,7 +348,12 @@ export default function App() {
     };
   }, [server, session, shells]);
 
-  const openTabs = session ? tabsFor(shells[session.name] ?? [], files[session.name] ?? []) : [];
+  const openTabs = session
+    ? arrange(
+        tabsFor(shells[session.name] ?? [], files[session.name] ?? []),
+        order[session.name] ?? [],
+      )
+    : [];
 
   /// Open a tab if it is not already open, and bring it to the front either way.
   const openTab = (worktree: string, tab: Tab) => {
@@ -566,6 +607,12 @@ export default function App() {
                 tabs={openTabs}
                 active={activeTab}
                 onActivate={(key) => setActive((a) => ({ ...a, [session.name]: key }))}
+                onReorder={(moved, onto) =>
+                  setOrder((all) => ({
+                    ...all,
+                    [session.name]: reordered(openTabs, moved, onto),
+                  }))
+                }
                 onNewShell={() => {
                   api
                     .newShell(server, session.name)

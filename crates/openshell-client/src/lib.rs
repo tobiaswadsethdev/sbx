@@ -459,7 +459,13 @@ impl CliClient {
     }
 
     /// Run the CLI and require success, mapping failures onto [`Error`].
-    fn run_checked<I, S>(&self, args: I, display: &str) -> Result<ExecOutput>
+    ///
+    /// `subject` is the sandbox the call is about, and `None` for the calls that
+    /// are about the gateway itself. It is passed rather than recovered from
+    /// `display` because the name is not reliably the last word of one:
+    /// `policy get sbx-a --full` and `logs sbx-a -n 50` end in a flag and a
+    /// count, and both used to produce ``sandbox `--full` not found``.
+    fn run_checked<I, S>(&self, args: I, display: &str, subject: Option<&str>) -> Result<ExecOutput>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -470,8 +476,16 @@ impl CliClient {
         }
         // The gateway reports a missing sandbox as a generic exit-1 error, so
         // the message is the only thing distinguishing it.
-        if out.stderr.contains("not found")
-            && let Some(name) = display.split_whitespace().last()
+        //
+        // Matched on the whole phrase rather than on `not found` alone, which
+        // is the substring of every other thing the gateway cannot find: an
+        // image, a provider, a policy file. [`Error::is_missing`] is read as
+        // "the sandbox is already gone" -- `tear_down` returns
+        // `Torn::RecordOnly` on it and `destroy` then drops the record -- so a
+        // pull that failed on a missing *image* used to report a session
+        // successfully removed while its sandbox kept running.
+        if let Some(name) = subject
+            && out.stderr.contains("sandbox not found")
         {
             return Err(Error::NotFound(name.to_string()));
         }
@@ -532,7 +546,7 @@ impl CliClient {
 impl OpenShell for CliClient {
     fn status(&self) -> Result<GatewayStatus> {
         let display = "status --output json";
-        let out = self.run_checked(["status", "--output", "json"], display)?;
+        let out = self.run_checked(["status", "--output", "json"], display, None)?;
         Self::parse_json(&out.stdout, display)
     }
 
@@ -577,7 +591,7 @@ impl OpenShell for CliClient {
         }
 
         let display = format!("sandbox create --name {}", opts.name);
-        self.run_checked(&args, &display)?;
+        self.run_checked(&args, &display, Some(&opts.name))?;
         // `create` streams human-readable progress rather than JSON, so read
         // the authoritative record back afterwards.
         self.get(&opts.name)
@@ -590,14 +604,18 @@ impl OpenShell for CliClient {
             args.push(s);
         }
         let display = args.join(" ");
-        let out = self.run_checked(&args, &display)?;
+        let out = self.run_checked(&args, &display, None)?;
         let raw: Vec<RawSandbox> = Self::parse_json(&out.stdout, &display)?;
         Ok(raw.into_iter().map(Sandbox::from).collect())
     }
 
     fn get(&self, name: &str) -> Result<Sandbox> {
         let display = format!("sandbox get {name}");
-        let out = self.run_checked(["sandbox", "get", name, "--output", "json"], &display)?;
+        let out = self.run_checked(
+            ["sandbox", "get", name, "--output", "json"],
+            &display,
+            Some(name),
+        )?;
         let raw: RawSandbox = Self::parse_json(&out.stdout, &display)?;
         Ok(raw.into())
     }
@@ -611,7 +629,7 @@ impl OpenShell for CliClient {
 
     fn delete(&self, name: &str) -> Result<()> {
         let display = format!("sandbox delete {name}");
-        self.run_checked(["sandbox", "delete", name], &display)?;
+        self.run_checked(["sandbox", "delete", name], &display, Some(name))?;
         Ok(())
     }
 
@@ -620,6 +638,7 @@ impl OpenShell for CliClient {
         let out = self.run_checked(
             ["policy", "get", name, "--output", "json", "--full"],
             &display,
+            Some(name),
         )?;
         Self::parse_json(&out.stdout, &display)
     }
@@ -647,7 +666,7 @@ impl OpenShell for CliClient {
         }
 
         let display = format!("policy update {name}");
-        self.run_checked(&args, &display)?;
+        self.run_checked(&args, &display, Some(name))?;
         Ok(())
     }
 
@@ -657,13 +676,13 @@ impl OpenShell for CliClient {
         // Deliberately not `--tail`: streaming would need a thread of its own
         // and a way to stop it. Refetching a bounded window on a timer is what
         // every other pane already does.
-        let out = self.run_checked(["logs", name, "-n", &n], &display)?;
+        let out = self.run_checked(["logs", name, "-n", &n], &display, Some(name))?;
         Ok(out.stdout)
     }
 
     fn providers(&self) -> Result<Vec<Provider>> {
         let display = "provider list --output json";
-        let out = self.run_checked(["provider", "list", "--output", "json"], display)?;
+        let out = self.run_checked(["provider", "list", "--output", "json"], display, None)?;
         Self::parse_json(&out.stdout, display)
     }
 

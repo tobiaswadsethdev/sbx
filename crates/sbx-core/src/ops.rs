@@ -730,11 +730,28 @@ pub fn create(
     // A first look for a name clash, so an obvious mistake fails before a
     // sandbox exists. Not a lock: the gateway refuses a duplicate sandbox name
     // anyway, which is the check that actually holds.
-    if Store::load()
-        .map_err(|e| e.to_string())?
-        .contains(&draft.name)
-    {
-        return Err(format!("session `{}` already exists", draft.name));
+    match Store::load().map_err(|e| e.to_string())?.get(&draft.name) {
+        // The wreckage of a create that failed, which owns the name until
+        // someone takes it away. Deliberately left behind -- it is the only
+        // trace of a sandbox that may exist at the gateway but was never
+        // seeded, and without it `sbxd rm` has nothing to name -- so it is not
+        // dropped here either: taking the name silently would strand whatever
+        // it still owns.
+        //
+        // But "already exists" on its own sent the reader looking for a session
+        // they are using, when what they have is the failure they just watched,
+        // and nothing said the way out. So this one says what the record is and
+        // what to do about it. The alternative -- letting a `Failed` record be
+        // overwritten -- is how the orphan above gets made.
+        Some(s) if s.state == State::Failed => {
+            return Err(format!(
+                "session `{0}` already exists, left by a create that failed; \
+                 remove it with `sbxd rm {0}` and try again",
+                draft.name
+            ));
+        }
+        Some(_) => return Err(format!("session `{}` already exists", draft.name)),
+        None => {}
     }
 
     // Someone claiming the name again, which is what a tombstone is waiting to
