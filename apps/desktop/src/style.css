@@ -143,7 +143,7 @@ body, html, #root {
    never what was meant. Restored on the things that *are* text you might want
    to copy: a hostname, a log, a diff, an error. */
 body { user-select: none; }
-:is(pre, code, .terminal, .monaco, .integration .log, .events, .facts dd,
+:is(pre, code, .terminal, .monaco, .panel .log, .events, .facts dd,
     .policy .host, .error, .empty) { user-select: text; }
 
 /* One focus ring for the window, and a visible one. Keyboard focus was
@@ -215,7 +215,17 @@ body { user-select: none; }
 }
 .app > header .limit.high { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
 
-.app > header .error { color: var(--bad); margin-left: auto; font-size: 12px; }
+/* Between the readings and the buttons, and allowed to be cut rather than to
+   push them off the edge: the destinations are the one thing in this strip that
+   must always be reachable. */
+.app > header .error {
+  color: var(--bad);
+  font-size: 12px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .app > header select {
   background: var(--sunken);
   color: var(--text);
@@ -226,33 +236,102 @@ body { user-select: none; }
   font-size: 12px;
 }
 
-/* The four things the window can do. Icon *and* label: an icon-only toolbar is
-   a quiz, and there is room for both at this width. */
-.app > header .new {
+/* Where the window goes. Five icons, no words -- `App.tsx` argues the case.
+
+   Unbordered, which is the change that made an icon-only strip work at all: a
+   box around each of five 14-pixel glyphs turned the header into a row of
+   buttons competing with the wordmark, where the same five glyphs floating on
+   the surface read as one quiet group. The lit one carries a fill instead, so
+   the strip says where you are with the only treatment left. */
+.destinations {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: none;
+}
+.dest {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  flex: none;
   background: none;
-  border: 1px solid var(--line);
+  border: none;
   border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
-  font-size: 12px;
-  padding: 4px 10px;
   cursor: pointer;
-  transition: background-color 150ms, border-color 150ms, color 150ms;
+  transition: background-color 150ms, color 150ms;
 }
-.app > header .new:hover:not(:disabled) {
-  background: var(--hover);
-  border-color: var(--line-strong);
-  color: var(--text);
+.dest:hover:not(:disabled) { background: var(--hover); color: var(--text); }
+.dest.on { background: var(--selected); color: var(--text); }
+.dest:disabled { color: var(--dimmer); cursor: default; }
+/* `new project` is an action and the four after it are places. One hairline is
+   the whole of what says so, and without it the row is five buttons of which
+   one does not come back. */
+.dest-split {
+  width: 1px;
+  height: 16px;
+  flex: none;
+  margin: 0 5px;
+  background: var(--line);
 }
-.app > header .new:disabled { color: var(--dimmer); cursor: default; }
-/* The last button sits against the window edge unless something pushes it in,
-   and `header .error` only exists when there is one. */
-.app > header .new:last-of-type { margin-right: 0; }
 
 main { display: flex; flex: 1; min-height: 0; }
+
+/* The three panes, as one element so that a screen can take their place
+   without them being torn down. `hidden` and not a conditional render -- every
+   terminal in the window is under here, and unmounting one detaches it from
+   tmux. See the note in `App.tsx`, which is where that actually matters.
+
+   `[hidden]` needs saying because `display: flex` beats the attribute's own
+   `display: none` from the UA stylesheet. */
+.workspace { display: flex; flex: 1; min-width: 0; min-height: 0; }
+.workspace[hidden] { display: none; }
+
+/* ------------------------------------------------------------------------- */
+/* the screens: the inbox, the integrations, the servers, the settings        */
+/* ------------------------------------------------------------------------- */
+
+.screen {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+/* Taller than the header above it and than the tab strips beside it, and that
+   is the point: it is the only bar in the window that names a whole page, and
+   matching the 36px of a tab strip made a screen look like a fourth pane. */
+.screen-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  height: 44px;
+  padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+/* The same glyph as the header button that opened this, in the same rank of
+   grey. The pairing is what teaches the strip above. */
+.screen-mark { color: var(--dim); }
+.screen-head h1 {
+  flex: 1;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.screen-body { flex: 1; min-height: 0; overflow-y: auto; }
+/* Measured, not full-width. Every hint on these screens is a sentence, and the
+   integrations screen is mostly sentences; run across a 2560-pixel display
+   they are lines nobody finishes. 940 is a touch over the 760 the modal had,
+   which is the width these rows were written for, plus the room the scrim was
+   wasting on either side. */
+.screen-inner { max-width: 940px; margin: 0 auto; padding: 16px 22px 48px; }
 
 /* ------------------------------------------------------------------------- */
 /* the tree: projects, and the worktrees in them                             */
@@ -387,14 +466,11 @@ main { display: flex; flex: 1; min-height: 0; }
    for it. */
 .quiet-icon.danger:hover { color: var(--bad); }
 
-/* Inside `.group-body`, so the indent is already paid for by the rule that
-   draws the line -- the left padding here is only what a card carries. */
-.empty-group {
-  color: var(--dimmer);
-  margin: 0;
-  padding: 2px 12px 6px 10px;
-  font-size: 12px;
-}
+/* An empty project, inside `.group-body` -- so the indent is already paid for
+   by the rule that draws the line, and this is only the offset a card
+   carries. Lands the glyph under the first column of the rows it stands in
+   for rather than against the rule. */
+.group-body > .empty.row { padding-left: 10px; }
 
 
 /* One worktree.
@@ -569,6 +645,25 @@ main { display: flex; flex: 1; min-height: 0; }
   animation: state-spin 1s steps(12, end) infinite;
 }
 @keyframes state-spin { to { transform: rotate(1turn); } }
+
+/* A pane fetching its own contents, which is not an agent doing anything.
+   Same ring and same mechanical tick as the state above; `--dimmer` rather
+   than one of the four hues, because the rule at the top of this file is that
+   nothing borrows those. Used by `Waiting` in `Empty.tsx` and by the two
+   buttons on the integrations screen that start a container. */
+.spin {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 1.5px solid var(--dimmer);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: state-spin 1s steps(12, end) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .spin { animation: none; border-top-color: var(--dimmer); opacity: 0.7; }
+}
 /* Reduced motion gets the gap filled in as well as the animation stopped: a
    ring frozen with a quarter missing looks like a rendering fault. */
 @media (prefers-reduced-motion: reduce) {
@@ -737,14 +832,22 @@ main { display: flex; flex: 1; min-height: 0; }
   border-bottom: 1px solid var(--line);
   flex: none;
 }
+/* Square, because the label inside is gone -- see `VIEWS` in `Dock.tsx`. Wide
+   enough to be a target at 28x26 without the five of them filling a 280-pixel
+   sidebar, which is the narrowest the dock is allowed to be. */
 .dock-tabs button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 26px;
+  flex: none;
   background: none;
   border: none;
   border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
-  font-size: 12px;
-  padding: 4px 9px;
+  padding: 0;
   cursor: pointer;
   transition: background-color 150ms, color 150ms;
 }
@@ -814,36 +917,38 @@ main { display: flex; flex: 1; min-height: 0; }
    "publish" rather than nothing. */
 .git .ab.none { color: var(--attention); }
 .git-ops { display: flex; align-items: center; gap: 5px; padding: 0 0 10px; }
-.git-ops button {
+/* fetch, pull, push. Bordered, unlike the dock's strip above, and the
+   difference is deliberate: these *do* something to the repository, and a
+   box is what tells a control that acts from a control that navigates. Square
+   now that the words have gone. */
+.git-ops .op {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 24px;
+  flex: none;
   background: none;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
   color: var(--dim);
   font: inherit;
-  font-size: 12px;
-  padding: 3px 10px;
+  padding: 0;
   cursor: pointer;
   transition: background-color 150ms, border-color 150ms, color 150ms;
 }
-.git-ops button:hover:not(:disabled) {
+.git-ops .op:hover:not(:disabled) {
   background: var(--hover);
   border-color: var(--line-strong);
   color: var(--text);
 }
-.git-ops button:disabled { color: var(--dimmer); cursor: default; }
-.git-ops .quiet {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: none;
-  border-color: transparent;
-  color: var(--dim);
-  margin-left: auto;
-}
-.git-ops .quiet:hover:not(:disabled) { background: var(--line); border-color: transparent; }
+.git-ops .op:disabled { color: var(--dimmer); cursor: default; }
+/* Re-reading the pane is not an operation on the repository, so it keeps the
+   borderless `.quiet-icon` the rest of the window uses for a control that only
+   looks at something -- which is why the three above are `.op` rather than
+   `.git-ops button`: scoped to the element, this rule put a box round the
+   refresh too and quietly made it the fourth operation. */
+.git-ops .refresh { margin-left: auto; }
 /* What git said back. Sunken and monospace: it is output, not a message the
    window composed. */
 .git .said {
@@ -1134,6 +1239,10 @@ main { display: flex; flex: 1; min-height: 0; }
    isolation. A stated absence, styled as a statement: an empty pane is what a
    pane that failed to load looks like. */
 .unisolated { color: var(--dim); font-size: 12px; }
+/* Amber, and the one glyph in the window drawn at `ICON_BIG` outside an
+   `Empty`. It is not an absence -- it is a warning that happens to fill a pane
+   -- so it wears `--warn` rather than the grey every nothing here is in. */
+.unisolated-mark { display: block; color: var(--warn); margin-bottom: 8px; }
 .unisolated h3 {
   margin: 0 0 6px;
   color: var(--warn);
@@ -1190,7 +1299,7 @@ main { display: flex; flex: 1; min-height: 0; }
 
 .dialog-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
 .dialog-head h2 { font-size: 14px; font-weight: 600; margin: 0; flex: 1; }
-.dialog .quiet {
+:is(.dialog, .screen) .quiet {
   background: none;
   border: none;
   border-radius: var(--r-sm);
@@ -1201,9 +1310,9 @@ main { display: flex; flex: 1; min-height: 0; }
   padding: 3px 7px;
   transition: background-color 150ms, color 150ms;
 }
-.dialog .quiet:hover { background: var(--hover); color: var(--text); }
+:is(.dialog, .screen) .quiet:hover { background: var(--hover); color: var(--text); }
 
-.dialog input, .dialog textarea, .dialog select {
+:is(.dialog, .screen) input, :is(.dialog, .screen) textarea, :is(.dialog, .screen) select {
   background: var(--sunken);
   color: var(--text);
   border: 1px solid var(--line-strong);
@@ -1215,19 +1324,19 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 /* An identifier, so monospace -- a repository URL, a branch, a secret's name.
    The textareas are prose and stay in the UI font. */
-.dialog input, .dialog select { font-family: var(--font-mono); }
-.dialog input:focus, .dialog textarea:focus, .dialog select:focus {
+:is(.dialog, .screen) :is(input, select) { font-family: var(--font-mono); }
+:is(.dialog, .screen) :is(input, textarea, select):focus {
   outline: none;
   border-color: var(--ring);
 }
-.dialog textarea { resize: vertical; }
+:is(.dialog, .screen) textarea { resize: vertical; }
 
-.dialog > label { display: grid; grid-template-columns: 78px 1fr; gap: 10px; align-items: start; margin: 10px 0; }
-.dialog > label > span:first-child { color: var(--dim); padding-top: 6px; font-size: 12px; }
+:is(.dialog, .screen-inner) > label { display: grid; grid-template-columns: 78px 1fr; gap: 10px; align-items: start; margin: 10px 0; }
+:is(.dialog, .screen-inner) > label > span:first-child { color: var(--dim); padding-top: 6px; font-size: 12px; }
 
-.dialog fieldset { border: none; margin: 14px 0 0; padding: 0; }
-.dialog legend { color: var(--dim); padding: 0; margin-bottom: 5px; font-size: 12px; }
-.dialog .tick {
+:is(.dialog, .screen) fieldset { border: none; margin: 14px 0 0; padding: 0; }
+:is(.dialog, .screen) legend { color: var(--dim); padding: 0; margin-bottom: 5px; font-size: 12px; }
+:is(.dialog, .screen) .tick {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1235,16 +1344,18 @@ main { display: flex; flex: 1; min-height: 0; }
   cursor: pointer;
   font-size: 12px;
 }
-.dialog .tick input { width: auto; accent-color: var(--primary); }
-.dialog .hint { color: var(--dimmer); font-size: 12px; }
+:is(.dialog, .screen) .tick input { width: auto; accent-color: var(--primary); }
+:is(.dialog, .screen) .hint { color: var(--dimmer); font-size: 12px; }
 
-/* The integrations screen. Wider than the create form because every row is a
-   name, a state, a description and buttons -- and because a container's own log
-   is the one thing here worth reading in full. */
-.dialog.wide { width: 760px; max-height: 82vh; overflow-y: auto; }
+/* A section of a screen: a heading, a hint, and rows. Shared by the inbox, the
+   integrations and the servers screens, which is the whole reason it is no
+   longer called `.panel` -- the paired-servers list wearing a class
+   named after a different screen was a lie a stylesheet should not tell.
 
-.integration { margin-top: 18px; }
-.integration h3 {
+   `.dialog.wide` and `.dialog.settings` used to sit here and are gone with the
+   modals they sized. */
+.panel { margin-top: 18px; }
+.panel h3 {
   margin: 0;
   font-size: 11px;
   font-weight: 500;
@@ -1252,9 +1363,9 @@ main { display: flex; flex: 1; min-height: 0; }
   letter-spacing: 0.04em;
   color: var(--dim);
 }
-.integration > .hint { margin: 3px 0 8px; max-width: 66ch; }
+.panel > .hint { margin: 3px 0 8px; max-width: 66ch; }
 
-.integration .row {
+.panel .row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1263,24 +1374,33 @@ main { display: flex; flex: 1; min-height: 0; }
   border-top: 1px solid var(--line);
   font-size: 12px;
 }
-.integration .row-name { min-width: 130px; font-family: var(--font-mono); }
-.integration .row .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.integration .row-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
+.panel .row-name { min-width: 130px; font-family: var(--font-mono); }
+.panel .row .hint { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.panel .row-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; }
 /* Inputs in a row are sized, not stretched: `.dialog input` is 100% wide,
    which is right for the create form's stacked fields and turns every row here
    into three lines. */
-.integration .row input { width: 190px; }
-.integration .secret-name { width: 170px; }
-.integration .row.new { border-top: 1px dashed var(--line-strong); }
-.integration .row .yes { color: var(--ok); }
-.integration .row .no { color: var(--bad); }
-.integration .row .quiet-icon { margin-left: 4px; }
+.panel .row input { width: 190px; }
+.panel .secret-name { width: 170px; }
+.panel .row.new { border-top: 1px dashed var(--line-strong); }
+.panel .row .yes { color: var(--ok); }
+.panel .row .no { color: var(--bad); }
+.panel .row .quiet-icon { margin-left: 4px; }
 
 /* An inbox row: the key, the title, what kind and what state, and where to
    start it. The title takes the slack because it is the part you read. */
-.integration .row.task .row-name a { color: var(--text); text-decoration: none; }
-.integration .row.task .row-name a:hover { text-decoration: underline; }
-.integration .task-title {
+/* The ticket key and the mark that says it leaves the window, as one target. */
+.panel .row.task .row-name a {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text);
+  text-decoration: none;
+}
+.panel .row.task .row-name a:hover { text-decoration: underline; }
+.panel .row.task .row-name a .lucide { color: var(--dimmer); }
+.panel .row.task .row-name a:hover .lucide { color: var(--dim); }
+.panel .task-title {
   flex: 1;
   min-width: 12ch;
   overflow: hidden;
@@ -1289,10 +1409,10 @@ main { display: flex; flex: 1; min-height: 0; }
 }
 /* The type and the state are two facts, not one phrase: without the gap
    `Bug In Progress` reads as a single string. */
-.integration .task-type, .integration .task-status { color: var(--dim); font-size: 11px; }
-.integration .task-type { margin-right: 4px; }
-.integration .task-status { min-width: 10ch; }
-.integration .row.task select { width: auto; max-width: 160px; }
+.panel .task-type, .panel .task-status { color: var(--dim); font-size: 11px; }
+.panel .task-type { margin-right: 4px; }
+.panel .task-status { min-width: 10ch; }
+.panel .row.task select { width: auto; max-width: 160px; }
 
 /* One state per colour, so the list is scannable without reading it -- the same
    grammar the session list uses. `crashing` is the loud one: it is the state
@@ -1306,7 +1426,7 @@ main { display: flex; flex: 1; min-height: 0; }
 
 /* A tracker's kind, in the same column the MCP state occupies: it is the one
    word that says how the rest of the row is addressed. */
-.integration .tracker-kind {
+.panel .tracker-kind {
   font-size: 11px;
   min-width: 84px;
   font-family: var(--font-mono);
@@ -1315,14 +1435,31 @@ main { display: flex; flex: 1; min-height: 0; }
 /* The add form is a row of many small fields rather than a stacked form: it is
    the same shape as the secret above it, and a tracker is four short answers.
    The hint under it takes the whole width so the wrap is deliberate. */
-.integration .row.tracker.new { align-items: flex-start; }
-.integration .row.tracker.new input { width: 150px; }
-.integration .row.tracker.new .hint { flex-basis: 100%; white-space: normal; overflow: visible; }
-.integration .row.tracker.new select { width: auto; }
-
-.integration .problem { flex-basis: 100%; margin: 3px 0 0; color: var(--bad); max-width: 72ch; }
-.integration .log {
+.panel .row.tracker.new { align-items: flex-start; }
+.panel .row.tracker.new input { width: 150px; }
+.panel .row.tracker.new .hint {
   flex-basis: 100%;
+  min-width: 100%;
+  white-space: normal;
+  overflow: visible;
+}
+.panel .row.tracker.new select { width: auto; }
+
+.panel .problem {
+  flex-basis: 100%;
+  min-width: 100%;
+  margin: 3px 0 0;
+  color: var(--bad);
+  max-width: 72ch;
+}
+/* What an external MCP server shows where the buttons would be. Not a `.hint`,
+   which is `flex: 1` and would split the row's free space with the description
+   beside it -- two elements both claiming the slack is how the right-hand
+   column stopped being a column. */
+.panel .row .muted { color: var(--dimmer); font-size: 12px; }
+.panel .log {
+  flex-basis: 100%;
+  min-width: 100%;
   margin: 7px 0 0;
   padding: 7px 9px;
   max-height: 9em;
@@ -1335,18 +1472,18 @@ main { display: flex; flex: 1; min-height: 0; }
   font-size: 11px;
   white-space: pre-wrap;
 }
-.integration .actions { align-items: center; gap: 12px; }
-.integration .actions .hint { margin-right: auto; }
+.panel .actions { align-items: center; gap: 12px; }
+.panel .actions .hint { margin-right: auto; }
 
 /* The where-it-runs choice: the hint beside each is the part that matters, so
    it wraps under the label rather than being clipped on one line. */
-.dialog .kinds .tick { align-items: baseline; flex-wrap: wrap; }
-.dialog .kinds .hint { flex-basis: 100%; padding-left: 22px; max-width: 52ch; }
+:is(.dialog, .screen) .kinds .tick { align-items: baseline; flex-wrap: wrap; }
+:is(.dialog, .screen) .kinds .hint { flex-basis: 100%; padding-left: 22px; max-width: 52ch; }
 
 /* What picking the second one gives up. Amber and boxed, because it is the one
    thing in this dialog that changes what the session promises -- and it is a
    statement about the choice rather than an error with it. */
-.dialog .warn {
+:is(.dialog, .screen) .warn {
   margin: 12px 0 0;
   padding: 8px 10px;
   border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
@@ -1360,12 +1497,6 @@ main { display: flex; flex: 1; min-height: 0; }
 /* ------------------------------------------------------------------------- */
 /* the settings screen                                                       */
 /* ------------------------------------------------------------------------- */
-
-/* Between the create form's width and the integrations screen's: the fields
-   are short and the hints under them are sentences, and 700 is where a hint
-   stops being three lines. Scrolls as a whole rather than per section, because
-   the sections are meant to be read past on the way to one of them. */
-.dialog.settings { width: 700px; max-height: 84vh; overflow-y: auto; }
 
 /* One section, with the heading grammar the integrations screen already uses
    -- small, uppercase, dim -- so the two screens read as one application. The
@@ -1453,7 +1584,7 @@ main { display: flex; flex: 1; min-height: 0; }
 .repos .branch { grid-area: branch; color: var(--dim); font-family: var(--font-mono); font-size: 11px; }
 .repos .path { grid-area: path; color: var(--dim); font-family: var(--font-mono); font-size: 11px; }
 .repos .origin { grid-area: origin; color: var(--dimmer); font-family: var(--font-mono); font-size: 11px; }
-.dialog .none { color: var(--dim); padding: 10px 2px; font-size: 12px; }
+:is(.dialog, .screen) .none { color: var(--dim); padding: 10px 2px; font-size: 12px; }
 .dialog > .origin { color: var(--dim); margin: 0 0 8px; overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
 
 .carried { display: grid; grid-template-columns: 78px 1fr; gap: 3px 10px; margin: 16px 0 0; font-size: 12px; }
@@ -1467,13 +1598,88 @@ main { display: flex; flex: 1; min-height: 0; }
 .paired li { display: flex; align-items: center; gap: 10px; padding: 3px 0; font-size: 12px; }
 .paired .name { min-width: 110px; font-family: var(--font-mono); }
 .paired .address { color: var(--dim); flex: 1; overflow-wrap: anywhere; font-family: var(--font-mono); }
-.paired .quiet:hover { color: var(--bad); }
 
-/* Nothing selected, or nothing paired yet -- the first thing a new install
-   shows, so it is the one screen that has to read as instructions. */
-.empty { margin: auto; max-width: 54ch; padding: 24px; }
-.empty h1 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
+
+/* ------------------------------------------------------------------------- */
+/* nothing here, and nothing loaded yet                                      */
+/* ------------------------------------------------------------------------- */
+
+/* One shape at three sizes, and a glyph where twelve panes used to keep twelve
+   sentences. `Empty.tsx` argues the case; what is worth saying here is the
+   colour. The mark is `--dimmer`, the window's third rank of grey -- quieter
+   than the text of any pane that *does* have content, because an absence
+   should be legible at a glance and then ignorable. An empty state drawn at
+   full contrast is one that keeps asking to be read.
+
+   None of the four state hues appear here, which is the rule at the top of
+   this file: `--working`, `--attention`, `--ok` and `--bad` mean things about
+   agents, and a grey pane with nothing in it is not one of them. The single
+   exception is the clean-working-copy tick, which is `--ok` because it is the
+   one absence in the window that is an answer rather than a shortfall -- see
+   `.empty .kind-clean` below. */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--dimmer);
+}
+.empty-mark { color: var(--dimmer); flex: none; }
+.empty-note {
+  margin: 0;
+  max-width: 44ch;
+  color: var(--dim);
+  font-size: 12px;
+  text-align: center;
+  /* The one place in the window a line wraps to a measure rather than being
+     clipped: these are fragments, and a fragment with an ellipsis in it has
+     lost the half that made it actionable. */
+  text-wrap: pretty;
+}
+
+/* An absence inside a list: an empty project group, a directory with nothing
+   in it. On the row it replaces, at the size of the icons around it -- a
+   centred 26-pixel mark in a file tree would be a hole in the indent. */
+.empty.row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 2px 0 6px;
+}
+.empty.row .empty-note { text-align: left; }
+
+/* A dock pane, or a section of a screen. */
+.empty.pane { padding: 26px 12px; }
+/* Centred in a dock pane, and left-aligned in a section of a screen. The
+   difference is the width it is centring in: a 400-pixel dock pane with a
+   glyph in the middle reads as a calm, empty pane, and the same glyph centred
+   in 895 pixels under a left-aligned heading reads as adrift. Here it sits
+   where the first row of the list would have been, which is the thing it is
+   standing in for. */
+.panel > .empty.pane { align-items: flex-start; padding: 16px 0 10px; }
+/* Wider than the centred measure: a left-aligned fragment that wraps has a
+   dangling clause under it, and these are short enough to sit on one line. */
+.panel > .empty.pane .empty-note { text-align: left; max-width: 60ch; }
+.empty.pane .spin { width: 18px; height: 18px; }
+
+/* The whole middle of the window: a first run, or nothing selected. `margin:
+   auto` is what centres it, in a flex parent either way -- `.app` when there
+   is no server and `.workspace` when there is no worktree. */
+.empty.page { margin: auto; max-width: 54ch; padding: 32px 24px; }
+.empty.page .empty-note { font-size: 13px; color: var(--text); }
+
+/* The good absence, and the only one allowed a state hue. `Clean` is the tick
+   a working copy with nothing changed shows; every other mark here stays
+   grey. Set from `tone` in `Empty.tsx`, because a stylesheet cannot tell one
+   glyph from another. */
+.empty.ok .empty-mark { color: var(--ok); }
+
 .empty p { color: var(--dim); }
+/* Left inside a centred column: the block is centred and the two commands in
+   it are not, because a shell line with its indentation averaged is a shell
+   line nobody can copy. */
+.empty pre { text-align: left; align-self: stretch; }
 .empty pre {
   background: var(--sunken);
   border: 1px solid var(--line);
@@ -1563,3 +1769,28 @@ main { display: flex; flex: 1; min-height: 0; }
 .update button:first-of-type { margin-left: auto; }
 .update button:hover { color: var(--text); }
 .update .take { color: var(--text); font-weight: 600; }
+
+/* ------------------------------------------------------------------------- */
+/* the measure of a field on a screen                                        */
+/* ------------------------------------------------------------------------- */
+
+/* A screen is 940 pixels of column and a branch prefix is eight characters.
+   Left to `1fr` every input on the settings and servers screens stretched the
+   whole width of it, which is the one way a form can look worse for having
+   been given more room -- a text field's width is a claim about how much you
+   are expected to type into it.
+
+   440 is where the longest value any of these actually holds sits comfortably:
+   a pairing string wraps to three lines either way, and a policy summary is
+   the only thing that truncates. It also lands the right edge of every field
+   on the same column as the wrapped hints underneath them, which is what makes
+   the two read as one block rather than as a form with captions.
+
+   Scoped to `.screen-inner` on purpose -- the dialogs are already the width of
+   their content and were right as they were. These come last in the file
+   because they tie with the shared rules above on specificity. */
+.screen-inner > label { grid-template-columns: 78px minmax(0, 440px); }
+.screen-inner .setting-group > label { grid-template-columns: 118px minmax(0, 440px); }
+/* The save row and the paired list end where the fields above them do. */
+.screen-inner .setting-actions,
+.screen-inner .paired li { max-width: 568px; }

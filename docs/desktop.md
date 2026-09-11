@@ -37,29 +37,30 @@ sbxd pair desktop --host 127.0.0.1      # ... or the address the window will dia
 
 `pair` prints one line -- an address, a token, and the fingerprint of the
 certificate the server will present. Paste it into the window: **paste a
-pairing string** on the empty screen, or **servers** in the header once
+pairing string** on the empty screen, or the servers icon in the header once
 something is paired. The name is optional and defaults to the host.
 
 ```
-   +-------------------------------------------------------+
-   |  Connect to a server                           close   |
-   |                                                        |
-   |  pairing   sbx://box.lan:17671/8f3c…#d8fa…             |
-   |  name      work                                        |
-   |                                                        |
-   |  paired    wsl        127.0.0.1:17671        forget    |
-   |                                             [connect]  |
-   +-------------------------------------------------------+
+   +---------------------------------------------------------------+
+   |  [=] servers                                              x   |
+   |                                                               |
+   |  pairing   sbx://box.lan:17671/8f3c…#d8fa…                    |
+   |  name      work                                               |
+   |                                                    [connect]  |
+   |                                                               |
+   |  PAIRED                                                       |
+   |  wsl         127.0.0.1:17671                          [bin]   |
+   +---------------------------------------------------------------+
 ```
 
 `sbxd connect 'sbx://…'` in a terminal does the same thing, and a server paired
 either way appears in both -- they are one saved list (`~/.local/state/sbx/remotes.json`,
 or `%LOCALAPPDATA%\sbx\remotes.json` on Windows) and one implementation:
-`sbx_client::pair`, called by the command and by the dialog. Two implementations of "is this a
+`sbx_client::pair`, called by the command and by the screen. Two implementations of "is this a
 server I can talk to" would be one implementation and one place a mistake is
 silent.
 
-**The dialog is there because the machine holding the window may have no `sbxd`
+**The screen is there because the machine holding the window may have no `sbxd`
 on it.** On Windows there is none to install: the CLI drives Docker, tmux and a
 gateway, which are on the Linux side. Requiring a terminal to pair would have
 made the Windows client depend on a program that cannot run there.
@@ -219,7 +220,9 @@ prefixed `shell-` rather than trusting the request -- closing the agent's tab
 must not stop the agent.
 
 **The dock is not a tab bar, and that is deliberate.** Files, git, facts, policy
-and events sit in a sidebar beside the editor. Files and git are places you work
+and events sit in a sidebar beside the editor, chosen by a strip of five glyphs
+-- a tree, a branch, a pulse, a shield and an `i` -- for the reason the header's
+destinations have none either. Files and git are places you work
 *from* -- look at what changed, open it, come back -- and a diff you are reading
 should not have to give up its place so you can see what else changed. Facts,
 policy and events are what is true about the worktree, and keeping them one
@@ -227,6 +230,120 @@ click away rather than behind a tab is the point: the isolation being *visible*
 is the reason this is worth building rather than adopting an ADE built on git
 worktrees, and a denial you have to go looking for is one you will not find. It
 costs width the editor would otherwise have; that is the trade.
+
+## Where it goes, and why it is all icons
+
+The window has five destinations in the top-right of the header: new project,
+then the inbox, the integrations, the servers and the settings. **None of them
+carries a word.** The row used to read `inbox  new project  integrations
+servers  settings` -- about 210 pixels of label for five things pressed once
+each per sitting, in a 40-pixel strip that also has to hold a rate-limit
+reading and an error message.
+
+The old note in `icons.tsx` said an icon-only toolbar is a quiz. It was right
+about the failure mode and wrong that there was no answer, and the answer is
+three things that had to be built rather than asserted:
+
+- every button carries a `title` and an `aria-label`, so the word is one hover
+  away for as long as it takes to learn five glyphs -- and a button whose only
+  content is an SVG has no accessible name at all without the second one;
+- the screen each button opens is **headed by the same glyph beside its name**,
+  so pressing one teaches what it was;
+- the one that is showing is lit, so the strip says where you *are* and not
+  only what it can do. Pressing the lit one goes back to the workspace, which
+  means the press that taught you what a glyph meant is also the press that
+  undoes it.
+
+A tooltip on its own would have been the quiz with an answer key.
+
+One hairline divides `new project` from the four after it, because that one is
+an **action** and the rest are **places**. Without it the header is five
+buttons of which one does not come back.
+
+**The four places are screens, not dialogs.** They were modal, and being modal
+was wrong for all four in the same way: a dialog is the right shape for a
+question that must be answered before anything else can happen, and none of
+these asks anything -- they are places you go to look at a list and change
+something in it. What it cost concretely: the integrations screen is a
+container per row with its own log under it, living in a 760-pixel box with a
+`max-height: 82vh` and a scrollbar of its own inside a window that already had
+one, while the scrim reserved a third of the display to draw black over. These
+screens also *explain* the workspace behind them -- a tracker with no
+credential is why the inbox is empty -- and a scrim dimmed the evidence while
+you read about it.
+
+The create forms stayed dialogs, and so did the destroy confirmation. Those are
+questions with a submit button, asked from somewhere and answered back to it.
+`Confirm.tsx` is the only `alertdialog` in the window and the only thing that
+takes it hostage.
+
+**The workspace is hidden, not unmounted, while a screen is open.** Every
+terminal lives under it, and a terminal that unmounts closes its channel and
+detaches from tmux -- so opening the settings would drop the agent's stream and
+every shell's beside it. Nothing would be lost, because tmux holds the screen;
+it would simply be a window that flickers every time you look at a setting.
+
+### Nothing here, said with a glyph
+
+Twelve panes used to keep twelve sentences for having nothing in them --
+`nothing changed`, `no policy decisions in the recent log`, `Nothing assigned
+to you — or no trackers yet, which is what the integrations screen adds`. The
+cost was not the words; it was that none of them looked like the others, so a
+pane you had not seen before greeted you with a paragraph to read before you
+could tell whether anything was wrong.
+
+They are one component now (`Empty.tsx`) at three sizes, and the glyph is each
+pane's **own subject gone quiet**: an unplugged plug for no MCP servers, a key
+for no secrets, a ticket for no trackers, an open folder for an empty
+directory, a pulse for a feed with nothing in it. A single shared "no data"
+symbol would have said "something is missing" twelve times without once saying
+what. One look settles the three states a pane can be in -- a grey glyph is
+empty, a spinner is still reading, red text is broken -- with no reading
+involved, which is possible precisely *because* an empty pane has no content to
+compete with and the mark can be large.
+
+A note survives only where the absence has a cause someone can act on, and then
+as a fragment rather than a sentence: `no trackers yet` is a thing to go and
+fix, and `nothing changed` is not.
+
+**The one absence allowed a colour is the clean working copy.** A tick in
+`--ok`, because it is the only nothing in the window that is an *answer* rather
+than a shortfall. Every other mark is `--dimmer`. That is the rule at the top of
+`style.css` holding: the four state hues mean "an agent is working", "an agent
+wants you", "it passed" and "it failed", and a grey pane with nothing in it is
+not one of them -- which is also why a pane fetching its own contents draws a
+neutral spinner rather than borrowing the working one.
+
+A session with no sandbox is the deliberate exception, and it keeps its words.
+The policy and events panes show an amber `ShieldOff` above `not isolated` and
+the server's own explanation, because that is not an absence -- it is a warning
+that happens to fill a pane. The `unsandboxed` badge on the worktree row keeps
+its word for the same reason: the icon alone is a mark you have to have been
+taught, and it is the one thing on that card that must not be missed.
+
+### The vocabulary is in one file
+
+`icons.tsx` names every glyph the window uses, and nothing else imports
+`lucide-react`. That rule is what keeps an icon-led interface honest: an icon
+is now a *term*, and a term used in two panes has to be the same picture in
+both. A `RefreshCw` imported straight from the library in one pane beside a
+`RotateCw` in another would be two words for one idea, and there is no label
+beside it to correct the guess.
+
+The renames say which button a glyph sits on rather than what shape it is --
+`Stop`, `Store`, `Publish`, `Forget` -- so the day one is drawn better the
+change is a line in that file. `Fetch` and `Pull` are drawn differently on
+purpose, because both bring refs down and only one touches the working copy;
+`Push` and `Publish` likewise, because a branch the remote has never heard of
+is a different operation from one that is merely behind.
+
+Everything renders on one grid: 14 pixels, with a stroke of 1.25 *actual*
+pixels, set centrally by `LucideProvider` in `main.tsx`. The empty-state glyphs
+are the deliberate exception at 26 and 40 pixels, and they pass lucide's `size`
+prop rather than being resized in CSS -- `absoluteStrokeWidth` divides the
+stroke by the size at render time, so a `width: 26px` in a stylesheet scales a
+stroke computed for 14 and lands at 2.3 pixels: a bold icon in a window that
+has none.
 
 ## What it tells you without being asked
 
@@ -286,11 +403,17 @@ so there is nothing for an updater to fetch and no bar ever appears.
 
 ## The inbox
 
-**inbox** in the header is what your trackers say is assigned to you, read on
-the server with the credentials in its store — so this window shows a list and
-never holds a token. A row is a ticket; `start` turns it into a session with the
-task, the name and the branch already right, and the session remembers which
-ticket it came from, so publishing comments the pull request back onto it.
+The inbox icon in the header is what your trackers say is assigned to you, read
+on the server with the credentials in its store — so this window shows a list
+and never holds a token. A row is a ticket; the play button turns it into a
+session with the task, the name and the branch already right, and the session
+remembers which ticket it came from, so publishing comments the pull request
+back onto it.
+
+There is no count on that icon, and it is a decision rather than a gap: a badge
+would mean asking Jira, Azure DevOps and GitHub what is assigned to you on a
+timer, forever, for a number nobody is waiting on. The list is read when the
+screen is opened, which is when somebody has asked for it.
 
 A row carries a project chooser, because **a ticket does not know which
 repository it is about**: a Jira issue names a project and a work item names an
@@ -304,8 +427,8 @@ like having nothing assigned. [inbox.md](inbox.md) is the whole of it.
 
 ## Integrations
 
-**integrations** in the header is what the server holds on your sessions'
-behalf: the MCP servers and what each one is doing, the secret names it has, the
+The integrations icon in the header opens what the server holds on your
+sessions' behalf: the MCP servers and what each one is doing, the secret names it has, the
 trackers the inbox reads, and the skills this machine has pushed to it. Four
 things that used to be four procedures in a document -- a `docker run` line to
 copy, a `-e` argument in a shell history, a `[[tracker]]` table in a file on
@@ -313,9 +436,9 @@ another machine, a path in a config file that cannot reach your laptop.
 
 Every button there answers with the whole view, re-read, for the reason the git
 view does the same: they explain each other, and a container that will not start
-is usually a secret that is not there. A managed server has `start`, `restart`
-and `stop`; one of your own says `not ours to start`, because whoever runs it
-started it. A container that keeps exiting shows its own last output, which is
+is usually a secret that is not there. A managed server has start, restart and
+stop; one of your own says `not ours to start`, because whoever runs it started
+it. A container that keeps exiting shows its own last output, which is
 the only thing that ever says why -- and otherwise a `docker logs` on a machine
 you may not be sitting at.
 
@@ -343,8 +466,8 @@ directory. See [skills.md](skills.md).
 
 ## Settings
 
-**settings** in the header is two halves, and the split between them is the only
-structure the screen has -- because it is the only one that matters: **who owns
+The settings icon in the header opens two halves, and the split between them is
+the only structure the screen has -- because it is the only one that matters: **who owns
 the answer.**
 
 The top half writes the *server's* config file: the branch prefix, the base
@@ -644,7 +767,7 @@ only setting consistent with it. That equivalence would break if xterm's
 
 **And a third, which is the same zero metrics costing the opposite thing.** A
 form control takes its height from its line-height -- rows times that, for a
-textarea -- and `.dialog input { font: inherit }` hands it the `normal` the fix
+textarea -- and `font: inherit` on a form control hands it the `normal` the fix
 above put on the document, which this engine resolves from metrics it reports as
 zero. Every input and textarea in the window collapsed to a sliver with its text
 clipped through the middle: a three-row textarea 14 pixels high, a placeholder

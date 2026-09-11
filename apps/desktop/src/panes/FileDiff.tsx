@@ -14,6 +14,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import * as monaco from "monaco-editor/editor/editor.api";
 
 import { api, messageOf } from "../api";
+import { Empty, Waiting } from "../Empty";
+import { Forget, NotText } from "../icons";
 import type { Against } from "../gen/Against";
 import type { Comment } from "../gen/Comment";
 import type { FileDiff as Sides } from "../gen/FileDiff";
@@ -130,8 +132,9 @@ export function FileDiffPane({
   };
 
   if (error && !sides) return <p className="error">{error}</p>;
-  if (!sides) return <p className="loading">reading {path}…</p>;
-  if (sides.binary) return <p className="loading">{path} is binary</p>;
+  if (!sides) return <Waiting />;
+  // The path is on the tab above this pane, so the sentence loses it.
+  if (sides.binary) return <Empty icon={NotText} note="binary — nothing to diff" />;
 
   const mine = review.filter((c) => c.file === path);
 
@@ -178,7 +181,8 @@ export function FileDiffPane({
               <span className="at">line {c.line}</span>
               <span className="body">{c.body}</span>
               <button
-                className="quiet"
+                className="quiet-icon danger"
+                title={`remove the comment on line ${c.line}`}
                 onClick={() =>
                   api
                     .uncomment(server, name, c.id)
@@ -186,7 +190,7 @@ export function FileDiffPane({
                     .catch((e) => setError(messageOf(e)))
                 }
               >
-                remove
+                <Forget aria-label="remove this comment" />
               </button>
             </li>
           ))}

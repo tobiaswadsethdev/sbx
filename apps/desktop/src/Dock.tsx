@@ -19,12 +19,35 @@ import type { Against } from "./gen/Against";
 import type { Session } from "./gen/Session";
 import type { Usage } from "./gen/Usage";
 import { GitView } from "./GitView";
+import { Branch, Events, Files, Policy, Record } from "./icons";
 import { Facts } from "./panes/Facts";
 import { PolicyPane } from "./panes/Policy";
 import { EventsPane } from "./panes/Events";
 
-const VIEWS = ["files", "git", "events", "policy", "facts"] as const;
-type View = (typeof VIEWS)[number];
+/// The five panes, in the order the strip shows them.
+///
+/// A list of objects rather than a list of strings, because the strip no longer
+/// renders the string. The label is still here and still doing two jobs -- the
+/// tooltip and the accessible name -- it just is not drawn: five words across a
+/// sidebar that may be 280 pixels wide were five words competing with the
+/// filenames underneath them, and this is a strip you press once and then read
+/// past for an hour.
+///
+/// The glyphs are the panes' subjects and not five variations on a document:
+/// a tree, a branch, a pulse, a shield, an `i`. Two of them matter more than
+/// the others and are worth naming -- `Policy` is a shield because that is what
+/// the rules are, and `Events` is a pulse because the feed is the *evidence*
+/// that the shield is doing anything. Those two panes are the reason this
+/// product exists rather than an ADE built on git worktrees, and a pane nobody
+/// can find is a pane nobody reads.
+const VIEWS = [
+  { key: "files", label: "files", icon: Files },
+  { key: "git", label: "git", icon: Branch },
+  { key: "events", label: "events", icon: Events },
+  { key: "policy", label: "policy", icon: Policy },
+  { key: "facts", label: "facts", icon: Record },
+] as const;
+type View = (typeof VIEWS)[number]["key"];
 
 export function Dock({
   width,
@@ -51,10 +74,19 @@ export function Dock({
 
   return (
     <aside className="dock" style={{ width }}>
-      <nav className="dock-tabs">
-        {VIEWS.map((v) => (
-          <button key={v} className={v === view ? "on" : ""} onClick={() => setView(v)}>
-            {v}
+      <nav className="dock-tabs" aria-label="what is true about this worktree">
+        {VIEWS.map(({ key, label, icon: Mark }) => (
+          <button
+            key={key}
+            className={key === view ? "on" : ""}
+            // Which of five is showing, not a control held down -- the same
+            // distinction the header's destinations make.
+            aria-current={key === view ? "page" : undefined}
+            title={label}
+            aria-label={label}
+            onClick={() => setView(key)}
+          >
+            <Mark />
           </button>
         ))}
       </nav>

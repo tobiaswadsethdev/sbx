@@ -21,9 +21,22 @@ import type { NamedSecret } from "./gen/NamedSecret";
 import type { ConfiguredTracker } from "./gen/ConfiguredTracker";
 import type { Tracker } from "./gen/Tracker";
 import type { TrackerKind } from "./gen/TrackerKind";
-import { Close } from "./icons";
+import { Empty, Waiting } from "./Empty";
+import {
+  Forget,
+  Integrations as IntegrationsGlyph,
+  NoIntegrations,
+  Restart,
+  Secret as SecretGlyph,
+  Skill as SkillGlyph,
+  Start,
+  Stop,
+  Store,
+  Tracker as TrackerGlyph,
+} from "./icons";
+import { Screen } from "./Screen";
 
-export function IntegrationsDialog({
+export function IntegrationsScreen({
   server,
   onClose,
 }: {
@@ -49,12 +62,6 @@ export function IntegrationsDialog({
     };
   }, [server]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
   /// One action, its answer, and whatever went wrong with it.
   ///
   /// Every one of these returns the view, so this is also what keeps the screen
@@ -78,166 +85,159 @@ export function IntegrationsDialog({
   };
 
   return (
-    <div className="scrim" onMouseDown={onClose}>
-      <div className="dialog wide" onMouseDown={(e) => e.stopPropagation()}>
-        <header className="dialog-head">
-          <h2>Integrations</h2>
-          <button className="quiet" onClick={onClose}>
-            close
-          </button>
-        </header>
+    <Screen icon={IntegrationsGlyph} title="integrations" onClose={onClose}>
+      {error && <p className="error">{error}</p>}
+      {!view && !error && <Waiting />}
 
-        {error && <p className="error">{error}</p>}
-        {!view && !error && <p className="loading">asking the server…</p>}
-
-        {view && (
-          <>
-            <Section
-              title="mcp servers"
-              hint="Tools the agent can call. They run on the server, in their own containers, holding their own credentials — the sandbox is granted one endpoint each."
-            >
-              {view.mcp.length === 0 ? (
-                <p className="hint">
-                  None. An MCP server is an <code>[[mcp]]</code> table in the server's config file;
-                  Settings names the file it is reading.
-                </p>
-              ) : (
-                view.mcp.map((s) => (
-                  <McpRow
-                    key={s.name}
-                    status={s}
-                    busy={busy}
-                    onAction={(action) =>
-                      void act(`mcp:${s.name}`, () => api.mcp(server, s.name, action))
-                    }
-                  />
-                ))
-              )}
-              {/* The warning that used to live in a document nobody re-reads,
-                  at the moment somebody is looking at the thing it is about. */}
-              <p className="warn">
-                An MCP server is something the agent can do with your credentials. The gateway sees
-                every call as <code>POST /mcp</code>, so there is no finer rule than granting the
-                endpoint: a server that can transition Jira issues means a sandboxed agent can
-                transition Jira issues. Fine for Jira; a filesystem or Docker server would be a
-                straight way out of the sandbox.
-              </p>
-            </Section>
-
-            <Section
-              title="secrets"
-              hint="Held by the server and given to the containers above as environment. A value goes in and never comes back out — nothing here can show you one."
-            >
-              {view.secrets.length === 0 && <p className="hint">None stored, and none asked for.</p>}
-              {view.secrets.map((s) => (
-                <SecretRow
+      {view && (
+        <>
+          <Section
+            title="mcp servers"
+            hint="Tools the agent can call. They run on the server, in their own containers, holding their own credentials — the sandbox is granted one endpoint each."
+          >
+            {view.mcp.length === 0 ? (
+              <Empty
+                icon={NoIntegrations}
+                note="an [[mcp]] table in the server's config file adds one"
+              />
+            ) : (
+              view.mcp.map((s) => (
+                <McpRow
                   key={s.name}
-                  secret={s}
+                  status={s}
                   busy={busy}
-                  onSet={(value) =>
-                    void act(`secret:${s.name}`, () => api.secret(server, s.name, value))
-                  }
-                  onForget={() =>
-                    void act(`secret:${s.name}`, () => api.secret(server, s.name, null))
+                  onAction={(action) =>
+                    void act(`mcp:${s.name}`, () => api.mcp(server, s.name, action))
                   }
                 />
-              ))}
-              <NewSecret
-                busy={busy !== null}
-                onSet={(name, value) =>
-                  void act(`secret:${name}`, () => api.secret(server, name, value))
+              ))
+            )}
+            {/* The warning that used to live in a document nobody re-reads,
+                at the moment somebody is looking at the thing it is about. */}
+            <p className="warn">
+              An MCP server is something the agent can do with your credentials. The gateway sees
+              every call as <code>POST /mcp</code>, so there is no finer rule than granting the
+              endpoint: a server that can transition Jira issues means a sandboxed agent can
+              transition Jira issues. Fine for Jira; a filesystem or Docker server would be a
+              straight way out of the sandbox.
+            </p>
+          </Section>
+
+          <Section
+            title="secrets"
+            hint="Held by the server and given to the containers above as environment. A value goes in and never comes back out — nothing here can show you one."
+          >
+            {/* Nothing stored *and* nothing asking for anything, which is
+                the ordinary state of a server with no MCP container on it --
+                so the glyph alone, and no note. There is nothing to do about
+                it, and an empty state that invents an instruction is worse
+                than one that admits it has none. */}
+            {view.secrets.length === 0 && <Empty icon={SecretGlyph} />}
+            {view.secrets.map((s) => (
+              <SecretRow
+                key={s.name}
+                secret={s}
+                busy={busy}
+                onSet={(value) =>
+                  void act(`secret:${s.name}`, () => api.secret(server, s.name, value))
+                }
+                onForget={() =>
+                  void act(`secret:${s.name}`, () => api.secret(server, s.name, null))
                 }
               />
-            </Section>
+            ))}
+            <NewSecret
+              busy={busy !== null}
+              onSet={(name, value) =>
+                void act(`secret:${name}`, () => api.secret(server, name, value))
+              }
+            />
+          </Section>
 
-            <Section
-              title="trackers"
-              hint="Where the inbox gets its tickets. Read on the server with the credential it holds, so this window shows rows and never a token — and a session started from a ticket comments its pull request back onto it."
-            >
-              {view.trackers.length === 0 && (
-                <p className="hint">
-                  None, which is the only reason an inbox is ever empty for good. Add one and the
-                  inbox has something to read.
-                </p>
-              )}
-              {view.trackers.map((t) => (
-                <TrackerRow
-                  key={t.source.name}
-                  tracker={t}
-                  busy={busy}
-                  onForget={() =>
-                    void act(`tracker:${t.source.name}`, () =>
-                      api.forgetTracker(server, t.source.name),
-                    )
+          <Section
+            title="trackers"
+            hint="Where the inbox gets its tickets. Read on the server with the credential it holds, so this window shows rows and never a token — and a session started from a ticket comments its pull request back onto it."
+          >
+            {view.trackers.length === 0 && (
+              <Empty icon={TrackerGlyph} note="the inbox has nothing to read until one is added" />
+            )}
+            {view.trackers.map((t) => (
+              <TrackerRow
+                key={t.source.name}
+                tracker={t}
+                busy={busy}
+                onForget={() =>
+                  void act(`tracker:${t.source.name}`, () =>
+                    api.forgetTracker(server, t.source.name),
+                  )
+                }
+              />
+            ))}
+            <NewTracker
+              busy={busy !== null}
+              onAdd={(tracker, credential) =>
+                act(`tracker:${tracker.name}`, async () => {
+                  // The credential first, so the tracker is never in the file
+                  // for a moment with nothing behind the name it gives. Both
+                  // answer with the view; the second one is the one kept.
+                  if (credential.length > 0) {
+                    await api.secret(server, tracker.secret, credential);
                   }
-                />
-              ))}
-              <NewTracker
-                busy={busy !== null}
-                onAdd={(tracker, credential) =>
-                  act(`tracker:${tracker.name}`, async () => {
-                    // The credential first, so the tracker is never in the file
-                    // for a moment with nothing behind the name it gives. Both
-                    // answer with the view; the second one is the one kept.
-                    if (credential.length > 0) {
-                      await api.secret(server, tracker.secret, credential);
+                  return api.addTracker(server, tracker);
+                })
+              }
+            />
+          </Section>
+
+          <Section
+            title="skills"
+            hint="Copied into every new session. The server keeps a library of what this machine has pushed to it; the originals stay here, and pushing again is how an edit reaches the next session."
+          >
+            {view.configured_skills.length > 0 && (
+              <p className="hint">
+                From the server's own config file: {view.configured_skills.join(", ")}
+              </p>
+            )}
+            {view.skills.length === 0 ? (
+              <Empty icon={SkillGlyph} />
+            ) : (
+              view.skills.map((s) => (
+                <div key={s.name} className="row">
+                  <span className="row-name">{s.name}</span>
+                  <span className="hint" title={s.origin}>
+                    {s.origin}
+                  </span>
+                  <button
+                    className="quiet-icon danger"
+                    disabled={busy !== null}
+                    title="remove it from the server (your own copy stays)"
+                    onClick={() =>
+                      void act(`skill:${s.name}`, () => api.forgetSkill(server, s.name))
                     }
-                    return api.addTracker(server, tracker);
-                  })
-                }
-              />
-            </Section>
-
-            <Section
-              title="skills"
-              hint="Copied into every new session. The server keeps a library of what this machine has pushed to it; the originals stay here, and pushing again is how an edit reaches the next session."
-            >
-              {view.configured_skills.length > 0 && (
-                <p className="hint">
-                  From the server's own config file: {view.configured_skills.join(", ")}
-                </p>
-              )}
-              {view.skills.length === 0 ? (
-                <p className="hint">Nothing uploaded yet.</p>
-              ) : (
-                view.skills.map((s) => (
-                  <div key={s.name} className="row">
-                    <span className="row-name">{s.name}</span>
-                    <span className="hint" title={s.origin}>
-                      {s.origin}
-                    </span>
-                    <button
-                      className="quiet"
-                      disabled={busy !== null}
-                      title="remove it from the server (your own copy stays)"
-                      onClick={() =>
-                        void act(`skill:${s.name}`, () => api.forgetSkill(server, s.name))
-                      }
-                    >
-                      <Close aria-label="forget" />
-                    </button>
-                  </div>
-                ))
-              )}
-              <div className="actions">
-                <span className="hint">
-                  {mine.length > 0
-                    ? `${mine.length} here: ${mine.join(", ")}`
-                    : "no skills in ~/.claude/skills on this machine"}
-                </span>
-                <button
-                  className="go"
-                  disabled={busy !== null || mine.length === 0}
-                  onClick={() => void act("upload", () => api.uploadSkills(server))}
-                >
-                  {busy === "upload" ? "uploading…" : "push mine to the server"}
-                </button>
-              </div>
-            </Section>
-          </>
-        )}
-      </div>
-    </div>
+                  >
+                    <Forget aria-label={`forget ${s.name}`} />
+                  </button>
+                </div>
+              ))
+            )}
+            <div className="actions">
+              <span className="hint">
+                {mine.length > 0
+                  ? `${mine.length} here: ${mine.join(", ")}`
+                  : "no skills in ~/.claude/skills on this machine"}
+              </span>
+              <button
+                className="go"
+                disabled={busy !== null || mine.length === 0}
+                onClick={() => void act("upload", () => api.uploadSkills(server))}
+              >
+                {busy === "upload" ? "uploading…" : "push mine to the server"}
+              </button>
+            </div>
+          </Section>
+        </>
+      )}
+    </Screen>
   );
 }
 
@@ -251,7 +251,7 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="integration">
+    <section className="panel">
       <h3>{title}</h3>
       <p className="hint">{hint}</p>
       {children}
@@ -290,23 +290,38 @@ function McpRow({
               what to press after changing a secret. */}
           {status.state === "running" ? (
             <>
-              <button className="quiet" disabled={working} onClick={() => onAction("restart")}>
-                restart
+              <button
+                className="quiet-icon"
+                disabled={working}
+                title={`restart ${status.name} (recreates it from the catalog)`}
+                onClick={() => onAction("restart")}
+              >
+                {working ? <span className="spin" /> : <Restart aria-label="restart" />}
               </button>
-              <button className="quiet" disabled={working} onClick={() => onAction("stop")}>
-                stop
+              <button
+                className="quiet-icon"
+                disabled={working}
+                title={`stop ${status.name}`}
+                onClick={() => onAction("stop")}
+              >
+                <Stop aria-label="stop" />
               </button>
             </>
           ) : (
-            <button className="quiet" disabled={working} onClick={() => onAction("start")}>
-              {working ? "starting…" : "start"}
+            <button
+              className="quiet-icon"
+              disabled={working}
+              title={`start ${status.name}`}
+              onClick={() => onAction("start")}
+            >
+              {working ? <span className="spin" /> : <Start aria-label="start" />}
             </button>
           )}
         </span>
       ) : (
         // Nothing to press: whoever runs it started it, and this server has no
         // say in whether it is up.
-        <span className="row-actions hint">not ours to start</span>
+        <span className="row-actions muted">not ours to start</span>
       )}
       {status.problem && <p className="problem">{status.problem}</p>}
       {/* The container's own last words, which are the only thing that ever
@@ -345,18 +360,24 @@ function SecretRow({
           onChange={(e) => setValue(e.target.value)}
         />
         <button
-          className="quiet"
+          className="quiet-icon"
           disabled={working || value.trim().length === 0}
+          title={secret.set ? `replace ${secret.name}` : `store ${secret.name}`}
           onClick={() => {
             onSet(value);
             setValue("");
           }}
         >
-          store
+          <Store aria-label="store" />
         </button>
         {secret.set && (
-          <button className="quiet" disabled={working} onClick={onForget} title="forget it">
-            <Close aria-label="forget" />
+          <button
+            className="quiet-icon danger"
+            disabled={working}
+            onClick={onForget}
+            title={`forget ${secret.name}`}
+          >
+            <Forget aria-label={`forget ${secret.name}`} />
           </button>
         )}
       </span>
@@ -394,15 +415,16 @@ function NewSecret({
         onChange={(e) => setValue(e.target.value)}
       />
       <button
-        className="quiet"
+        className="quiet-icon"
         disabled={busy || !ready}
+        title="store it under that name"
         onClick={() => {
           onSet(name.trim(), value);
           setName("");
           setValue("");
         }}
       >
-        store
+        <Store aria-label="store" />
       </button>
     </div>
   );
@@ -469,12 +491,12 @@ function TrackerRow({
       </span>
       <span className="row-actions">
         <button
-          className="quiet"
+          className="quiet-icon danger"
           disabled={working}
           title="remove it from the server's config file (the secret stays)"
           onClick={onForget}
         >
-          <Close aria-label="forget" />
+          <Forget aria-label={`forget ${t.name}`} />
         </button>
       </span>
       {/* The entry is in the file and the credential is not, which is a

@@ -24,6 +24,8 @@ import "monaco-editor/basic-languages/monaco.contribution";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 
 import { api, messageOf } from "../api";
+import { Empty, Waiting } from "../Empty";
+import { NotText } from "../icons";
 import type { FileText } from "../gen/FileText";
 
 (self as unknown as { MonacoEnvironment: unknown }).MonacoEnvironment = {
@@ -89,9 +91,12 @@ export function FilePane({
   }, [file, path]);
 
   if (error) return <p className="error">{error}</p>;
-  if (!file) return <p className="loading">reading {path}…</p>;
+  if (!file) return <Waiting />;
+  // The path is already on the tab this pane is under, so it goes from the
+  // sentence: what is worth saying is that there is nothing to show and how
+  // big the thing being withheld is.
   if (file.binary) {
-    return <p className="loading">{path} is binary ({file.bytes} bytes)</p>;
+    return <Empty icon={NotText} note={`binary — ${file.bytes} bytes`} />;
   }
 
   return (

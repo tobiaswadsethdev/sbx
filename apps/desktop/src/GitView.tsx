@@ -16,7 +16,19 @@ import { useConfirm } from "./Confirm";
 import type { Against } from "./gen/Against";
 import type { Change } from "./gen/Change";
 import type { ChangedFile } from "./gen/ChangedFile";
-import { FileIcon, Minus, Plus, Refresh, Revert } from "./icons";
+import { Empty, Waiting } from "./Empty";
+import {
+  Clean,
+  Fetch,
+  FileIcon,
+  Minus,
+  Plus,
+  Publish,
+  Pull,
+  Push,
+  Refresh,
+  Revert,
+} from "./icons";
 
 /// One letter per change, which is what every git client uses and what fits
 /// beside a filename.
@@ -69,7 +81,7 @@ export function GitView({
   };
 
   if (error && !answer) return <p className="error">{error}</p>;
-  if (!answer) return <p className="loading">reading git…</p>;
+  if (!answer) return <Waiting />;
 
   const { status } = answer;
   const nothing = status.staged.length === 0 && status.unstaged.length === 0;
@@ -92,18 +104,55 @@ export function GitView({
         )}
       </header>
 
+      {/* Four operations and four glyphs, where there used to be three words
+          and an icon. The words were the shortest part of this pane and still
+          worth replacing, because they were three *nouns of git* -- the one
+          vocabulary in the window that every reader already knows as a picture
+          from every other client they have used.
+
+          `push` and `publish` stay two different glyphs, which is the whole
+          reason this is not one button with a changing tooltip: a branch the
+          remote has never heard of is a different operation from a branch that
+          is behind, and the pane says so above in `no upstream`. A cloud going
+          up is a first push; an arrow at a line is every one after it. */}
       <div className="git-ops">
-        <button disabled={busy} onClick={() => void act({ do: "fetch" })}>
-          fetch
+        <button
+          className="op"
+          disabled={busy}
+          title="fetch — bring the remote's refs down without touching the working copy"
+          onClick={() => void act({ do: "fetch" })}
+        >
+          <Fetch aria-label="fetch" />
         </button>
-        <button disabled={busy} onClick={() => void act({ do: "pull" })}>
-          pull
+        <button
+          className="op"
+          disabled={busy}
+          title="pull"
+          onClick={() => void act({ do: "pull" })}
+        >
+          <Pull aria-label="pull" />
         </button>
-        <button disabled={busy} onClick={() => void act({ do: "push" })}>
-          {status.upstream ? "push" : "publish"}
+        <button
+          className="op"
+          disabled={busy}
+          title={
+            status.upstream ? "push" : "publish — this branch is not on the remote yet"
+          }
+          onClick={() => void act({ do: "push" })}
+        >
+          {status.upstream ? (
+            <Push aria-label="push" />
+          ) : (
+            <Publish aria-label="publish" />
+          )}
         </button>
-        <button className="quiet" disabled={busy} onClick={load} title="refresh">
-          <Refresh aria-label="refresh" />
+        <button
+          className="quiet-icon refresh"
+          disabled={busy}
+          onClick={load}
+          title="re-read git"
+        >
+          <Refresh aria-label="re-read git" />
         </button>
       </div>
 
@@ -138,7 +187,11 @@ export function GitView({
         }
       />
 
-      {nothing && <p className="loading">nothing changed</p>}
+      {/* A tick rather than `nothing changed`, and it is the only absence in
+          the window drawn in the colour that means "it passed": every other
+          empty pane is neutral because empty is neither good nor bad, and a
+          clean working copy is the one case where it is an answer. */}
+      {nothing && <Empty icon={Clean} tone="ok" />}
 
       <div className="commit">
         <textarea

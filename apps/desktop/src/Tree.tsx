@@ -26,6 +26,7 @@ import { useState } from "react";
 import type { DiffStat } from "./gen/DiffStat";
 import type { Project } from "./gen/Project";
 import type { Session } from "./gen/Session";
+import { Empty } from "./Empty";
 import { Branch, Chevron, Forget, Plus, StateDot, Unsandboxed } from "./icons";
 
 export type Group = {
@@ -187,8 +188,12 @@ export function Tree({
                 runs down. */}
             {open && (
               <div className="group-body">
+                {/* A branch glyph on the row a worktree would occupy, and
+                    no words: `no worktrees yet` was three of them restating
+                    the `0` already sitting in the group's own header two
+                    lines above. */}
                 {g.worktrees.length === 0 ? (
-                  <p className="empty-group">no worktrees yet</p>
+                  <Empty size="row" icon={Branch} />
                 ) : (
                   g.worktrees.map((s) => (
                     <Worktree
