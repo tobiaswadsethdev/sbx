@@ -14,7 +14,7 @@
 //! `save` alone is atomic (temp file and rename); it is the *read* before it that
 //! has to be inside the same lock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -162,6 +162,11 @@ pub struct Reconciliation {
     pub orphans: Vec<String>,
     /// Sessions whose sandbox has disappeared.
     pub dead: Vec<String>,
+    /// Destroyed sessions whose sandbox is still there. Their tombstones are
+    /// still earning their keep, and [`crate::removed::keep_only`] is what reads
+    /// this: anything tombstoned and *not* named here has finally gone, so the
+    /// tombstone can go with it.
+    pub lingering: Vec<String>,
 }
 
 /// How long a record may sit in `creating` with no sandbox behind it.
@@ -181,7 +186,17 @@ const CREATING_GRACE: u64 = 15 * 60;
 /// evidence is unambiguous: an absent sandbox, an explicitly failed one, or a
 /// sandbox that has come back after being marked dead. Anything else is left
 /// alone, because a create may still be in flight.
-pub fn reconcile(cached: Vec<Session>, live: &[Sandbox]) -> Reconciliation {
+///
+/// `removed` is the set of names [`crate::removed`] holds -- sessions destroyed
+/// whose sandbox the gateway has not finished taking away. None of them is an
+/// orphan, whatever phase it is reporting: adopting one writes the record back
+/// that `destroy` just dropped, and the session someone removed returns to the
+/// list a second later with its old task and its old branch.
+pub fn reconcile(
+    cached: Vec<Session>,
+    live: &[Sandbox],
+    removed: &BTreeSet<String>,
+) -> Reconciliation {
     let by_name: BTreeMap<&str, &Sandbox> = live.iter().map(|s| (s.name.as_str(), s)).collect();
     let now = session::now_epoch();
 
@@ -223,17 +238,29 @@ pub fn reconcile(cached: Vec<Session>, live: &[Sandbox]) -> Reconciliation {
 
     let known: Vec<&str> = out.sessions.iter().map(|s| s.name.as_str()).collect();
     for sb in live {
+        let Some(name) = sb.labels.get(LABEL_SESSION) else {
+            continue;
+        };
+        // A session someone destroyed, whose sandbox the gateway is still
+        // carrying. Never an orphan -- see the doc comment -- and worth saying
+        // so, because "still there" is what keeps its tombstone alive.
+        if removed.contains(name.as_str()) {
+            out.lingering.push(name.clone());
+            continue;
+        }
         // Not a sandbox on its way out. Deletion is asynchronous, so a session
         // destroyed a moment ago is still listed for a while -- and with its
         // record already dropped it looks exactly like an orphan worth adopting.
         // Reading its metadata then fails with "sandbox not found", which is a
         // frightening thing to print for a deletion that worked.
+        //
+        // Kept as well as the tombstone above rather than replaced by it: this
+        // one also covers a sandbox removed by something that is not this tool,
+        // which leaves no tombstone at all.
         if sb.phase == Phase::Deleting {
             continue;
         }
-        if let Some(name) = sb.labels.get(LABEL_SESSION)
-            && !known.contains(&name.as_str())
-        {
+        if !known.contains(&name.as_str()) {
             out.orphans.push(name.clone());
         }
     }
@@ -270,6 +297,13 @@ mod tests {
         let mut s = Session::new(name.into(), "repo".into(), "task".into());
         s.state = state;
         s
+    }
+
+    /// [`super::reconcile`] with nothing tombstoned, which is what every case
+    /// below except the two about tombstones is about. Shadows the real one so
+    /// those cases stay one argument wide.
+    fn reconcile(cached: Vec<Session>, live: &[Sandbox]) -> Reconciliation {
+        super::reconcile(cached, live, &BTreeSet::new())
     }
 
     /// The bug this lock exists for, as the property that prevents it: a writer
@@ -457,6 +491,40 @@ mod tests {
         let live = [sandbox("sbx-weird", Phase::Ready, None)];
         let r = reconcile(vec![], &live);
         assert!(r.orphans.is_empty());
+    }
+
+    #[test]
+    fn a_removed_session_is_never_adopted_back() {
+        // The bug this pair of tests exists for. `destroy` drops the record and
+        // the gateway takes its time; the sandbox is still listed, still
+        // labelled, and no longer in the cache -- which is the exact shape of an
+        // orphan. Adopting it put the removed session straight back in the list,
+        // so creating a fresh one under the same name was then refused as a
+        // duplicate: removing a session and starting it again looked like sbx
+        // insisting on resuming the old one.
+        //
+        // `Ready` rather than `Deleting` on purpose: `Deleting` was already
+        // skipped, and the phase the gateway reports in the seconds after a
+        // delete is not something this side gets to decide.
+        let live = [sandbox("sbx-a", Phase::Ready, Some("a"))];
+        let removed = BTreeSet::from(["a".to_string()]);
+
+        let r = super::reconcile(vec![], &live, &removed);
+
+        assert!(r.orphans.is_empty(), "{:?}", r.orphans);
+        assert_eq!(r.lingering, vec!["a"], "its tombstone is still needed");
+    }
+
+    #[test]
+    fn a_sandbox_that_has_finally_gone_stops_lingering() {
+        // The other half: nothing at the gateway means the tombstone has done
+        // its job, and `removed::keep_only` reads the empty list as permission
+        // to drop it.
+        let removed = BTreeSet::from(["a".to_string()]);
+
+        let r = super::reconcile(vec![], &[], &removed);
+
+        assert!(r.lingering.is_empty());
     }
 
     /// A directory of its own per test, removed on drop so a failing assertion

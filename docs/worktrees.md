@@ -101,13 +101,28 @@ your own tmux sessions showing up as a session's shells.
 
 `--force`, because the point of removing a session is removing it: git refuses a
 worktree with modifications, and a worktree with modifications is what every
-session that did any work is. **The branch is left alone.** It is where the
-commits are, and this is not the command for deleting work.
+session that did any work is.
 
-A session whose record the cache has lost cannot be removed this way — unlike a
-sandbox, whose name is derived from the session's, a worktree's directory is not
-recoverable from the name once a root has been reconfigured. `sbxd rm` drops the
-record and says so; the directory is yours to remove.
+**The branch goes too, but only when there is nothing on it.** `git branch -d`
+decides: a branch merged into its base or its upstream is part of the session and
+goes with it, and one carrying commits of its own is refused and left exactly
+where it was. Those commits may be the only copy, and this is not the command for
+deleting work.
+
+Leaving it unconditionally is what this used to do, and it is why removing a
+session and starting a fresh one under the same name resumed the old one: seeding
+checks out an existing `sbx/<name>` rather than cutting a new one, so the new
+session inherited the old branch, old commits and all. If you want the name back
+for a branch that git refused to delete, delete the branch yourself.
+
+The rest of what the name owns goes with it as well: the record, the kept events,
+and any unsent review comments.
+
+A session whose record the cache has lost is looked for where the naming
+convention would have put it, `<root>/<name>`. One created under a *different*
+configured root is the case the convention cannot find — a worktree's directory is
+not recoverable from the name once a root has been reconfigured — and there
+`sbxd rm` drops the record and says so; the directory is yours to remove.
 
 ## What is missing
 

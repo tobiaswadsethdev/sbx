@@ -149,6 +149,26 @@ pub fn clear(session: &str) -> Result<(), String> {
     }
 }
 
+/// Drop a destroyed session's unsent review.
+///
+/// The same file as [`clear`] and deliberately not the same function: that one
+/// is the last step of delivering a review and its failure is worth returning,
+/// this one is part of removing a session and its failure is not -- the session
+/// has gone either way. Mirrors [`crate::events::forget_kept`], which is the
+/// other thing a session's name owns after the session itself has stopped
+/// existing.
+///
+/// Left behind, this outlived the session: a new session taking the name
+/// inherited the old one's comments, and the next review sent handed its agent
+/// notes on a diff it had never produced.
+pub fn forget(session: &str) {
+    forget_at(&path(session));
+}
+
+pub fn forget_at(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
 /// The review as one message for the agent.
 ///
 /// Grouped by file and in line order, because that is how it will be acted on;
@@ -276,6 +296,25 @@ mod tests {
             excerpt: "+ something".into(),
             body: body.into(),
         }
+    }
+
+    /// Forgetting is what destroying a session does with the review it never
+    /// sent. Left behind, the next session to take the name inherited it.
+    #[test]
+    fn a_forgotten_review_leaves_nothing_for_the_next_session_of_that_name() {
+        let path = scratch("forget");
+        add_at(&path, draft("a.rs", 1, "not sent")).unwrap();
+        assert_eq!(list_at(&path).len(), 1);
+
+        forget_at(&path);
+
+        assert!(list_at(&path).is_empty());
+        assert!(!path.exists(), "the file goes, not just its contents");
+        // Twice is the same as once: two clients removing one session should
+        // both end up with it gone.
+        forget_at(&path);
+
+        let _ = fs::remove_dir_all(path.parent().unwrap());
     }
 
     /// A review survives being written and read back, which is the whole reason

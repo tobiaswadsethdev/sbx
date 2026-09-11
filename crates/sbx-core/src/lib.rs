@@ -37,6 +37,7 @@ pub mod pane;
 pub mod policy;
 pub mod projects;
 pub mod publish;
+pub mod removed;
 pub mod repos;
 pub mod secrets;
 pub mod seed;
