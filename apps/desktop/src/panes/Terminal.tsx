@@ -12,12 +12,58 @@
 // two pixels short of the top.
 
 import { useEffect, useRef } from "react";
-import { Terminal as Xterm } from "@xterm/xterm";
+import { Terminal as Xterm, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 
 import { withUsableFontMetrics } from "../charSize";
 import { close, decodeBytes, encodeBytes, nextChannelId, open, terminal } from "../stream";
+
+/// Which custom property each of xterm's colours comes from, and what to use if
+/// the stylesheet has not loaded. The emulator paints its own surface, so these
+/// have to agree with `style.css` -- and the fallbacks are only for the case
+/// where there is nothing to agree with.
+const PALETTE = {
+  background: ["--sunken", "#0a0a0a"],
+  foreground: ["--text", "#fafafa"],
+  // No accent to borrow: the window's hues mean "working", "needs you", "good"
+  // and "bad", and a cursor is none of those. Near-white on near-black, which
+  // is how everything else in the window takes emphasis.
+  cursor: ["--text", "#fafafa"],
+  scrollbarSliderBackground: ["--line-strong", "rgba(255, 255, 255, 0.15)"],
+  scrollbarSliderHoverBackground: ["--dim", "#a1a1a1"],
+  scrollbarSliderActiveBackground: ["--dim", "#a1a1a1"],
+} satisfies Record<string, [string, string]>;
+
+/// The terminal's colours, read from `style.css` rather than written down here.
+///
+/// They *were* written down here, and then the palette moved out from under
+/// them: `--bg-sunken: #0e0e12` became `--sunken: #0a0a0a`, and the literal
+/// stayed. Every terminal in the window sat as a faintly blue rectangle inside
+/// a frame of a black belonging to no palette at all. A custom property cannot
+/// drift the way a copy of one can.
+///
+/// Read as an element's resolved `color` rather than straight off the property,
+/// because the property's *value* is whatever style.css wrote -- the lines are
+/// `rgb(255 255 255 / 0.15)`, modern space-separated syntax -- and xterm parses
+/// `#rgb[a]`, `#rrggbb[aa]`, `rgb()` and `rgba()` and *throws* on anything else
+/// it cannot round-trip through a canvas opaquely. Resolving the property as a
+/// colour hands back the serialised form, which is always one xterm accepts.
+function palette(): ITheme {
+  const probe = document.createElement("span");
+  probe.style.display = "none";
+  document.body.appendChild(probe);
+  try {
+    return Object.fromEntries(
+      Object.entries(PALETTE).map(([key, [property, fallback]]) => {
+        probe.style.color = `var(${property}, ${fallback})`;
+        return [key, getComputedStyle(probe).color];
+      }),
+    );
+  } finally {
+    probe.remove();
+  }
+}
 
 export function TerminalPane({
   server,
@@ -44,9 +90,10 @@ export function TerminalPane({
       // and a family it cannot resolve measures zero.
       fontFamily: 'ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace',
       fontSize: 13,
-      // Matching style.css, because the emulator paints its own background and
-      // would otherwise sit as a black rectangle inside a dark grey pane.
-      theme: { background: "#0e0e12", foreground: "#d6d6dd", cursor: "#e9c46a" },
+      // Taken from style.css, because the emulator paints its own background
+      // and would otherwise sit as a rectangle of some other colour inside the
+      // pane. See `palette`.
+      theme: palette(),
       // The sandbox's tmux keeps the scrollback that matters; this is just what
       // the pane can scroll back through without asking for it again.
       scrollback: 5000,
