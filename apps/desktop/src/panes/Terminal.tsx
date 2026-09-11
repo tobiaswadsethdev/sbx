@@ -12,57 +12,65 @@
 // two pixels short of the top.
 
 import { useEffect, useRef } from "react";
-import { Terminal as Xterm, type ITheme } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
+import { Terminal as Xterm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 
 import { withUsableFontMetrics } from "../charSize";
+import { palette } from "../palette";
 import { close, decodeBytes, encodeBytes, nextChannelId, open, terminal } from "../stream";
 
-/// Which custom property each of xterm's colours comes from, and what to use if
-/// the stylesheet has not loaded. The emulator paints its own surface, so these
-/// have to agree with `style.css` -- and the fallbacks are only for the case
-/// where there is nothing to agree with.
-const PALETTE = {
+/// Which custom property each of xterm's colours comes from, and what to fall
+/// back to. See `palette.ts` for why this is resolved rather than written down.
+const THEME = {
   background: ["--sunken", "#0a0a0a"],
   foreground: ["--text", "#fafafa"],
   // No accent to borrow: the window's hues mean "working", "needs you", "good"
   // and "bad", and a cursor is none of those. Near-white on near-black, which
   // is how everything else in the window takes emphasis.
   cursor: ["--text", "#fafafa"],
-  scrollbarSliderBackground: ["--line-strong", "rgba(255, 255, 255, 0.15)"],
-  scrollbarSliderHoverBackground: ["--dim", "#a1a1a1"],
-  scrollbarSliderActiveBackground: ["--dim", "#a1a1a1"],
+  // Nothing for the scrollbar, because this pane does not draw one -- see
+  // style.css. Three colours for a slider that is `display: none` would be
+  // three more things to keep in step with a palette for no pixels at all.
 } satisfies Record<string, [string, string]>;
 
-/// The terminal's colours, read from `style.css` rather than written down here.
+/// How many characters fit in the pane, across and down.
 ///
-/// They *were* written down here, and then the palette moved out from under
-/// them: `--bg-sunken: #0e0e12` became `--sunken: #0a0a0a`, and the literal
-/// stayed. Every terminal in the window sat as a faintly blue rectangle inside
-/// a frame of a black belonging to no palette at all. A custom property cannot
-/// drift the way a copy of one can.
+/// This is `FitAddon`'s job and it is not used for it, because of one line in
+/// it: the width it fits into is the pane's *minus a scrollbar's*, always, on
+/// the assumption that the scrollbar sits beside the text. This one does not --
+/// xterm 6 draws it as an element positioned over the right of the screen, and
+/// it fades out when the pointer is elsewhere. So the fourteen pixels were being
+/// held open for something that was never going to occupy them, and the agent's
+/// screen was fourteen pixels narrower than the pane for it. Which is invisible
+/// until the agent draws a rule across its own full width -- and then it is a
+/// line that stops short of an edge it is plainly meant to reach.
 ///
-/// Read as an element's resolved `color` rather than straight off the property,
-/// because the property's *value* is whatever style.css wrote -- the lines are
-/// `rgb(255 255 255 / 0.15)`, modern space-separated syntax -- and xterm parses
-/// `#rgb[a]`, `#rrggbb[aa]`, `rgb()` and `rgba()` and *throws* on anything else
-/// it cannot round-trip through a canvas opaquely. Resolving the property as a
-/// colour hands back the serialised form, which is always one xterm accepts.
-function palette(): ITheme {
-  const probe = document.createElement("span");
-  probe.style.display = "none";
-  document.body.appendChild(probe);
-  try {
-    return Object.fromEntries(
-      Object.entries(PALETTE).map(([key, [property, fallback]]) => {
-        probe.style.color = `var(${property}, ${fallback})`;
-        return [key, getComputedStyle(probe).color];
-      }),
-    );
-  } finally {
-    probe.remove();
-  }
+/// The cell is measured off what xterm has already drawn rather than asked for:
+/// the screen element is exactly `cols` by `rows` cells, so dividing gives the
+/// cell without reaching into `_core` for the render service, which is the
+/// private API `FitAddon` carries a `TODO` about. Before the first render the
+/// grid is xterm's default 80x24 and the screen has a size, so this holds from
+/// the first call.
+///
+/// Up to one cell is still left over at the right and the bottom: a grid cannot
+/// draw a fraction of a column, and rounding up would clip one instead. That
+/// residue is the terminal's, not the pane's.
+function gridFor(element: HTMLElement, xterm: Xterm): { cols: number; rows: number } | null {
+  const screen = element.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen) return null;
+
+  const cell = { width: screen.clientWidth / xterm.cols, height: screen.clientHeight / xterm.rows };
+  if (!(cell.width > 0) || !(cell.height > 0)) return null;
+
+  const pane = element.getBoundingClientRect();
+  if (!(pane.width > 0) || !(pane.height > 0)) return null;
+
+  // The same floors and the same minimums as `FitAddon`: a terminal of zero
+  // columns is not a smaller terminal, it is one that cannot be written to.
+  return {
+    cols: Math.max(2, Math.floor(pane.width / cell.width)),
+    rows: Math.max(1, Math.floor(pane.height / cell.height)),
+  };
 }
 
 export function TerminalPane({
@@ -93,25 +101,24 @@ export function TerminalPane({
       // Taken from style.css, because the emulator paints its own background
       // and would otherwise sit as a rectangle of some other colour inside the
       // pane. See `palette`.
-      theme: palette(),
+      theme: palette(THEME),
       // The sandbox's tmux keeps the scrollback that matters; this is just what
       // the pane can scroll back through without asking for it again.
       scrollback: 5000,
     });
-    const fit = new FitAddon();
-    xterm.loadAddon(fit);
     withUsableFontMetrics(element, () => xterm.open(element));
 
     const refit = () => {
-      try {
-        fit.fit();
-      } catch {
-        // A pane with no size yet -- a tab that is not on screen -- throws
-        // rather than returning. Not a failure worth showing.
+      const size = gridFor(element, xterm);
+      // A pane with no size yet -- a tab that is not on screen -- measures
+      // nothing. Not a failure, and not worth resizing to.
+      if (!size) return;
+      if (size.cols !== xterm.cols || size.rows !== xterm.rows) {
+        xterm.resize(size.cols, size.rows);
       }
     };
 
-    // After the fonts and after a layout: `fit` measures the element, and
+    // After the fonts and after a layout: `refit` measures the element, and
     // immediately after `open` the browser has laid out neither. Measuring
     // early leaves the default 80x24, which is then what the *server* sizes its
     // pty to -- the agent's screen comes back wrapped to eighty columns inside

@@ -761,11 +761,30 @@ main { display: flex; flex: 1; min-height: 0; }
    rather than removed, and `hidden` alone loses to `display: flex`. */
 .tab-body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 16px; }
 .tab-body[hidden] { display: none; }
-.tab-body:has(> .terminal) { padding: 0; overflow: hidden; }
+
+/* The three panes that are a whole surface rather than something laid out on
+   one: the terminal, a file, a diff. Each paints to its own edges and scrolls
+   itself, so the padding the other tabs want is a frame drawn around something
+   that already fills its frame -- and worse than decoration, because both
+   editors take their own background from a theme. The strip of pane showing
+   through was the seam where those two colours met, and it is the reason the
+   drift in `palette.ts` was visible at all rather than merely wrong. */
+.tab-body:has(> .terminal),
+.tab-body:has(> .file),
+.tab-body:has(> .filediff) { padding: 0; overflow: hidden; }
 
 /* the file pane */
 .file { display: flex; flex-direction: column; height: 100%; }
-.file .monaco { flex: 1; min-height: 0; border-radius: var(--r-md); overflow: hidden; }
+/* The one piece of chrome this pane has, and the same rule as the diff's
+   header: the pane no longer insets itself, so anything that is a sentence
+   rather than a surface carries its own. */
+.file .notice { margin: 0; padding: 14px 16px 8px; color: var(--dim); flex: none; }
+/* Square, and flush. A radius here rounded the *editor* off inside a pane with
+   corners of its own, so the two disagreed by eight pixels at each one and the
+   pane showed through the gap. Nothing in this window rounds a surface that
+   reaches its container's edges -- the radii are for cards and controls, which
+   are objects sitting *on* a surface. */
+.file .monaco { flex: 1; min-height: 0; overflow: hidden; }
 
 /* ------------------------------------------------------------------------- */
 /* the splitters: the draggable edge of each sidebar                         */
@@ -1089,21 +1108,26 @@ main { display: flex; flex: 1; min-height: 0; }
 /* ------------------------------------------------------------------------- */
 
 .filediff { display: flex; flex-direction: column; height: 100%; }
+/* The editor reaches the pane's edges; the chrome around it does not. `.tab-body`
+   used to inset the whole pane, which is what put a strip of surface between the
+   editor and every edge -- so the inset moves here, onto the things that are
+   text on a surface rather than a surface. The editor keeps nothing. */
 .filediff > header {
   display: flex;
   gap: 12px;
-  padding: 0 0 8px;
+  padding: 14px 16px 8px;
   flex: none;
 }
 .filediff .path { overflow-wrap: anywhere; font-family: var(--font-mono); font-size: 12px; }
 .filediff .sides { color: var(--dim); margin-left: auto; white-space: nowrap; font-size: 12px; }
-.filediff .monaco { flex: 1; min-height: 220px; border-radius: var(--r-md); overflow: hidden; }
+.filediff .monaco { flex: 1; min-height: 220px; overflow: hidden; }
 /* A commented line, marked where Monaco will let us mark one. Neutral now
    rather than amber: the mark says "there is a comment here", and the comment
    is not a warning. */
 .commented-line { background: rgb(255 255 255 / 0.06); }
 .commented-glyph { background: var(--dim); width: 3px !important; margin-left: 3px; }
-.filediff .composer, .diff .composer { display: flex; gap: 8px; padding: 8px 0 0; }
+.filediff .composer { display: flex; gap: 8px; padding: 8px 16px 14px; }
+.diff .composer { display: flex; gap: 8px; padding: 8px 0 0; }
 .filediff .composer textarea {
   flex: 1;
   background: var(--sunken);
@@ -1128,7 +1152,7 @@ main { display: flex; flex: 1; min-height: 0; }
   transition: background-color 150ms, color 150ms;
 }
 .filediff .quiet:hover, .diff .quiet:hover { background: var(--hover); color: var(--text); }
-.filediff .comments { list-style: none; margin: 10px 0 0; padding: 0; flex: none; }
+.filediff .comments { list-style: none; margin: 0; padding: 10px 16px 14px; flex: none; }
 .filediff .comments li {
   display: flex;
   gap: 8px;
@@ -1734,36 +1758,45 @@ main { display: flex; flex: 1; min-height: 0; }
 /* the terminal                                                              */
 /* ------------------------------------------------------------------------- */
 
+/* Edge to edge, and no padding anywhere in here.
+
+   There was 6px by 8px on `.xterm`, and every part of it was working against
+   the pane. It was subtracted from the width columns were fitted into, so it
+   cost a column rather than framing one; and the viewport is `inset: 0` against
+   `.xterm`, which lands it over the padding rather than inside it -- so the
+   padding was never the pane's surface showing through, it was the emulator's
+   own, in whatever colour the theme said.
+
+   What is left at the right and the bottom is not padding and cannot be styled
+   away: a grid draws whole cells, so the last column and the last row leave up
+   to one of each over. Both are the pane's own surface, which is why neither
+   reads as a border. See `gridFor` in Terminal.tsx for the rest of it. */
 .terminal { height: 100%; width: 100%; background: var(--sunken); }
-.terminal .xterm { height: 100%; padding: 6px 8px; }
+.terminal .xterm { height: 100%; width: 100%; }
 
 /* xterm.css paints the viewport `#000`, for a macOS native scrollbar that this
    build does not have -- xterm 6 draws its own slider as an element instead.
-   Left as it is, that black is the only black in the window, and it is the part
-   of the pane you see: the viewport is `inset: 0` against `.xterm`, which puts
-   it over the padding above rather than inside it, so the terminal ends up
-   framed on all four sides in a colour from no palette. The frame is thickest
-   on the right and the bottom, where `FitAddon` leaves the scrollbar's width
-   and whatever is left over from the last whole row. The pane's own surface is
-   the one that should show through all of it. */
+   Left as it is, that black is the only black in the window, and it is most of
+   what you see of the pane: the terminal ends up framed in a colour from no
+   palette, thickest along the two edges described above. The pane's own surface
+   is the one that should show through. */
 .terminal .xterm-viewport { background-color: transparent; }
 
-/* xterm's slider, wearing the window's scrollbar. The same trick as
-   `.scrollbar-sleek` at the top of this file -- colour clipped to the padding
-   box inside a transparent border, so a 14px scrollbar shows a 6px thumb that
-   floats clear of the text -- and the colour itself comes from the same two
-   custom properties, handed to xterm by `Terminal.tsx` as part of the theme.
+/* No scrollbar on the agent's screen.
 
-   One class more specific than the rule xterm injects, and it has to be. That
-   rule sets `background`, the shorthand, which resets `background-clip` to
-   `border-box` along with it -- so at equal specificity the thumb keeps the
-   colour and loses the inset, and a 14px slab is what you get. Colour is still
-   xterm's: nothing here declares it. */
-.terminal .xterm .xterm-scrollable-element > .scrollbar > .slider {
-  background-clip: padding-box;
-  border: 4px solid transparent;
-  border-radius: 999px;
-}
+   Everywhere else in the window a scrollbar is worth its width: it says how
+   much there is and where you are in it. Here it says neither usefully. The
+   scrollback in this pane is a cache -- the sandbox's tmux holds the history
+   that matters, and this is only what can be scrolled back to without asking
+   for it again -- so the slider measures the cache rather than the session, and
+   the wheel reaches all of it without one.
+
+   What it cost was the full width of the pane. The columns are fitted to the
+   pane now rather than to the pane minus a scrollbar, so a rule the agent draws
+   across its own screen reaches both edges; leaving the scrollbar visible would
+   have put it on top of the last two characters of every line that is full.
+   Hidden, not removed: the element still scrolls, it just does not draw. */
+.terminal .xterm .xterm-scrollable-element > .scrollbar { display: none; }
 
 /* Where the engine could not measure the font, xterm's rows are drawn two
    pixels too high and clipped -- see charSize.ts, which adds this class. The
